@@ -259,20 +259,32 @@ fn log_line(logs: &Arc<Mutex<Vec<String>>>, message: impl Into<String>) {
     }
 }
 
-fn config_path() -> Result<PathBuf, String> {
+#[cfg(target_os = "windows")]
+fn app_config_dir(app_name: &str) -> Result<PathBuf, String> {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return Ok(Path::new(&appdata).join(app_name));
+    }
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        return Ok(Path::new(&profile)
+            .join("AppData")
+            .join("Roaming")
+            .join(app_name));
+    }
+    Err("APPDATA and USERPROFILE are not set".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn app_config_dir(app_name: &str) -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-    Ok(Path::new(&home)
-        .join(".config")
-        .join("secret-tunnel")
-        .join("config.json"))
+    Ok(Path::new(&home).join(".config").join(app_name))
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    Ok(app_config_dir("secret-tunnel")?.join("config.json"))
 }
 
 fn legacy_config_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-    Ok(Path::new(&home)
-        .join(".config")
-        .join("fr-tunnel-desktop")
-        .join("config.json"))
+    Ok(app_config_dir("fr-tunnel-desktop")?.join("config.json"))
 }
 
 fn default_config() -> AppConfig {
@@ -384,6 +396,12 @@ fn expand_home(path: &str) -> String {
     if let Some(stripped) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
             return format!("{home}/{stripped}");
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            return Path::new(&profile)
+                .join(stripped)
+                .to_string_lossy()
+                .to_string();
         }
     }
     path.to_string()

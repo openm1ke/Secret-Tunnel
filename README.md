@@ -17,6 +17,12 @@ Desktop app for managing SSH dynamic SOCKS tunnels.
 ~/.config/secret-tunnel/config.json
 ```
 
+On Windows the config is stored in:
+
+```powershell
+%APPDATA%\secret-tunnel\config.json
+```
+
 - The main screen lets you choose a server profile and a local proxy profile, then start or stop the tunnel.
 - The status block shows tunnel state, proxy IP, country flag/country, and total received/sent traffic.
 - The status block also shows the active SSH engine and app version to make support/debugging easier.
@@ -81,10 +87,132 @@ Official Tauri prerequisites:
 - https://v2.tauri.app/start/prerequisites/
 - https://v2.tauri.app/distribute/
 
+## Windows Install And Build
+
+Open PowerShell as Administrator and install the base tools:
+
+```powershell
+winget install --id Git.Git -e
+winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Rustlang.Rustup -e
+winget install --id Microsoft.EdgeWebView2Runtime -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e
+```
+
+In the Visual Studio Build Tools installer, select:
+
+```text
+Desktop development with C++
+```
+
+Restart PowerShell and verify the tools:
+
+```powershell
+node -v
+npm -v
+rustup -V
+cargo -V
+git --version
+```
+
+Switch Rust to the MSVC toolchain:
+
+```powershell
+rustup default stable-msvc
+```
+
+Clone the project:
+
+```powershell
+git clone https://github.com/openm1ke/Secret-Tunnel.git
+cd Secret-Tunnel
+```
+
+Install npm dependencies:
+
+```powershell
+npm install
+```
+
+If PowerShell blocks `npm.ps1` with `PSSecurityException`, either use `npm.cmd`:
+
+```powershell
+npm.cmd install
+npm.cmd run tauri:dev
+npm.cmd run tauri:build
+```
+
+Or allow locally installed scripts for the current user:
+
+```powershell
+Get-ExecutionPolicy -List
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+Answer `Y`, close PowerShell, open it again, then run:
+
+```powershell
+npm -v
+npm install
+```
+
+Run in development mode:
+
+```powershell
+npm run tauri:dev
+```
+
+Build the normal Windows app:
+
+```powershell
+npm run tauri:build
+```
+
+Build with the embedded Rust SSH engine:
+
+```powershell
+npm run tauri -- build --features embedded-ssh
+```
+
+Windows bundle artifacts are created under:
+
+```powershell
+src-tauri\target\release\bundle\
+```
+
+The helper script is a Bash script. On Windows, run it from Git Bash:
+
+```bash
+npm run release
+scripts/build-release.sh windows
+npm run release:embedded
+```
+
+For `System OpenSSH`, Windows must have `ssh.exe`:
+
+```powershell
+ssh -V
+```
+
+If it is missing, enable OpenSSH Client:
+
+```powershell
+Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Client*'
+Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+```
+
+For `Embedded Rust SSH`, build with `--features embedded-ssh`; the tunnel can run without `ssh.exe`.
+
+If the app starts but server/proxy/settings changes are not saved, check the local config file:
+
+```powershell
+notepad "$env:APPDATA\secret-tunnel\config.json"
+```
+
 ## Install project dependencies
 
 ```bash
-cd fr-tunnel-desktop
+cd Secret-Tunnel
 npm install
 ```
 

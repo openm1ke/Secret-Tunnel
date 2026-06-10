@@ -2,6 +2,10 @@
 
 Desktop app for managing SSH dynamic SOCKS tunnels.
 
+![Secret Tunnel connection screen](docs/screenshots/connection.svg)
+
+![Secret Tunnel settings screen](docs/screenshots/settings.svg)
+
 ## What is inside
 
 - `src/` - React/Vite interface.
@@ -19,6 +23,22 @@ Desktop app for managing SSH dynamic SOCKS tunnels.
 - The traffic graph reads per-process counters for the child `ssh` process in System OpenSSH mode. On macOS it uses `nettop`; other operating systems need their own sampler implementation. Embedded Rust SSH mode counts received/sent bytes inside the forwarding loop.
 - The IP and country lookup uses the IPinfo Lite API through the running SOCKS proxy. Add the token on the Settings tab.
 - The Settings tab includes inline help, per-setting defaults, and an option to clear runtime logs on tunnel start.
+
+## Settings
+
+The Settings tab has inline `?` tooltips for each option.
+
+| Setting | What it does | Recommended value |
+| --- | --- | --- |
+| `SSH engine` | Chooses how the tunnel is created. `System OpenSSH` starts the system `ssh` binary. `Embedded Rust SSH` runs SSH/SOCKS forwarding inside the app via `russh`. | Use `System OpenSSH` for the most stable mode. Use `Embedded Rust SSH` when you build with `--embedded` or need Windows operation without `ssh.exe`. |
+| `IPinfo token` | Enables proxy IP, country, and flag lookup through the running SOCKS proxy. | Optional. Leave empty if you do not need IP/country display. |
+| `Hide IPs and tokens by default` | Masks sensitive values in the UI until the eye button is clicked. | On. Useful for screenshots, streams, and support tickets. |
+| `Verify SOCKS proxy after startup` | Runs a test request through the local SOCKS proxy after the tunnel starts. | On. It catches broken tunnels early. |
+| `Auto reconnect tunnel` | Restarts the selected tunnel after an unexpected SSH exit. | Optional. Enable for long-running connections. |
+| `Start selected tunnel on app launch` | Starts the selected server/proxy pair when the app opens. | Off until the selected profile is tested. |
+| `Clear logs on tunnel start` | Clears Runtime logs before starting a new tunnel. | Optional. Enable when debugging one clean run at a time. |
+| `Reconnect delay, sec` | Wait time before auto reconnect. | `3` to `5` seconds is usually enough. |
+| `Default` | Resets only application settings to safe defaults. Server and proxy profiles are not removed. | Use when settings become confusing. |
 
 ## Install prerequisites
 

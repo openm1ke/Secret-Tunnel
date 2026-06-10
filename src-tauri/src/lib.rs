@@ -283,10 +283,6 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(app_config_dir("secret-tunnel")?.join("config.json"))
 }
 
-fn legacy_config_path() -> Result<PathBuf, String> {
-    Ok(app_config_dir("fr-tunnel-desktop")?.join("config.json"))
-}
-
 fn default_config() -> AppConfig {
     AppConfig {
         selected_server_id: "example".to_string(),
@@ -363,15 +359,6 @@ fn parse_config(raw: &str) -> Result<AppConfig, String> {
 fn load_config() -> Result<AppConfig, String> {
     let path = config_path()?;
     if !path.exists() {
-        if let Ok(legacy_path) = legacy_config_path() {
-            if legacy_path.exists() {
-                let raw = fs::read_to_string(legacy_path).map_err(|error| error.to_string())?;
-                let config = parse_config(&raw)?;
-                save_config(config.clone())?;
-                return Ok(config);
-            }
-        }
-
         let config = default_config();
         save_config(config.clone())?;
         return Ok(config);

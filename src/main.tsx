@@ -369,6 +369,8 @@ function App() {
   const [showServerHost, setShowServerHost] = useState(false);
   const [showIpinfoToken, setShowIpinfoToken] = useState(false);
   const [copiedField, setCopiedField] = useState<CopyField>(null);
+  const serverDraftDirtyRef = useRef(false);
+  const proxyDraftDirtyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
 
   const currentServer = useMemo(() => selectedServer(config), [config]);
@@ -391,8 +393,8 @@ function App() {
       setTraffic(nextTraffic);
       setLogs(nextLogs);
       if (!settingsDirtyRef.current) setSettingsDraft(nextConfig.settings);
-      if (!serverDraft.id) setServerDraft(selectedServer(nextConfig));
-      if (!proxyDraft.id) setProxyDraft(selectedProxy(nextConfig));
+      setServerDraft((current) => (serverDraftDirtyRef.current ? current : selectedServer(nextConfig)));
+      setProxyDraft((current) => (proxyDraftDirtyRef.current ? current : selectedProxy(nextConfig)));
     } catch (error) {
       setMessage(String(error));
     }
@@ -414,6 +416,7 @@ function App() {
   }
 
   function updateServer<K extends keyof ServerProfile>(key: K, value: ServerProfile[K]) {
+    serverDraftDirtyRef.current = true;
     setServerDraft((current) => ({
       ...current,
       [key]: value,
@@ -422,6 +425,7 @@ function App() {
   }
 
   function updateProxy<K extends keyof ProxyProfile>(key: K, value: ProxyProfile[K]) {
+    proxyDraftDirtyRef.current = true;
     setProxyDraft((current) => ({
       ...current,
       [key]: value,
@@ -707,14 +711,20 @@ function App() {
                     <button
                       key={server.id}
                       className={server.id === config.selected_server_id ? "serverItem selected" : "serverItem"}
-                      onClick={() => setServerDraft(server)}
+                      onClick={() => {
+                        serverDraftDirtyRef.current = true;
+                        setServerDraft(server);
+                      }}
                     >
                       <span>{server.name}</span>
                       <strong>{server.user}@{maskValue(server.host)}:{server.port}</strong>
                     </button>
                   ))}
                 </div>
-                <button onClick={() => setServerDraft(emptyServer)}>
+                <button onClick={() => {
+                  serverDraftDirtyRef.current = true;
+                  setServerDraft(emptyServer);
+                }}>
                   <Plus size={16} />
                   Новый сервер
                 </button>
@@ -814,8 +824,11 @@ function App() {
                 </div>
                 <div className="actions left">
                   <button className="primary" disabled={busy !== null} onClick={() => runAction("save", async () => {
-                    await invoke<AppConfig>("save_server", { server: serverDraft });
-                    await invoke<AppConfig>("select_server", { id: serverDraft.id });
+                    const savedServer = serverDraft;
+                    await invoke<AppConfig>("save_server", { server: savedServer });
+                    await invoke<AppConfig>("select_server", { id: savedServer.id });
+                    serverDraftDirtyRef.current = false;
+                    setServerDraft(savedServer);
                     return "Server saved";
                   })}>
                     <Save size={16} />
@@ -827,6 +840,7 @@ function App() {
                   </button>
                   <button disabled={busy !== null || !serverDraft.id || connected} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_server", { id: serverDraft.id });
+                    serverDraftDirtyRef.current = false;
                     setServerDraft(emptyServer);
                     return "Server deleted";
                   })}>
@@ -850,14 +864,20 @@ function App() {
                     <button
                       key={proxy.id}
                       className={proxy.id === config.selected_proxy_id ? "serverItem selected" : "serverItem"}
-                      onClick={() => setProxyDraft(proxy)}
+                      onClick={() => {
+                        proxyDraftDirtyRef.current = true;
+                        setProxyDraft(proxy);
+                      }}
                     >
                       <span>{proxy.name}</span>
                       <strong>{proxy.host}:{proxy.port}</strong>
                     </button>
                   ))}
                 </div>
-                <button onClick={() => setProxyDraft(emptyProxy)}>
+                <button onClick={() => {
+                  proxyDraftDirtyRef.current = true;
+                  setProxyDraft(emptyProxy);
+                }}>
                   <Plus size={16} />
                   Новый прокси
                 </button>
@@ -888,8 +908,11 @@ function App() {
                 </div>
                 <div className="actions left">
                   <button className="primary" disabled={busy !== null || connected} onClick={() => runAction("save", async () => {
-                    await invoke<AppConfig>("save_proxy", { proxy: proxyDraft });
-                    await invoke<AppConfig>("select_proxy", { id: proxyDraft.id });
+                    const savedProxy = proxyDraft;
+                    await invoke<AppConfig>("save_proxy", { proxy: savedProxy });
+                    await invoke<AppConfig>("select_proxy", { id: savedProxy.id });
+                    proxyDraftDirtyRef.current = false;
+                    setProxyDraft(savedProxy);
                     return "Proxy saved";
                   })}>
                     <Save size={16} />
@@ -897,6 +920,7 @@ function App() {
                   </button>
                   <button disabled={busy !== null || !proxyDraft.id || connected} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_proxy", { id: proxyDraft.id });
+                    proxyDraftDirtyRef.current = false;
                     setProxyDraft(emptyProxy);
                     return "Proxy deleted";
                   })}>

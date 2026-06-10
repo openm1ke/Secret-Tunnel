@@ -1,3 +1,3 @@
 fn main() {
-    fr_tunnel_desktop_lib::run()
+    secret_tunnel_lib::run()
 }

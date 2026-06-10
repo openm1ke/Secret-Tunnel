@@ -1,5 +1,5 @@
 [package]
-name = "fr-tunnel-desktop"
+name = "secret-tunnel"
 version = "0.1.0"
 description = "Desktop SSH SOCKS tunnel manager"
 authors = ["Secret Tunnel contributors"]
@@ -10,7 +10,7 @@ default = []
 embedded-ssh = ["dep:russh", "dep:tokio"]
 
 [lib]
-name = "fr_tunnel_desktop_lib"
+name = "secret_tunnel_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

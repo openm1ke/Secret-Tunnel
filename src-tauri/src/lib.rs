@@ -1303,6 +1303,7 @@ fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             let should_start = load_config()

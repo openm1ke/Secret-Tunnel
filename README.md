@@ -24,6 +24,7 @@ On Windows the config is stored in:
 ```
 
 - The main screen lets you choose a server profile and a local proxy profile, then start or stop the tunnel.
+- Server profiles support picking an SSH private key through the native file dialog.
 - The status block shows tunnel state, proxy IP, country flag/country, and total received/sent traffic.
 - The status block also shows the active SSH engine and app version to make support/debugging easier.
 - The traffic graph reads per-process counters for the child `ssh` process in System OpenSSH mode. On macOS it uses `nettop`; other operating systems need their own sampler implementation. Embedded Rust SSH mode counts received/sent bytes inside the forwarding loop.

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   CircleStop,
   Check,
@@ -8,6 +9,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  FolderOpen,
   HelpCircle,
   Play,
   Plus,
@@ -432,6 +434,21 @@ function App() {
     setSettingsDraft((current) => ({ ...current, [key]: value }));
   }
 
+  async function choosePrivateKey() {
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        title: "Select SSH private key",
+      });
+      if (typeof selected === "string" && selected.trim()) {
+        updateServer("key_path", selected);
+      }
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
   async function setSensitiveVisible(visible: boolean) {
     await runAction("save", async () => {
       const nextSettings = { ...config.settings, hide_sensitive: !visible };
@@ -757,7 +774,18 @@ function App() {
                   </label>
                   <label className="wide">
                     SSH key
-                    <input value={serverDraft.key_path} onChange={(event) => updateServer("key_path", event.target.value)} placeholder="~/.ssh/id_ed25519" />
+                    <div className="fileField">
+                      <input value={serverDraft.key_path} onChange={(event) => updateServer("key_path", event.target.value)} placeholder="~/.ssh/id_ed25519" />
+                      <button
+                        type="button"
+                        className="iconButton"
+                        title="Выбрать SSH private key"
+                        aria-label="Выбрать SSH private key"
+                        onClick={choosePrivateKey}
+                      >
+                        <FolderOpen size={16} />
+                      </button>
+                    </div>
                   </label>
                   <label>
                     StrictHostKeyChecking

@@ -1,0 +1,24 @@
+[package]
+name = "fr-tunnel-desktop"
+version = "0.1.0"
+description = "Desktop SSH SOCKS tunnel manager"
+authors = ["Secret Tunnel contributors"]
+edition = "2021"
+
+[features]
+default = []
+embedded-ssh = ["dep:russh", "dep:tokio"]
+
+[lib]
+name = "fr_tunnel_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.1", features = [] }
+
+[dependencies]
+russh = { version = "0.61", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.0", features = [] }
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time"], optional = true }

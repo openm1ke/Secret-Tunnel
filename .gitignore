@@ -37,12 +37,15 @@ __pycache__/
 android/.gradle/
 android/local.properties
 android/app/build/
+android/traffic-probe/build/
 android/app/src/main/jniLibs/
 android/app/src/main/assets/licenses/
 android/app/src/main/assets/hev-revision.txt
 android/native/target/
 tunnel-core/target/
 artifacts/
+output/playwright/
+.playwright-cli/
 src-tauri/resources/
 *.jks
 *.keystore

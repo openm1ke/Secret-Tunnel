@@ -16,7 +16,12 @@ fi
 [[ $(git -C "$hev" rev-parse HEAD) == "$revision" ]] || { echo 'Unexpected hev revision' >&2; exit 1; }
 [[ -z $(git -C "$hev" status --porcelain) ]] || { echo 'hev sources have local changes' >&2; exit 1; }
 git -C "$hev" submodule status --recursive | awk '/^[+-U]/{bad=1} END {exit bad}'
-llvm="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+case "$(uname -s)" in
+    Darwin) ndk_host=darwin-x86_64 ;;
+    Linux) ndk_host=linux-x86_64 ;;
+    *) echo 'Run this script on macOS, Linux, or in WSL' >&2; exit 1 ;;
+esac
+llvm="$ndk/toolchains/llvm/prebuilt/$ndk_host/bin"
 [[ -f "$ndk/source.properties" && -f "$llvm/clang-18" ]] || { echo 'Expected Android NDK 27 toolchain directory' >&2; exit 1; }
 # Older SDKs copied to NTFS can retain read-only attributes which drvfs maps
 # to unusable modes. Repair only this user's NDK, only when it is unusable.
@@ -83,11 +88,12 @@ if [[ -n ${GRADLE_CMD:-} ]]; then gradle=("$GRADLE_CMD")
 elif [[ -x "$work/gradle-local/bin/gradle" ]]; then gradle=("$work/gradle-local/bin/gradle")
 else gradle=(bash "$repo/android/gradlew"); fi
 variant=${ANDROID_BUILD_TYPE:-debug}
-case "$variant" in debug) tasks=(testDebugUnitTest assembleDebug lintDebug);; release) tasks=(testReleaseUnitTest assembleRelease lintRelease);; *) echo 'ANDROID_BUILD_TYPE must be debug or release' >&2; exit 1;; esac
+case "$variant" in debug) tasks=(:app:testDebugUnitTest :app:assembleDebug :app:lintDebug);; release) tasks=(:app:testReleaseUnitTest :app:assembleRelease :app:lintRelease);; *) echo 'ANDROID_BUILD_TYPE must be debug or release' >&2; exit 1;; esac
 "${gradle[@]}" -p "$repo/android" --no-daemon "${tasks[@]}"
 mkdir -p "$repo/artifacts/android"
 apk="$repo/artifacts/android/SecretTunnel-$variant.apk"
 cp "$repo/android/app/build/outputs/apk/$variant/app-$variant.apk" "$apk"
 python3 "$repo/scripts/check-android-apk.py" "$apk"
 "$JAVA_HOME/bin/java" -jar "$sdk/build-tools/34.0.0/lib/apksigner.jar" verify --verbose "$apk"
-sha256sum "$apk"
+if command -v sha256sum >/dev/null 2>&1; then sha256sum "$apk"
+else shasum -a 256 "$apk"; fi

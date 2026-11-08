@@ -110,12 +110,15 @@ class MainActivity:Activity() {
         badge=label("Остановлен",11).apply{setPadding(dp(12),dp(7),dp(12),dp(7));background=Palette.panel(Palette.raised,dp(20).toFloat())};header.addView(badge);root.addView(header)
         content=FrameLayout(this);root.addView(content,LinearLayout.LayoutParams(-1,0,1f))
         val nav=row().apply{setPadding(dp(8),dp(8),dp(8),dp(9));setBackgroundColor(Palette.surface)}
-        for((id,title) in listOf("home" to "Главная","servers" to "Серверы","proxies" to "Прокси","apps" to "Прилож.","logs" to "Журнал")){
+        for((id,title) in listOf("home" to "Главная","servers" to "Серверы","proxies" to "Прокси","apps" to "Приложения","logs" to "Журнал")){
             val active=page==id||(page=="serverEditor"&&id=="servers")||(page=="proxyEditor"&&id=="proxies")
             nav.addView(column().apply{gravity=Gravity.CENTER;minimumHeight=dp(56);contentDescription=title
                 if(active)background=Palette.panel(Palette.raised,dp(15).toFloat())
                 addView(NavigationIcon(this@MainActivity,id,if(active)Palette.accent else Palette.muted),LinearLayout.LayoutParams(dp(23),dp(23)))
-                addView(label(title,10,active,if(active)Palette.accent else Palette.muted).apply{setPadding(0,dp(5),0,0)})
+                addView(label(title,11,active,if(active)Palette.accent else Palette.muted).apply{
+                    gravity=Gravity.CENTER;maxLines=1;setPadding(dp(2),dp(5),dp(2),0)
+                    setAutoSizeTextTypeUniformWithConfiguration(9,11,1,android.util.TypedValue.COMPLEX_UNIT_SP)
+                },LinearLayout.LayoutParams(-1,dp(24)))
                 setOnClickListener{go(id)}
             },LinearLayout.LayoutParams(0,-2,1f))
         };root.addView(nav);setContentView(root)
@@ -141,7 +144,7 @@ class MainActivity:Activity() {
         metrics.addView(metric("↓  Загрузка",Palette.accent,true),LinearLayout.LayoutParams(0,-1,1f).apply{marginEnd=dp(6)})
         metrics.addView(metric("↑  Отправка",Palette.upload,false),LinearLayout.LayoutParams(0,-1,1f).apply{marginStart=dp(6)});body.addView(metrics,spaced(12))
         val graph=card();graph.addView(label("Скорость за последнюю минуту",14,true));chart=NetworkChart(this).also{graph.addView(it,LinearLayout.LayoutParams(-1,dp(110)).apply{topMargin=dp(10)})};body.addView(graph,spaced(12))
-        body.addView(button("Приложения через туннель · ${store.packages.size}"){go("apps")},spaced(12))
+        body.addView(button(if(store.packages.isEmpty())"Выбрать приложения" else "Выбрать приложения · ${store.packages.size}"){go("apps")},spaced(12))
     }
 
     private fun serversPage(){

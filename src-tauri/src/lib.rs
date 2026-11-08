@@ -12,6 +12,7 @@ use tauri::{Manager, State, WindowEvent};
 
 // Console utilities must stay in the background when launched by the GUI.
 fn background_command(program: &str) -> Command {
+    #[allow(unused_mut)]
     let mut command = Command::new(program);
     #[cfg(target_os = "windows")]
     {
@@ -25,9 +26,22 @@ fn background_command(program: &str) -> Command {
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 mod app_redirect;
 mod installed_apps;
+#[cfg(target_os = "macos")]
+mod macos_apps;
+#[cfg(target_os = "macos")]
+mod macos_redirect;
+#[cfg(not(target_os = "macos"))]
+use app_redirect as platform_redirect;
 pub use installed_apps::InstalledApp;
+#[cfg(target_os = "macos")]
+use macos_redirect as platform_redirect;
+#[cfg(target_os = "macos")]
+pub use macos_redirect::guardian_if_requested as run_redirect_guardian_if_requested;
+#[cfg(target_os = "macos")]
+pub use macos_redirect::profile as macos_application_profile;
 
 /// Local application inventory, also used by the diagnostic example.
 pub fn application_catalog() -> Result<Vec<InstalledApp>, String> {
@@ -245,25 +259,33 @@ fn default_true() -> bool {
 }
 
 fn default_redirect_processes() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    return Vec::new();
+    #[cfg(not(target_os = "macos"))]
     vec!["Discord.exe".into()]
 }
 
 fn default_redirect_cli() -> String {
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            let bundled = directory.join("tools/proxybridge/ProxyBridge_CLI.exe");
-            if bundled.is_file() {
-                return bundled.to_string_lossy().into_owned();
+    #[cfg(target_os = "macos")]
+    return macos_redirect::EXECUTABLE.into();
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(directory) = executable.parent() {
+                let bundled = directory.join("tools/proxybridge/ProxyBridge_CLI.exe");
+                if bundled.is_file() {
+                    return bundled.to_string_lossy().into_owned();
+                }
             }
         }
+        app_config_dir("secret-tunnel")
+            .map(|dir| {
+                dir.join("tools/proxybridge/ProxyBridge_CLI.exe")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default()
     }
-    app_config_dir("secret-tunnel")
-        .map(|dir| {
-            dir.join("tools/proxybridge/ProxyBridge_CLI.exe")
-                .to_string_lossy()
-                .into_owned()
-        })
-        .unwrap_or_default()
 }
 
 fn default_ssh_engine() -> String {
@@ -297,7 +319,7 @@ fn default_reconnect_delay_seconds() -> u16 {
 
 #[derive(Default)]
 struct AppState {
-    redirect: Mutex<app_redirect::RedirectState>,
+    redirect: Mutex<platform_redirect::RedirectState>,
     runtime: Mutex<Option<TunnelRuntime>>,
     logs: Arc<Mutex<Vec<String>>>,
     traffic: Mutex<Vec<TrafficPoint>>,
@@ -464,6 +486,12 @@ fn validate_server(server: &ServerProfile) -> Result<(), String> {
     if server.host.trim().is_empty() || server.user.trim().is_empty() {
         return Err("Server host and SSH user are required".to_string());
     }
+    if [&server.host, &server.user]
+        .iter()
+        .any(|value| value.starts_with('-') || value.chars().any(char::is_control))
+    {
+        return Err("SSH host/user cannot start with '-' or contain control characters".into());
+    }
     if server.port == 0 {
         return Err("SSH port must be in range 1..65535".to_string());
     }
@@ -490,8 +518,15 @@ fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
     if proxy.id.trim().is_empty() || proxy.name.trim().is_empty() {
         return Err("Proxy id and name are required".to_string());
     }
-    if proxy.host.trim().is_empty() {
-        return Err("Proxy host is required".to_string());
+    if !proxy
+        .host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+    {
+        return Err(
+            "SOCKS без пароля разрешён только на loopback: используйте 127.0.0.1 или ::1"
+                .to_string(),
+        );
     }
     if proxy.port == 0 {
         return Err("Proxy port must be in range 1..65535".to_string());
@@ -502,18 +537,23 @@ fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
 fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     secret_tunnel_routing::validate(&settings.domain_rules)?;
     if !settings.redirect_processes.is_empty() || !settings.domain_rules.is_empty() {
-        let current = std::env::current_exe().map_err(|e| e.to_string())?;
-        let own_exe = current
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("secret-tunnel.exe");
-        app_redirect::domain_profile(
-            &settings.redirect_processes,
-            &settings.domain_rules,
-            "127.0.0.1",
-            1080,
-            own_exe,
-        )?;
+        #[cfg(target_os = "macos")]
+        macos_redirect::validate_ids(&settings.redirect_processes)?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let current = std::env::current_exe().map_err(|e| e.to_string())?;
+            let own_exe = current
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("secret-tunnel.exe");
+            app_redirect::domain_profile(
+                &settings.redirect_processes,
+                &settings.domain_rules,
+                "127.0.0.1",
+                1080,
+                own_exe,
+            )?;
+        }
     }
     match settings.ssh_engine.as_str() {
         "system" | "embedded" => {}
@@ -904,15 +944,21 @@ fn save_settings(settings: AppSettings) -> Result<AppConfig, String> {
     save_config(config)
 }
 
+#[tauri::command]
+fn default_settings() -> AppSettings {
+    AppSettings::default()
+}
+
 #[tauri::command(async)]
 fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
-    state.redirect.lock().map_err(|e| e.to_string())?.stop();
+    let redirect_result = stop_application_redirect(&state);
     {
         let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
         if let Some(runtime) = runtime_guard.take() {
             runtime.stop(&state.logs);
         }
     }
+    redirect_result?;
     if let Ok(mut traffic) = state.traffic.lock() {
         traffic.clear();
     }
@@ -962,6 +1008,7 @@ fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<Stri
         .arg(server.port.to_string())
         .arg("-i")
         .arg(key_path)
+        .arg("--")
         .arg(destination)
         .arg("exit")
         .output()
@@ -1162,6 +1209,7 @@ fn start_system_ssh_tunnel(
         .arg(&proxy_addr)
         .arg("-i")
         .arg(&key_path)
+        .arg("--")
         .arg(destination)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1228,18 +1276,20 @@ fn start_system_ssh_tunnel(
 
 #[tauri::command(async)]
 fn stop_tunnel(state: State<'_, AppState>) -> Result<String, String> {
-    state.redirect.lock().map_err(|e| e.to_string())?.stop();
+    let redirect_result = stop_application_redirect(&state);
     let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
     let Some(runtime) = runtime_guard.take() else {
+        redirect_result?;
         return Ok("Tunnel is already stopped".to_string());
     };
     runtime.stop(&state.logs);
+    redirect_result?;
     Ok("Tunnel stopped".to_string())
 }
 
 #[tauri::command(async)]
 fn restart_tunnel(state: State<'_, AppState>) -> Result<String, String> {
-    let _ = stop_tunnel(state.clone());
+    stop_tunnel(state.clone())?;
     thread::sleep(Duration::from_millis(500));
     start_tunnel(state)
 }
@@ -1269,6 +1319,9 @@ fn tunnel_status(state: State<'_, AppState>) -> Result<TunnelStatus, String> {
     }
 
     if let Some(mut status) = reconnect_status {
+        // A failed SSH transport must not leave a running routing process pointed
+        // at a dead SOCKS endpoint. Re-enabling interception is an explicit action.
+        stop_application_redirect(&state)?;
         if config.settings.auto_reconnect {
             let delay = config.settings.reconnect_delay_seconds.max(1);
             log_line(
@@ -1329,20 +1382,28 @@ fn redirect_status(state: State<'_, AppState>) -> Result<app_redirect::RedirectS
     } else {
         config.settings.redirect_cli_path
     };
-    status.component_available = Path::new(&executable).is_file()
-        && Path::new(&executable)
-            .parent()
-            .map(|directory| {
-                [
-                    "ProxyBridgeCore.dll",
-                    "WinDivert.dll",
-                    "WinDivert64.sys",
-                    "source-revision.txt",
-                ]
-                .iter()
-                .all(|file| directory.join(file).is_file())
-            })
-            .unwrap_or(false);
+    #[cfg(target_os = "macos")]
+    {
+        status.component_available = macos_redirect::component_available(Path::new(&executable));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        status.component_available = cfg!(windows)
+            && Path::new(&executable).is_file()
+            && Path::new(&executable)
+                .parent()
+                .map(|directory| {
+                    [
+                        "ProxyBridgeCore.dll",
+                        "WinDivert.dll",
+                        "WinDivert64.sys",
+                        "source-revision.txt",
+                    ]
+                    .iter()
+                    .all(|file| directory.join(file).is_file())
+                })
+                .unwrap_or(false);
+    }
     Ok(status)
 }
 
@@ -1366,51 +1427,109 @@ fn scan_installed_applications() -> Result<Vec<installed_apps::InstalledApp>, St
 }
 
 #[tauri::command(async)]
+fn resolve_application_paths(paths: Vec<String>) -> Result<Vec<InstalledApp>, String> {
+    if paths.len() > 64 {
+        return Err("Выберите не более 64 приложений за один раз".into());
+    }
+    #[cfg(target_os = "macos")]
+    return paths
+        .iter()
+        .map(|path| macos_apps::describe(Path::new(path)))
+        .collect();
+    #[cfg(not(target_os = "macos"))]
+    Err("Чтение .app доступно только на macOS".into())
+}
+
+fn stop_application_redirect(state: &AppState) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return state.redirect.lock().map_err(|e| e.to_string())?.stop();
+    #[cfg(not(target_os = "macos"))]
+    {
+        state.redirect.lock().map_err(|e| e.to_string())?.stop();
+        Ok(())
+    }
+}
+
+#[tauri::command(async)]
 fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
     let config = load_config()?;
     let proxy = {
-        let runtime = state.runtime.lock().map_err(|e| e.to_string())?;
-        let runtime = runtime.as_ref().ok_or("Сначала запустите SSH-туннель")?;
-        if runtime.ssh_engine() != "embedded" {
+        let mut runtime = state.runtime.lock().map_err(|e| e.to_string())?;
+        let runtime = runtime.as_mut().ok_or("Сначала запустите SSH-туннель")?;
+        if let Some(error) = runtime.try_wait()? {
+            return Err(format!("SSH-туннель уже завершился: {error}"));
+        }
+        if !cfg!(target_os = "macos") && runtime.ssh_engine() != "embedded" {
             return Err("Для TCP и UDP выберите Embedded Rust SSH и перезапустите туннель".into());
         }
-        runtime.proxy.clone()
+        (runtime.proxy.clone(), runtime.ssh_engine() == "embedded")
     };
-    let own_exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let own_exe = own_exe
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("Не удалось определить имя клиента")?;
-    let value = app_redirect::domain_profile(
-        &config.settings.redirect_processes,
-        &config.settings.domain_rules,
-        &proxy.host,
-        proxy.port,
-        own_exe,
-    )?;
-    let profile_path = app_config_dir("secret-tunnel")?.join("applications.pbprofile");
-    let executable = if config.settings.redirect_cli_path.trim().is_empty() {
-        default_redirect_cli()
-    } else {
-        config.settings.redirect_cli_path.clone()
-    };
-    state.redirect.lock().map_err(|e| e.to_string())?.start(
-        Path::new(&executable),
-        &profile_path,
-        &value,
-        Arc::clone(&state.logs),
-        config.settings.hide_sensitive,
-    )?;
-    log_line(&state.logs, "Перехват выбранных приложений включён");
-    Ok(
-        "Перехват включён. Перезапустите выбранные программы, чтобы создать новые соединения"
-            .into(),
-    )
+    let (proxy, udp) = proxy;
+    #[cfg(target_os = "macos")]
+    {
+        let value = macos_redirect::profile(
+            &config.settings.redirect_processes,
+            &config.settings.domain_rules,
+            &proxy.host,
+            proxy.port,
+            udp,
+        )?;
+        let executable = if config.settings.redirect_cli_path.trim().is_empty() {
+            default_redirect_cli()
+        } else {
+            config.settings.redirect_cli_path.clone()
+        };
+        state.redirect.lock().map_err(|e| e.to_string())?.start(
+            Path::new(&executable),
+            &value,
+            Arc::clone(&state.logs),
+            config.settings.hide_sensitive,
+        )?;
+        log_line(
+            &state.logs,
+            "Запрошен запуск перехвата macOS; ожидаем подтверждение расширения",
+        );
+        Ok("Запускаем расширение ProxyBridge. При первом запуске разрешите расширение и сетевую конфигурацию в настройках macOS".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = udp;
+        let own_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let own_exe = own_exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("Не удалось определить имя клиента")?;
+        let value = app_redirect::domain_profile(
+            &config.settings.redirect_processes,
+            &config.settings.domain_rules,
+            &proxy.host,
+            proxy.port,
+            own_exe,
+        )?;
+        let profile_path = app_config_dir("secret-tunnel")?.join("applications.pbprofile");
+        let executable = if config.settings.redirect_cli_path.trim().is_empty() {
+            default_redirect_cli()
+        } else {
+            config.settings.redirect_cli_path.clone()
+        };
+        state.redirect.lock().map_err(|e| e.to_string())?.start(
+            Path::new(&executable),
+            &profile_path,
+            &value,
+            Arc::clone(&state.logs),
+            config.settings.hide_sensitive,
+        )?;
+        log_line(&state.logs, "Перехват выбранных приложений включён");
+        Ok(
+            "Перехват включён. Перезапустите выбранные программы, чтобы создать новые соединения"
+                .into(),
+        )
+    }
 }
 
 #[tauri::command(async)]
 fn stop_redirect(state: State<'_, AppState>) -> Result<String, String> {
-    state.redirect.lock().map_err(|e| e.to_string())?.stop();
+    stop_application_redirect(&state)?;
     log_line(
         &state.logs,
         "Перехват приложений выключен; новые соединения идут напрямую",
@@ -1446,7 +1565,7 @@ pub fn run() {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
                 let state = window.app_handle().state::<AppState>();
                 if let Ok(mut redirect) = state.redirect.lock() {
-                    redirect.stop();
+                    let _ = redirect.stop();
                 }
                 let runtime = match state.runtime.lock() {
                     Ok(mut runtime_guard) => runtime_guard.take(),
@@ -1463,6 +1582,7 @@ pub fn run() {
             discord_redirect_processes,
             check_domain_rule,
             scan_installed_applications,
+            resolve_application_paths,
             start_redirect,
             stop_redirect,
             save_server,
@@ -1472,6 +1592,7 @@ pub fn run() {
             delete_proxy,
             select_proxy,
             save_settings,
+            default_settings,
             reset_config,
             test_server,
             start_tunnel,

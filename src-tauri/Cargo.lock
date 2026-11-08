@@ -3564,6 +3564,8 @@ dependencies = [
 name = "secret-tunnel"
 version = "0.2.2"
 dependencies = [
+ "libc",
+ "plist",
  "russh",
  "secret-tunnel-routing",
  "serde",

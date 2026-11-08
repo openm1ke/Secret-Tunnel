@@ -1,7 +1,7 @@
 use crate::udp_protocol;
 use russh::client;
-use russh::keys::known_hosts::learn_known_hosts;
-use russh::keys::{check_known_hosts, load_secret_key, ssh_key, PrivateKeyWithHashAlg};
+use russh::keys::known_hosts::{check_known_hosts_path, known_host_keys_path, learn_known_hosts};
+use russh::keys::{load_secret_key, ssh_key, PrivateKeyWithHashAlg};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,6 +10,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
+
+#[path = "tls_target.rs"]
+mod tls_target;
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedServer {
@@ -95,6 +98,34 @@ struct SshClient {
     options: EmbeddedOptions,
 }
 
+// Like OpenSSH, use an existing host-wide trust entry on a nonstandard port
+// only when there is no port-specific entry. A changed scoped key still fails.
+fn check_desktop_host_key_at(
+    host: &str,
+    port: u16,
+    key: &ssh_key::PublicKey,
+    path: &std::path::Path,
+) -> Result<bool, russh::keys::Error> {
+    let scoped = known_host_keys_path(host, port, path)?;
+    let trust_port = if port != 22 && scoped.is_empty() {
+        22
+    } else {
+        port
+    };
+    check_known_hosts_path(host, trust_port, key, path)
+}
+
+fn check_desktop_host_key(
+    host: &str,
+    port: u16,
+    key: &ssh_key::PublicKey,
+) -> Result<bool, russh::keys::Error> {
+    let path = std::env::home_dir()
+        .ok_or(russh::keys::Error::NoHomeDir)?
+        .join(".ssh/known_hosts");
+    check_desktop_host_key_at(host, port, key, &path)
+}
+
 impl client::Handler for SshClient {
     type Error = russh::Error;
 
@@ -115,14 +146,18 @@ impl client::Handler for SshClient {
         }
         match self.strict_host_key_checking.as_str() {
             "no" => Ok(true),
-            "accept-new" => match check_known_hosts(&self.host, self.port, server_public_key) {
-                Ok(true) => Ok(true),
-                Ok(false) => {
-                    Ok(learn_known_hosts(&self.host, self.port, server_public_key).is_ok())
+            "accept-new" => {
+                match check_desktop_host_key(&self.host, self.port, server_public_key) {
+                    Ok(true) => Ok(true),
+                    Ok(false) => {
+                        Ok(learn_known_hosts(&self.host, self.port, server_public_key).is_ok())
+                    }
+                    Err(_) => Ok(false),
                 }
-                Err(_) => Ok(false),
-            },
-            _ => Ok(check_known_hosts(&self.host, self.port, server_public_key).unwrap_or(false)),
+            }
+            _ => Ok(
+                check_desktop_host_key(&self.host, self.port, server_public_key).unwrap_or(false),
+            ),
         }
     }
 }
@@ -132,6 +167,40 @@ type SharedSession = Arc<client::Handle<SshClient>>;
 #[cfg(test)]
 mod platform_tests {
     use super::*;
+    #[test]
+    fn host_wide_trust_never_overrides_a_changed_port_specific_key() {
+        let make_key = |byte| {
+            let mut wire = Vec::new();
+            wire.extend_from_slice(&11u32.to_be_bytes());
+            wire.extend_from_slice(b"ssh-ed25519");
+            wire.extend_from_slice(&32u32.to_be_bytes());
+            wire.extend_from_slice(&[byte; 32]);
+            ssh_key::PublicKey::from_bytes(&wire).unwrap()
+        };
+        let key = make_key(7);
+        let changed = make_key(8);
+        let path = std::env::temp_dir().join(format!("secret-tunnel-trust-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            format!("example.test {}\n", key.to_openssh().unwrap()),
+        )
+        .unwrap();
+        assert!(check_desktop_host_key_at("example.test", 2222, &key, &path).unwrap());
+        assert!(check_desktop_host_key_at("example.test", 2222, &changed, &path).is_err());
+        std::fs::write(
+            &path,
+            format!(
+                "example.test {}\n[example.test]:2222 {}\n",
+                key.to_openssh().unwrap(),
+                changed.to_openssh().unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(check_desktop_host_key_at("example.test", 2222, &key, &path).is_err());
+        assert!(check_desktop_host_key_at("example.test", 2222, &changed, &path).unwrap());
+        assert!(!check_desktop_host_key_at("unknown.test", 2222, &key, &path).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
     #[tokio::test]
     async fn explicit_host_pin_never_falls_back_to_accept_all() {
         let mut wire = Vec::new();
@@ -337,7 +406,7 @@ async fn run_embedded_tunnel(
                 let logs = Arc::clone(&logs);
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_socks_client(stream, originator_addr, session, counters).await {
+                    if let Err(error) = handle_socks_client(stream, originator_addr, session, counters, &logs).await {
                         super::log_line(&logs, format!("SOCKS connection: {error}"));
                     }
                 });
@@ -545,6 +614,7 @@ async fn handle_socks_client(
     originator_addr: std::net::SocketAddr,
     session: SharedSession,
     counters: Arc<TrafficCounters>,
+    logs: &Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Result<(), String> {
     let request =
         match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
@@ -563,10 +633,39 @@ async fn handle_socks_client(
             .await;
     }
 
+    let fake_ip = tls_target::is_fake_ip(&request.host);
+    let (destination, preface) = if fake_ip {
+        // The proxy client sends ClientHello only after SOCKS CONNECT succeeds.
+        // Delay opening the SSH channel until its visible server name is known.
+        write_socks5_reply(&mut stream, 0x00).await?;
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(10),
+            tls_target::read_server_name(&mut stream),
+        )
+        .await
+        .map_err(|_| "Timed out recovering TLS server name for local fake-IP destination")??;
+        super::log_line(
+            logs,
+            "SOCKS: local fake-IP destination restored from TLS server name",
+        );
+        recovered
+    } else {
+        (request.host.clone(), Vec::new())
+    };
+    if std::env::var_os("SECRET_TUNNEL_TRACE_DESTINATIONS").is_some() {
+        super::log_line(
+            logs,
+            format!(
+                "SOCKS destination: {}:{} -> {}:{}",
+                request.host, request.port, destination, request.port
+            ),
+        );
+    }
+
     let channel = {
         session
             .channel_open_direct_tcpip(
-                request.host.clone(),
+                destination,
                 request.port.into(),
                 originator_addr.ip().to_string(),
                 originator_addr.port().into(),
@@ -575,8 +674,17 @@ async fn handle_socks_client(
             .map_err(|error| error.to_string())?
     };
 
-    write_socks5_reply(&mut stream, 0x00).await?;
+    if !fake_ip {
+        write_socks5_reply(&mut stream, 0x00).await?;
+    }
     let mut channel_stream = channel.into_stream();
+    if !preface.is_empty() {
+        channel_stream
+            .write_all(&preface)
+            .await
+            .map_err(|e| e.to_string())?;
+        counters.add_tx(preface.len() as u64);
+    }
     relay_with_counters(&mut stream, &mut channel_stream, &counters).await?;
     Ok(())
 }

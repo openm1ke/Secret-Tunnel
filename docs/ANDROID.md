@@ -30,7 +30,7 @@ Android-клиент находится в **этом же репозитори�
 
 ## Сборка
 
-Требуются Linux или WSL, JDK 17, Android SDK platform 34/build-tools 34.0.0, NDK 27.0.12077973, Rust stable, Git, Python 3, make. Эмулятор не нужен для сборки APK.
+Требуются macOS, Linux или WSL, JDK 17, Android SDK platform 34/build-tools 34.0.0, NDK 27.0.12077973, Rust stable, Git, Python 3, make. Скрипт автоматически выбирает macOS/Linux host toolchain NDK. Эмулятор не нужен для сборки APK.
 
 ```bash
 export JAVA_HOME=/path/to/jdk17
@@ -62,3 +62,5 @@ Workflow `.github/workflows/android.yml` собирает debug APK для pull 
 Пример `tunnel-core/examples/check_tunnel.rs` запускает отдельный SOCKS на 1082 по переданным аргументам и завершает его через 45 секунд. Его можно проверить `python scripts/check_socks_udp.py 1082`: HTTPS, восемь UDP DNS-запросов и закрытие UDP-ассоциации. Этот тест проверяет общий транспорт, **не Android VPN API**.
 
 Успешная сборка APK не заменяет проверку на телефоне: отдельно нужны системное VPN-согласие, фактический выбор приложений, IPv6/DNS, смена Wi-Fi/мобильной сети, блокировка экрана, отзыв разрешения и голос/видео Discord. Результаты локальной сборки и доступных проверок записываются в `ANDROID-BUILD-2026-11-08.md`.
+
+На macOS APK собран и **реально проверен на отдельном Android 17 ARM64-эмуляторе с 16-КБ страницами**: выбранный UID → VPN/TUN → SOCKS → SSH → HTTPS/UDP DNS; другой UID без VPN; очистка после остановки. Подробности, ограничения и повторение: [Android emulator validation](ANDROID-EMULATOR-2026-11-08.md).

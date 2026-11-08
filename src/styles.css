@@ -778,12 +778,14 @@ label {
 .workspace.appsWorkspace.hasMessage { grid-template-rows: auto minmax(0,1fr) 120px; }
 .panel.narrow.applicationsPanel { max-width: none; height: 100%; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
 .applicationsPanel > p { margin: 0; font-size: 13px; }
+.applicationsPanel .applicationBody { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+.applicationBody > p { margin: 0; font-size: 13px; }
 .applicationsPanel .panelTitle { margin-bottom: 0; }
 .applicationsPanel .appChooser { flex: 1; min-height: 220px; margin: 4px 0; display: flex; flex-direction: column; }
 .applicationsPanel .appChoices { flex: 1; min-height: 80px; max-height: none; }
 .applicationsPanel .appAdvanced { margin: 0; }
 .applicationsPanel .appAdvanced summary { margin-bottom: 0; }
-.applicationsPanel .applicationActions { flex: none; margin-top: 0; }
+.applicationsPanel .applicationActions { flex: none; flex-wrap: wrap; margin-top: 0; padding-top: 10px; border-top: 1px solid #edf0f2; }
 .domainPanel { gap: 10px; }
 .domainPanel p { margin: 0; }
 .domainState { margin-left: auto; font-size: 12px; font-weight: normal; color: var(--muted, #5c6d7c); }

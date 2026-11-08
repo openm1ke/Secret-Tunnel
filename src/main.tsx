@@ -103,10 +103,10 @@ type TrafficPoint = {
 type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "settings";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: {id: string; observed: number; tunnel: number; direct: number}[] };
-type RedirectStatus = { running: boolean; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
+type RedirectStatus = { running: boolean; starting: boolean; platform: string; requires_administrator: boolean; supports_system_ssh: boolean; supports_domains: boolean; setup_message: string; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
 type InstalledApp = { id: string; name: string; executable: string; patterns: string[]; source: string };
 const normalizeAppPattern = (value: string) => value.trim().replace(/\//g, "\\").toLowerCase();
-const appAliases = (app: InstalledApp) => [...app.patterns, app.executable.split(/[\\/]/).pop() || ""].map(normalizeAppPattern);
+const appAliases = (app: InstalledApp) => (app.source === "macos" ? app.patterns : [...app.patterns, app.executable.split(/[\\/]/).pop() || ""]).map(normalizeAppPattern);
 type BusyAction = "connect" | "disconnect" | "restart" | "save" | "delete" | "test" | "logs" | null;
 type CopyField = "proxy-ip" | "server-host" | "ipinfo-token" | null;
 
@@ -149,20 +149,6 @@ const emptyConfig: AppConfig = {
     start_tunnel_on_launch: false,
     clear_logs_on_start: false,
   },
-};
-
-const defaultSettings: AppSettings = {
-  redirect_cli_path: "",
-  redirect_processes: ["Discord.exe"],
-    domain_rules: [],
-  ipinfo_token: "",
-  ssh_engine: "system",
-  hide_sensitive: true,
-  verify_proxy_on_start: true,
-  auto_reconnect: false,
-  reconnect_delay_seconds: 3,
-  start_tunnel_on_launch: false,
-  clear_logs_on_start: false,
 };
 
 const emptyStatus: TunnelStatus = {
@@ -380,7 +366,7 @@ function App() {
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(emptyConfig.settings);
   const [traffic, setTraffic] = useState<TrafficPoint[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
-  const [redirect, setRedirect] = useState<RedirectStatus>({ running: false, pid: null, administrator: false, component_available: false, last_error: "" });
+  const [redirect, setRedirect] = useState<RedirectStatus>({ running: false, starting: false, platform: "unknown", requires_administrator: true, supports_system_ssh: false, supports_domains: false, setup_message: "", pid: null, administrator: false, component_available: false, last_error: "" });
   const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
   const [appsLoaded, setAppsLoaded] = useState(false);
   const [appsScanning, setAppsScanning] = useState(false);
@@ -395,10 +381,17 @@ function App() {
   const serverDraftDirtyRef = useRef(false);
   const proxyDraftDirtyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
+  const refreshInFlightRef = useRef(false);
 
   const currentServer = useMemo(() => selectedServer(config), [config]);
   const currentProxy = useMemo(() => selectedProxy(config), [config]);
   const connected = status.state === "running";
+  const isMac = redirect.platform === "macos";
+  const redirectActive = redirect.running || redirect.starting;
+  const redirectSupported = isMac || redirect.platform === "windows";
+  const canRedirect = redirectSupported && connected && !redirectActive && redirect.component_available &&
+    (!redirect.requires_administrator || redirect.administrator) &&
+    (redirect.supports_system_ssh || status.ssh_engine === "embedded");
   const stateClass = connected ? "state good" : status.last_error ? "state bad" : "state idle";
   const showSensitive = !config.settings.hide_sensitive;
   const visibleProxyIp = showSensitive ? status.ip || "-" : maskValue(status.ip);
@@ -430,10 +423,10 @@ function App() {
 
   async function addApplicationFile() {
     try {
-      const chosen = await open({ multiple: true, filters: [{ name: "Приложения Windows", extensions: ["exe"] }] });
+      const chosen = await open({ multiple: true, filters: [{ name: isMac ? "Приложения macOS" : "Приложения Windows", extensions: [isMac ? "app" : "exe"] }] });
       const paths = typeof chosen === "string" ? [chosen] : chosen || [];
       if (!paths.length) return;
-      const entries = paths.map(path => installedApps.find(app => normalizeAppPattern(app.executable) === normalizeAppPattern(path)) ||
+      const entries = isMac ? await invoke<InstalledApp[]>("resolve_application_paths", { paths }) : paths.map(path => installedApps.find(app => normalizeAppPattern(app.executable) === normalizeAppPattern(path)) ||
         ({id: normalizeAppPattern(path), name: path.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || path,
         executable: path, patterns: [path], source: "manual"}));
       setInstalledApps(current => [...current.filter(app => !entries.some(entry => entry.id === app.id)), ...entries]);
@@ -452,6 +445,8 @@ function App() {
   }
 
   async function refreshAll() {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
     try {
       const [nextConfig, nextStatus, nextTraffic, nextLogs, nextRedirect] = await Promise.all([
         invoke<AppConfig>("get_config"),
@@ -470,6 +465,8 @@ function App() {
       setProxyDraft((current) => (proxyDraftDirtyRef.current ? current : selectedProxy(nextConfig)));
     } catch (error) {
       setMessage(String(error));
+    } finally {
+      refreshInFlightRef.current = false;
     }
   }
 
@@ -1017,15 +1014,21 @@ function App() {
 
           {activeTab === "applications" && (
             <section className="panel narrow applicationsPanel">
+              <div className="applicationBody">
               <div className="panelTitle"><Shield size={18} />Трафик приложений</div>
-              <p>Отметьте программы: их TCP и UDP будут идти через SSH-туннель.</p>
-              <div className={redirect.running ? "state good" : "state idle"}>
-                {redirect.running ? "Перехват включён" : "Перехват выключен"}
+              <p>{isMac ? "Выберите приложения macOS, чей трафик нужно направить через SSH-туннель." : "Отметьте программы: их TCP и UDP будут идти через SSH-туннель."}</p>
+              <div role="status" className={redirect.running ? "state good" : "state idle"}>
+                {redirect.starting ? "Ожидаем разрешение macOS" : redirect.running ? "Перехват включён" : "Перехват выключен"}
               </div>
               <p>Остальные приложения работают напрямую. После выключения перехвата выбранные приложения также выходят напрямую.</p>
-              {!redirect.administrator && <div className="notice">Для включения перехвата запустите Secret Tunnel от имени администратора.</div>}
-              {!redirect.component_available && <div className="notice">Комплект перехвата не установлен или неполон. Укажите путь к проверенному компоненту и сохраните настройки.</div>}
-              {status.ssh_engine !== "embedded" && <div className="notice">Для TCP и UDP выберите Embedded Rust SSH в настройках и запустите туннель.</div>}
+              {!redirectSupported && redirect.platform !== "unknown" && <div className="notice">Перехват приложений доступен на macOS и Windows.</div>}
+              {redirect.requires_administrator && !redirect.administrator && <div className="notice">Для включения перехвата запустите Secret Tunnel от имени администратора.</div>}
+              {!redirect.component_available && <div className="notice">{isMac ? <>Установите <a href="https://github.com/InterceptSuite/ProxyBridge/releases" target="_blank" rel="noreferrer">ProxyBridge 4.1.2 или новее</a> в /Applications. Закройте его окно перед включением перехвата здесь. При первом запуске macOS попросит разрешить сетевое расширение.</> : "Комплект перехвата не установлен или неполон. Укажите путь к проверенному компоненту и сохраните настройки."}</div>}
+              {isMac && <div className="notice">{status.ssh_engine === "embedded" ? "TCP и UDP идут через Embedded SSH. Для UDP установите secret-tunnel-agent на SSH-сервере." : "System OpenSSH: TCP идёт через SSH, UDP выбранных приложений блокируется. Для TCP и UDP выберите Embedded Rust SSH и установите UDP-агент на сервере."} Системный DNS может идти напрямую.</div>}
+              {!isMac && status.ssh_engine !== "embedded" && <div className="notice">Для TCP и UDP выберите Embedded Rust SSH в настройках и запустите туннель.</div>}
+              {isMac && (settingsDraft.domain_rules || []).some(r => r.enabled) && <div className="notice">Отключите доменные правила: их применение на macOS пока не поддерживается.</div>}
+              {isMac && settingsDraft.redirect_processes.some(id => ["shipit", "chrome_crashpad_handler"].includes(id.toLowerCase())) && <div className="notice">ShipIt и chrome_crashpad_handler используются разными Electron-приложениями. Эти правила также направят в туннель одноимённые утилиты других программ.</div>}
+              {isMac && redirectActive && redirect.setup_message && <div className="notice" role="status">{redirect.setup_message}</div>}
               {redirect.last_error && <div className="notice">{redirect.last_error}</div>}
               <div className="appChooser">
                 <div className="appChooserToolbar">
@@ -1042,34 +1045,35 @@ function App() {
                     <input type="checkbox" checked={isAppSelected(app)} disabled={busy !== null} onChange={event => toggleApplication(app, event.target.checked)} />
                     <span className="appBadge" aria-hidden="true">{app.name.slice(0,1).toUpperCase()}</span>
                     <span className="appDescription"><strong>{app.name}</strong><small title={app.executable}>{app.executable}</small>
-                      {app.patterns.length > 1 && <small>Включая обновлятор и вспомогательные процессы</small>}</span>
+                      {app.patterns.length > 1 && <small title={app.patterns.join("\n")}>Включая вспомогательные процессы ({app.patterns.length - 1})</small>}</span>
                   </label>)}
-                  {!visibleApps.length && <p className="appListEmpty">{appsScanning ? "Ищем установленные программы…" : "Программы не найдены. Измените поиск или добавьте exe-файл."}</p>}
+                  {!visibleApps.length && <p className="appListEmpty">{appsScanning ? "Ищем установленные программы…" : `Программы не найдены. Измените поиск или добавьте ${isMac ? ".app" : "exe-файл"}.`}</p>}
                 </div>
                 <button disabled={busy !== null} onClick={addApplicationFile}><Plus size={16} />Добавить программу из файла</button>
               </div>
               <details className="appAdvanced"><summary>Дополнительные настройки</summary>
-              <label>Правила вручную (имена exe или полные пути через запятую)
-                <input disabled={redirect.running} value={settingsDraft.redirect_processes.join(", ")}
+              <label>{isMac ? "Bundle ID или идентификаторы подписи через запятую" : "Правила вручную (имена exe или полные пути через запятую)"}
+                <input disabled={redirectActive} value={settingsDraft.redirect_processes.join(", ")}
                   onChange={event => updateSettings("redirect_processes",event.target.value.split(",").map(name=>name.trim()))} />
               </label>
               <label>
                 Компонент перехвата
                 <div className="fileField">
-                  <input disabled={redirect.running} value={settingsDraft.redirect_cli_path}
-                    onChange={(event) => updateSettings("redirect_cli_path", event.target.value)} placeholder="Путь к ProxyBridge_CLI.exe" />
-                  <button disabled={redirect.running} title="Выбрать компонент" onClick={async () => {
+                  <input disabled={redirectActive} value={settingsDraft.redirect_cli_path}
+                    onChange={(event) => updateSettings("redirect_cli_path", event.target.value)} placeholder={isMac ? "/Applications/ProxyBridge.app/Contents/MacOS/ProxyBridge" : "Путь к ProxyBridge_CLI.exe"} />
+                  <button disabled={redirectActive} title="Выбрать компонент" onClick={async () => {
                     try {
-                      const selected = await open({ multiple: false, filters: [{ name: "ProxyBridge CLI", extensions: ["exe"] }] });
+                      const selected = await open({ multiple: false, ...(isMac ? {} : {filters: [{ name: "ProxyBridge CLI", extensions: ["exe"] }]}) });
                       if (typeof selected === "string") updateSettings("redirect_cli_path", selected);
                     } catch (error) { setMessage(String(error)); }
                   }}><FolderOpen size={16} /></button>
                 </div>
               </label>
-              <p>Нужен проверенный комплект ProxyBridge с WinDivert. Перехват действует на новые соединения: после включения переподключите или перезапустите выбранные программы.</p>
+              <p>{isMac ? "Нужен ProxyBridge с разрешённым системным расширением. Приложения сопоставляются по точным bundle ID, включая обнаруженные вложенные .app и .xpc." : "Нужен проверенный комплект ProxyBridge с WinDivert."} Перехват действует на новые соединения: после включения переподключите или перезапустите выбранные программы. При аварии блокировка прямого выхода не гарантируется.</p>
               </details>
+              </div>
               <div className="actions left applicationActions">
-                <button className="primary" disabled={busy !== null || redirect.running || !connected || !redirect.administrator || !redirect.component_available || (selectedAppCount === 0 && !(settingsDraft.domain_rules || []).some(r => r.enabled)) || status.ssh_engine !== "embedded"}
+                <button className="primary" disabled={busy !== null || !canRedirect || (selectedAppCount === 0 && !(settingsDraft.domain_rules || []).some(r => r.enabled)) || (isMac && (settingsDraft.domain_rules || []).some(r => r.enabled))}
                   onClick={() => runAction("connect", async () => {
                     const settings = applicationSettings();
                     await invoke<AppConfig>("save_settings", { settings });
@@ -1077,28 +1081,28 @@ function App() {
                     settingsDirtyRef.current = false;
                     return invoke<string>("start_redirect");
                   })}><Play size={16} />Включить перехват</button>
-                <button disabled={busy !== null || !redirect.running}
+                <button disabled={busy !== null || !redirectActive}
                   onClick={() => runAction("disconnect", () => invoke<string>("stop_redirect"))}>
-                  <CircleStop size={16} />Выключить
+                  <CircleStop size={16} />{redirect.starting ? "Отменить запуск" : "Выключить"}
                 </button>
                 <button disabled={busy !== null} onClick={() => runAction("save", async () => {
                   const settings = applicationSettings();
                     await invoke<AppConfig>("save_settings", { settings });
                     setSettingsDraft(settings);
                   settingsDirtyRef.current = false;
-                  if (redirect.running) {
+                  if (redirectActive) {
                     await invoke<string>("stop_redirect");
                     if (settings.redirect_processes.length || (settings.domain_rules || []).some(r => r.enabled)) return invoke<string>("start_redirect");
                     return "Выбор очищен. Перехват выключен";
                   }
                   return "Выбор приложений сохранён";
-                })}><Save size={16} />{redirect.running ? "Применить выбор" : "Сохранить выбор"}</button>
+                })}><Save size={16} />{redirectActive ? "Применить выбор" : "Сохранить выбор"}</button>
               </div>
             </section>
           )}
 
-          {activeTab === "domains" && <DomainsPanel rules={settingsDraft.domain_rules || []} stats={redirect.domain_stats}
-            running={redirect.running} busy={busy !== null} canStart={connected && redirect.administrator && redirect.component_available && status.ssh_engine === "embedded"}
+          {activeTab === "domains" && <><div className="notice" hidden={redirect.supports_domains}>Доменные regex-правила применяются только в Windows. На macOS используйте выбор приложений; отключите ранее сохранённые доменные правила перед запуском.</div><DomainsPanel rules={settingsDraft.domain_rules || []} stats={redirect.domain_stats}
+            running={redirect.running} busy={busy !== null} canStart={canRedirect && redirect.supports_domains}
             onChange={rules => updateSettings("domain_rules", rules)}
             onSave={() => runAction("save", async () => {
               await invoke<AppConfig>("save_settings", {settings: settingsDraft});
@@ -1113,7 +1117,7 @@ function App() {
               await invoke<AppConfig>("save_settings", {settings: settingsDraft}); settingsDirtyRef.current = false;
               return invoke<string>("start_redirect");
             })}
-            onStop={() => runAction("disconnect", () => invoke<string>("stop_redirect"))} />}
+            onStop={() => runAction("disconnect", () => invoke<string>("stop_redirect"))} /></>}
 
           {activeTab === "settings" && (
             <section className="panel narrow">
@@ -1223,7 +1227,8 @@ function App() {
                   Сохранить настройки
                 </button>
                 <button disabled={busy !== null} onClick={() => runAction("save", async () => {
-                  const nextConfig = await invoke<AppConfig>("save_settings", { settings: defaultSettings });
+                  const settings = await invoke<AppSettings>("default_settings");
+                  const nextConfig = await invoke<AppConfig>("save_settings", { settings });
                   settingsDirtyRef.current = false;
                   setConfig(nextConfig);
                   setSettingsDraft(nextConfig.settings);

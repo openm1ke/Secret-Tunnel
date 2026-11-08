@@ -19,6 +19,12 @@ pub struct RedirectState {
 #[derive(Serialize)]
 pub struct RedirectStatus {
     pub running: bool,
+    pub starting: bool,
+    pub platform: String,
+    pub requires_administrator: bool,
+    pub supports_system_ssh: bool,
+    pub supports_domains: bool,
+    pub setup_message: String,
     pub pid: Option<u32>,
     pub administrator: bool,
     pub last_error: String,
@@ -267,6 +273,12 @@ impl RedirectState {
         }
         RedirectStatus {
             running: self.child.is_some(),
+            starting: false,
+            platform: std::env::consts::OS.into(),
+            requires_administrator: cfg!(windows),
+            supports_system_ssh: false,
+            supports_domains: cfg!(windows),
+            setup_message: String::new(),
             pid: self.child.as_ref().map(Child::id),
             administrator: administrator(),
             last_error: self.error.clone(),

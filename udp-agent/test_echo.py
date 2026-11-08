@@ -10,6 +10,10 @@ import sys
 
 
 def main():
+    # macOS defaults net.inet.udp.maxdgram to 9216; larger sendto calls fail
+    # with EMSGSIZE even on loopback. Keep the large-payload test within that
+    # system limit without changing a machine-wide sysctl for the test.
+    large_payload = 8192 if sys.platform == "darwin" else 51200
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as echo:
         echo.bind(("127.0.0.1", 0))
         echo.settimeout(10)
@@ -17,7 +21,7 @@ def main():
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE) as agent:
             def exercise():
                 assert agent.stdout.read(8) == b"STUDP001"
-                for payload in (b"", b"voice", bytes(range(256)) * 200):
+                for payload in (b"", b"voice", bytes(range(256)) * (large_payload // 256)):
                     packet = b"\0\0\0\1" + socket.inet_aton("127.0.0.1")
                     packet += struct.pack("!H", echo.getsockname()[1]) + payload
                     agent.stdin.write(struct.pack("!H", len(packet)) + packet)
@@ -38,7 +42,7 @@ def main():
                 finally:
                     if agent.poll() is None:
                         agent.kill()
-            print("PASS: empty, voice and 51200-byte UDP payloads; framing; clean EOF")
+            print(f"PASS: empty, voice and {large_payload}-byte UDP payloads; framing; clean EOF")
 
 
 if __name__ == "__main__":

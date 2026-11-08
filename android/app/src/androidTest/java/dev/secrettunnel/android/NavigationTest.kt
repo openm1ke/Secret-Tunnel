@@ -30,8 +30,8 @@ class NavigationTest {
             instrumentation.runOnMainSync{assertTrue(all().filterIsInstance<Button>().any{it.text.toString().contains("Добавить прокси")})}
             tab("Журнал")
             instrumentation.runOnMainSync{assertTrue(all().filterIsInstance<Button>().any{it.text.toString()=="Копировать журнал"})}
-            tab("Прилож.")
-            instrumentation.runOnMainSync{all().filterIsInstance<EditText>().first().setText("Tunnel Traffic Probe")}
+            tab("Приложения")
+            instrumentation.runOnMainSync{all().filterIsInstance<EditText>().first().setText("dev.secrettunnel.probe")}
             var found=false
             for(i in 0..49){instrumentation.runOnMainSync{found=all().any{it is Switch}};if(found)break;Thread.sleep(100)}
             assertTrue("Probe should appear in installed application list",found)
@@ -40,7 +40,7 @@ class NavigationTest {
             assertEquals(expected,"dev.secrettunnel.probe" in store.packages)
             instrumentation.runOnMainSync{all().filterIsInstance<EditText>().first().setText("no-such-application")}
             instrumentation.waitForIdleSync()
-            instrumentation.runOnMainSync{all().filterIsInstance<EditText>().first().setText("Tunnel Traffic Probe")}
+            instrumentation.runOnMainSync{all().filterIsInstance<EditText>().first().setText("dev.secrettunnel.probe")}
             instrumentation.waitForIdleSync()
             instrumentation.runOnMainSync{assertEquals(expected,all().filterIsInstance<Switch>().first().isChecked)}
             assertEquals(original-filterOfProbe(),store.packages-filterOfProbe())

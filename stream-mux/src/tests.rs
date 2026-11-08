@@ -1,6 +1,48 @@
 use super::*;
 
 #[tokio::test]
+async fn aborted_open_does_not_wait_for_the_setup_timeout() {
+    let (client, server) = pair(Config::default()).await;
+    let opening = tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await });
+    drop(server.accept().await.unwrap());
+    let result = tokio::time::timeout(Duration::from_secs(1), opening)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn server_banner_waits_for_acceptance_even_with_a_busy_control_queue() {
+    let (client, server) = pair(Config {
+        max_flows: 4,
+        ..Default::default()
+    })
+    .await;
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await })
+    };
+    let incoming = server.accept().await.unwrap().flow;
+    for _ in 0..128 {
+        assert!(server.publish_stats());
+    }
+    incoming.accept().unwrap();
+    incoming
+        .sender()
+        .send(b"server banner".to_vec())
+        .await
+        .unwrap();
+    let mut flow = tokio::time::timeout(Duration::from_secs(2), opening)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(&*flow.recv().await.unwrap().unwrap(), b"server banner");
+    assert_eq!(client.snapshot().protocol_errors, 0);
+}
+
+#[tokio::test]
 async fn slot_credit_is_returned_only_after_application_consumption() {
     let (client, server) = pair(Config {
         max_flows: 4,

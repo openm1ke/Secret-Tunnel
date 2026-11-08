@@ -1,7 +1,7 @@
 //! Bounded, credit-controlled streams over one authenticated byte transport.
 //! Application consumption, rather than receipt from SSH, replenishes credit.
-mod datagrams;
 mod capacity;
+mod datagrams;
 pub use capacity::socket_capacity;
 mod relay;
 pub use datagrams::DatagramBuffers;
@@ -238,10 +238,14 @@ impl Inner {
                 self.fail("Multiplex control budget exhausted");
                 "Multiplex control budget exhausted".to_owned()
             })?;
-        self.control
+        // Acceptance must precede this flow's first DATA, including protocols
+        // with a server-first banner. Priority scheduling may bypass controls.
+        let ordered = frame.kind == Kind::Accepted;
+        let queue = if ordered { &self.data } else { &self.control };
+        queue
             .send(Queued {
                 frame,
-                priority: true,
+                priority: !ordered,
                 cancelled: None,
                 bytes: None,
                 _slot: Some(slot),
@@ -527,6 +531,9 @@ impl State {
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
         let _ = self.closed.send(true);
+        if let Some(ack) = self.opening.lock().unwrap().take() {
+            let _ = ack.send(Err("Flow closed before destination acceptance".into()));
+        }
         self.window.ready.notify_waiters();
     }
 }
@@ -857,7 +864,7 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: R, inner: Arc<Inner>) {
     let mut closed = inner.closed.subscribe();
     loop {
         let frame = tokio::select! { frame = wire::read(&mut reader) => match frame { Ok(frame) => frame, Err(e) => { inner.fail(format!("Transport read: {e}")); return; } }, _ = closed.changed() => return };
-        let received=inner.counters.frames_rx.fetch_add(1, Ordering::Relaxed)+1;
+        let received = inner.counters.frames_rx.fetch_add(1, Ordering::Relaxed) + 1;
         if let Err(error) = dispatch(frame, &inner) {
             inner
                 .counters
@@ -866,7 +873,9 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: R, inner: Arc<Inner>) {
             inner.fail(error);
             return;
         }
-        if received%32==0{tokio::task::yield_now().await;}
+        if received % 32 == 0 {
+            tokio::task::yield_now().await;
+        }
     }
 }
 fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {

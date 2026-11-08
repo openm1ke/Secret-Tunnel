@@ -82,7 +82,9 @@ class TunnelVpnService : VpnService() {
                 // applies on reconnection while the VPN interface already exists.
                 connectSsh()
                 if (stopping.get()) return@execute
-                val ipv6 = JSONObject(NativeBridge.status()).optBoolean("ipv6_supported")
+                val status = JSONObject(NativeBridge.status())
+                val ipv6 = status.optBoolean("ipv6_supported")
+                val capacity = status.optJSONObject("transport")?.optInt("limit",256) ?: 256
                 val builder = Builder().setSession("Secret Tunnel SSH").setMtu(1500)
                     .addAddress("198.18.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
                 if (ipv6) builder.addAddress("fd00:198:18::1", 126).addRoute("::", 0)
@@ -104,7 +106,7 @@ class TunnelVpnService : VpnService() {
                     misc:
                       task-stack-size: 65536
                       tcp-buffer-size: 65536
-                      max-session-count: 256
+                      max-session-count: $capacity
                       connect-timeout: 10000
                       tcp-read-write-timeout: 300000
                       udp-read-write-timeout: 60000
@@ -138,6 +140,7 @@ class TunnelVpnService : VpnService() {
             val config = JSONObject().put("host", current.host).put("port", current.port).put("user", current.user)
                 .put("key_path", key.absolutePath).put("host_key_sha256", current.fingerprint).put("socks_port", current.socksPort)
                 .put("new_session", tun == null)
+                .put("max_connections", connectionBudget())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
         } finally { key.delete() }
@@ -148,6 +151,13 @@ class TunnelVpnService : VpnService() {
         return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("Secret Tunnel: $phase").setContentText(detail).setContentIntent(open)
             .setOngoing(true).addAction(Notification.Action.Builder(null, "Остановить", stop).build()).build()
+    }
+    private fun connectionBudget():Int {
+        val manager=getSystemService(ActivityManager::class.java)
+        val memory=ActivityManager.MemoryInfo();manager.getMemoryInfo(memory)
+        if(manager.isLowRamDevice)return 256
+        val gib=1024L*1024*1024
+        return when {memory.totalMem>=6*gib->2048;memory.totalMem>=5*gib->1024;memory.totalMem>=3*gib->512;else->256}
     }
     private fun notifyState() { if (active) getSystemService(NotificationManager::class.java).notify(NOTICE, notification()) }
     private fun cleanup() {

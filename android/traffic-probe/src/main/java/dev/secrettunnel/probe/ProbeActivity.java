@@ -19,12 +19,12 @@ public class ProbeActivity extends Activity {
         byte[] query = {0,0,1,0,0,1,0,0,0,0,0,0,7,'e','x','a','m','p','l','e',3,'c','o','m',0,0,1,0,1};
         query[0]=(byte)(id>>8); query[1]=(byte)id; return query;
     }
-    private static void stress(JSONObject result) throws Exception {
+    private static void stress(JSONObject result,int count) throws Exception {
         ExecutorService pool=Executors.newFixedThreadPool(24);
         List<DatagramSocket> sockets=new ArrayList<>();
         try {
             List<Callable<Boolean>> queries=new ArrayList<>();
-            for(int i=0;i<24;i++) {
+            for(int i=0;i<count;i++) {
                 DatagramSocket socket=new DatagramSocket(); socket.setSoTimeout(12000); sockets.add(socket);
                 final int id=1000+i;
                 queries.add(()->{
@@ -40,6 +40,7 @@ public class ProbeActivity extends Activity {
                 try {if(future.get())replies++;} catch(Exception ignored) { }
             }
             result.put("udp_parallel_replies",replies);
+            result.put("udp_parallel_expected",count);
             // Keep all UDP sockets open while HTTPS runs, as a media app would.
             List<Callable<Long>> downloads=new ArrayList<>();
             for(int i=0;i<4;i++) downloads.add(()->{
@@ -47,12 +48,12 @@ public class ProbeActivity extends Activity {
                 connection.setConnectTimeout(15000);connection.setReadTimeout(30000);
                 try {
                     if(connection.getResponseCode()!=200)throw new java.io.IOException("Download HTTP status");
-                    long count=0;byte[] buffer=new byte[32768];
+                    long downloaded=0;byte[] buffer=new byte[32768];
                     try(java.io.InputStream input=connection.getInputStream()) {
-                        int length;while((length=input.read(buffer))>=0){count+=length;if(count>2097152)throw new java.io.IOException("Download too large");}
+                        int length;while((length=input.read(buffer))>=0){downloaded+=length;if(downloaded>2097152)throw new java.io.IOException("Download too large");}
                     }
-                    if(count!=2097152)throw new java.io.IOException("Incomplete download: "+count);
-                    return count;
+                    if(downloaded!=2097152)throw new java.io.IOException("Incomplete download: "+downloaded);
+                    return downloaded;
                 } finally {connection.disconnect();}
             });
             int complete=0;long bytes=0;
@@ -60,7 +61,7 @@ public class ProbeActivity extends Activity {
                 try {bytes+=future.get();complete++;} catch(Exception ignored) { }
             }
             result.put("https_parallel_complete",complete);result.put("https_parallel_bytes",bytes);
-            result.put("stress_passed",replies==24&&complete==4);
+            result.put("stress_passed",replies==count&&complete==4);
         } finally {for(DatagramSocket socket:sockets)socket.close();pool.shutdownNow();}
     }
     private static byte[] read(java.io.InputStream input) throws java.io.IOException {
@@ -115,7 +116,7 @@ public class ProbeActivity extends Activity {
                 result.put("udp_dns_replies", replies);
                 result.put("passed", result.getBoolean("dns") && result.getInt("https_status") == 200 && replies == 8);
                 if(getIntent().getBooleanExtra("stress",false)) {
-                    stress(result);
+                    stress(result,Math.max(1,Math.min(1024,getIntent().getIntExtra("udp_count",24))));
                     result.put("passed",result.getBoolean("passed")&&result.optBoolean("stress_passed"));
                 }
             } catch (Exception error) {
@@ -125,7 +126,8 @@ public class ProbeActivity extends Activity {
                 file.write(result.toString(2).getBytes(StandardCharsets.UTF_8));
             } catch (Exception ignored) { }
             runOnUiThread(() -> output.setText(result.optBoolean("passed") ?
-                "PASS\nVPN: " + result.optBoolean("vpn") + "\nHTTPS 200\nDNS OK\nUDP DNS: 8/8\n" + getPackageName() :
+                "PASS\nVPN: " + result.optBoolean("vpn") + "\nHTTPS 200\nDNS OK\nUDP DNS: 8/8\n" +
+                (result.has("stress_passed")?"UDP parallel: "+result.optInt("udp_parallel_replies")+"/"+result.optInt("udp_parallel_expected")+"\nHTTPS downloads: "+result.optInt("https_parallel_complete")+"/4, "+result.optLong("https_parallel_bytes")+" bytes\n":"")+getPackageName() :
                 "FAIL\n" + result.optString("error")));
         }, "raw-network-probe").start();
     }

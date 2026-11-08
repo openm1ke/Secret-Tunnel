@@ -43,6 +43,7 @@ android/app/src/main/assets/licenses/
 android/app/src/main/assets/hev-revision.txt
 android/native/target/
 tunnel-core/target/
+stream-mux/target/
 artifacts/
 output/playwright/
 .playwright-cli/

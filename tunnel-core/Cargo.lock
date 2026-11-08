@@ -1290,6 +1290,14 @@ name = "secret-tunnel-core"
 version = "0.1.0"
 dependencies = [
  "russh",
+ "secret-tunnel-mux",
+ "tokio",
+]
+
+[[package]]
+name = "secret-tunnel-mux"
+version = "0.1.0"
+dependencies = [
  "tokio",
 ]
 

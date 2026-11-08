@@ -69,7 +69,11 @@ class VpnFixtureTest {
             val before = JSONObject(NativeBridge.status())
             ready.writeText(snapshot().toString())
             val deadline = System.currentTimeMillis() + 180_000
-            while (!finish.isFile && System.currentTimeMillis() < deadline) Thread.sleep(200)
+            var nextSnapshot=0L
+            while (!finish.isFile && System.currentTimeMillis() < deadline) {
+                if(System.currentTimeMillis()>=nextSnapshot){File(context.filesDir,"integration-live.json").writeText(snapshot().toString());nextSnapshot=System.currentTimeMillis()+1000}
+                Thread.sleep(200)
+            }
             assertTrue("Host did not complete the independent traffic probes", finish.isFile)
             val after = JSONObject(NativeBridge.status())
             assertTrue("SSH tunnel stopped during traffic check", after.optBoolean("running"))

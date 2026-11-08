@@ -7,7 +7,7 @@ edition = "2021"
 
 [features]
 default = []
-embedded-ssh = ["dep:russh", "dep:tokio"]
+embedded-ssh = ["dep:russh", "dep:tokio", "dep:secret-tunnel-mux"]
 
 [lib]
 name = "secret_tunnel_lib"
@@ -21,6 +21,7 @@ required-features = ["embedded-ssh"]
 tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
+secret-tunnel-mux = { path = "../stream-mux", optional = true }
 secret-tunnel-routing = { path = "../routing-engine" }
 russh = { version = "0.61", optional = true }
 serde = { version = "1.0", features = ["derive"] }

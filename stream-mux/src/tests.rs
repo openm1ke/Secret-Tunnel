@@ -1,0 +1,305 @@
+use super::*;
+
+#[tokio::test]
+async fn slot_credit_is_returned_only_after_application_consumption() {
+    let (client, server) = pair(Config {
+        max_flows: 4,
+        receive_slots: 4,
+        ..Default::default()
+    })
+    .await;
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await.unwrap() })
+    };
+    let mut incoming = server.accept().await.unwrap().flow;
+    incoming.accept().unwrap();
+    let flow = opening.await.unwrap();
+    let sender = flow.sender();
+    for _ in 0..4 {
+        sender.send(vec![1]).await.unwrap();
+    }
+    let pending = tokio::spawn(async move { sender.send(vec![2]).await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!pending.is_finished());
+    let packet = incoming.recv().await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!pending.is_finished());
+    drop(packet);
+    tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(server.snapshot().receive_queue_peak <= 4);
+}
+
+#[tokio::test]
+async fn udp_overload_is_counted_and_does_not_retain_unbounded_packets() {
+    let (client, server) = pair(Config {
+        max_flows: 4,
+        receive_slots: 4,
+        ..Default::default()
+    })
+    .await;
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Udp, vec![]).await.unwrap() })
+    };
+    let mut incoming = server.accept().await.unwrap().flow;
+    incoming.accept().unwrap();
+    let flow = opening.await.unwrap();
+    let sender = flow.sender();
+    for _ in 0..4 {
+        assert!(sender.try_send_datagram(vec![1]).unwrap());
+    }
+    assert!(!sender.try_send_datagram(vec![1]).unwrap());
+    assert_eq!(client.snapshot().udp_drops, 1);
+    drop(incoming.recv().await.unwrap().unwrap());
+    for _ in 0..100 {
+        if sender.state.window.counts.lock().unwrap().1 > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(sender.try_send_datagram(vec![3]).unwrap());
+}
+
+#[tokio::test]
+async fn session_statistics_do_not_need_an_application_flow() {
+    let (client, server) = pair(Config::default()).await;
+    assert!(server.publish_stats());
+    for _ in 0..100 {
+        if client.snapshot().peer.is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let peer = client.snapshot().peer.unwrap();
+    assert_eq!(peer.active, 0);
+    assert_eq!(peer.limit, 1024);
+    assert_eq!(peer.receive_budget, 64 * 1024 * 1024);
+    assert!(Frame {
+        kind: Kind::Data,
+        id: 0,
+        data: vec![1]
+    }
+    .encode(&mut Vec::new())
+    .is_err());
+}
+
+async fn pair(config: Config) -> (Endpoint, Endpoint) {
+    let (a, b) = tokio::io::duplex(4096);
+    let (client, server) = tokio::join!(
+        Endpoint::start(a, Role::Client, config.clone()),
+        Endpoint::start(b, Role::Server, config)
+    );
+    (client.unwrap(), server.unwrap())
+}
+fn echo_server(endpoint: Endpoint) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                incoming=endpoint.accept()=>{
+                    let Some(incoming)=incoming else {break};
+                    tasks.spawn(async move {
+                        let mut flow=incoming.flow;flow.accept().unwrap();
+                        if incoming.target==b"slow" {
+                            let mut closed=flow.state.closed.subscribe();
+                            if !*closed.borrow(){let _=closed.changed().await;}
+                            return;
+                        }
+                        let sender=flow.sender();
+                        while let Ok(Some(packet))=flow.recv().await {sender.send(packet.to_vec()).await.unwrap();}
+                        sender.eof().await.unwrap();flow.finish().await.unwrap();
+                    });
+                }
+                Some(result)=tasks.join_next(),if !tasks.is_empty()=>{result.unwrap();}
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn slow_receiver_does_not_block_an_independent_flow() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let config = Config {
+            max_flows: 8,
+            outbound_bytes: 65536,
+            ..Default::default()
+        };
+        let (client, server) = pair(config).await;
+        let serving = echo_server(server.clone());
+        let slow = client.open(FlowKind::Tcp, b"slow".to_vec()).await.unwrap();
+        let sender = slow.sender();
+        let flooding = tokio::spawn(async move {
+            for _ in 0..100 {
+                sender.send(vec![7; TCP_CHUNK]).await?;
+            }
+            Ok::<_, String>(())
+        });
+        for _ in 0..100 {
+            if server.snapshot().receive_queue_bytes == 65536 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!flooding.is_finished());
+        let mut fast = client.open(FlowKind::Tcp, b"fast".to_vec()).await.unwrap();
+        fast.sender().send(b"independent".to_vec()).await.unwrap();
+        fast.sender().eof().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(&*fast.recv().await.unwrap().unwrap(), b"independent");
+        assert!(fast.recv().await.unwrap().is_none());
+        fast.finish().await.unwrap();
+        drop(slow);
+        assert!(flooding.await.unwrap().is_err());
+        assert!(server.snapshot().receive_queue_peak <= server.snapshot().receive_budget);
+        client.shutdown();
+        serving.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn thousand_simultaneous_flows_have_isolated_data_bounded_memory_and_reusable_capacity() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (client, server) = pair(Config::default()).await;
+        let serving = echo_server(server.clone());
+        let barrier = Arc::new(tokio::sync::Barrier::new(1025));
+        let (start, gate) = watch::channel(false);
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0u32..1024 {
+            let endpoint = client.clone();
+            let barrier = barrier.clone();
+            let mut gate = gate.clone();
+            tasks.spawn(async move {
+                let mut flow = endpoint
+                    .open(FlowKind::Tcp, index.to_be_bytes().to_vec())
+                    .await
+                    .unwrap();
+                let id = flow.id();
+                barrier.wait().await;
+                while !*gate.borrow() {
+                    gate.changed().await.unwrap();
+                }
+                let data = [index.to_be_bytes().as_slice(), b"payload"].concat();
+                flow.sender().send(data.clone()).await.unwrap();
+                flow.sender().eof().await.unwrap();
+                assert_eq!(&*flow.recv().await.unwrap().unwrap(), data.as_slice());
+                assert!(flow.recv().await.unwrap().is_none());
+                flow.finish().await.unwrap();
+                id
+            });
+        }
+        barrier.wait().await;
+        assert_eq!(client.snapshot().active, 1024);
+        assert_eq!(server.snapshot().active, 1024);
+        assert!(client
+            .open(FlowKind::Tcp, b"over limit".to_vec())
+            .await
+            .is_err());
+        start.send(true).unwrap();
+        let mut ids = std::collections::HashSet::new();
+        while let Some(result) = tasks.join_next().await {
+            assert!(ids.insert(result.unwrap()));
+        }
+        assert_eq!(client.snapshot().active, 0);
+        assert_eq!(client.snapshot().peak, 1024);
+        let mut extra = client
+            .open(FlowKind::Tcp, b"reused capacity".to_vec())
+            .await
+            .unwrap();
+        assert!(!ids.contains(&extra.id()));
+        extra.sender().eof().await.unwrap();
+        assert!(extra.recv().await.unwrap().is_none());
+        extra.finish().await.unwrap();
+        for endpoint in [&client, &server] {
+            let stats = endpoint.snapshot();
+            assert!(stats.receive_queue_peak <= stats.receive_budget);
+            assert!(stats.send_queue_peak <= stats.send_budget);
+            assert_eq!(stats.protocol_errors, 0);
+            assert!(stats.write_batches < stats.frames_tx);
+        }
+        client.shutdown();
+        serving.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn tiny_transport_buffers_and_graceful_close_preserve_all_bytes() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (a, b) = tokio::io::duplex(3);
+        let (client, server) = tokio::join!(
+            Endpoint::start(a, Role::Client, Config::default()),
+            Endpoint::start(b, Role::Server, Config::default())
+        );
+        let (client, server) = (client.unwrap(), server.unwrap());
+        let serving = echo_server(server.clone());
+        let mut flow = client
+            .open(FlowKind::Tcp, b"fragmented".to_vec())
+            .await
+            .unwrap();
+        let data = vec![91; TCP_CHUNK];
+        flow.sender().send(data.clone()).await.unwrap();
+        flow.sender().eof().await.unwrap();
+        assert_eq!(&*flow.recv().await.unwrap().unwrap(), data.as_slice());
+        assert!(flow.recv().await.unwrap().is_none());
+        flow.finish().await.unwrap();
+        client.shutdown();
+        serving.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn excessive_peer_data_is_rejected_before_exceeding_receive_budget() {
+    use tokio::io::AsyncWriteExt;
+    let (mut attacker, server_io) = tokio::io::duplex(131072);
+    let server = tokio::spawn(Endpoint::start(server_io, Role::Server, Config::default()));
+    wire::handshake(&mut attacker, false, 1024, 65536, 32)
+        .await
+        .unwrap();
+    let server = server.await.unwrap().unwrap();
+    let mut bytes = Vec::new();
+    Frame {
+        kind: Kind::OpenTcp,
+        id: 1,
+        data: b"target".to_vec(),
+    }
+    .encode(&mut bytes)
+    .unwrap();
+    attacker.write_all(&bytes).await.unwrap();
+    let flow = server.accept().await.unwrap().flow;
+    flow.accept().unwrap();
+    assert_eq!(
+        wire::read(&mut attacker).await.unwrap().kind,
+        Kind::Accepted
+    );
+    bytes.clear();
+    for _ in 0..5 {
+        Frame {
+            kind: Kind::Data,
+            id: 1,
+            data: vec![1; TCP_CHUNK],
+        }
+        .encode(&mut bytes)
+        .unwrap();
+    }
+    attacker.write_all(&bytes).await.unwrap();
+    for _ in 0..100 {
+        if server.error().is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(server.error().unwrap().contains("credit"));
+    assert_eq!(server.snapshot().protocol_errors, 1);
+    assert_eq!(server.snapshot().receive_queue_peak, 65536);
+    drop(flow);
+}

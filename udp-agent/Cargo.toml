@@ -4,4 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+secret-tunnel-mux = { path = "../stream-mux" }
 tokio = { version = "1", features = ["io-util", "io-std", "net", "rt", "macros", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["process", "rt-multi-thread"] }

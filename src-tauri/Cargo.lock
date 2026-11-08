@@ -3567,12 +3567,20 @@ dependencies = [
  "libc",
  "plist",
  "russh",
+ "secret-tunnel-mux",
  "secret-tunnel-routing",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tokio",
+]
+
+[[package]]
+name = "secret-tunnel-mux"
+version = "0.1.0"
+dependencies = [
  "tokio",
 ]
 

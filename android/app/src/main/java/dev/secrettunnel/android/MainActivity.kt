@@ -282,6 +282,18 @@ class MainActivity:Activity() {
     }
     private fun diagnostics():String=buildString{
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
+        lastStatus.optJSONObject("transport")?.let { t->
+            append("Транспорт v3 · SSH-каналов: ${t.optInt("ssh_channels")}\n")
+            append("Соединения: ${t.optInt("active")} / ${t.optInt("limit")} · пик: ${t.optInt("peak")}\n")
+            append("Очереди: приём ${t.optLong("receive_queue_bytes")} / ${t.optLong("receive_budget")} B; отправка ${t.optLong("send_queue_bytes")} / ${t.optLong("send_budget")} B\n")
+            append("UDP отброшено: ${t.optLong("udp_drops")} · отказов по лимиту: ${t.optLong("rejected")} · ошибок протокола: ${t.optLong("protocol_errors")}\n\n")
+            t.optJSONObject("server")?.let { server->
+                append("Отчёт сервера: соединений ${server.optInt("active")} / ${server.optInt("limit")} · пик ${server.optInt("peak")}\n")
+                append("Сервер: UDP отброшено ${server.optLong("udp_drops")} · отказов по лимиту ${server.optLong("rejected")}\n")
+                if(server.optString("last_udp_error").isNotBlank())append("UDP сервера: ${server.optString("last_udp_error")}\n")
+                append("\n")
+            }
+        }
         val logs=lastStatus.optJSONArray("logs");if(logs!=null)for(i in 0 until logs.length())append(logs.optString(i)+"\n")
         val file=java.io.File(filesDir,"tun.log")
         if(file.isFile)java.io.RandomAccessFile(file,"r").use{f->val length=f.length();val size=length.coerceAtMost(8192).toInt();f.seek(length-size);val bytes=ByteArray(size);f.readFully(bytes);append(bytes.toString(Charsets.UTF_8))}

@@ -8,13 +8,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
+use secret_tunnel_mux::{Config as MuxConfig, DatagramBuffers, Endpoint, FlowKind, Role};
+pub use secret_tunnel_mux::Snapshot as TransportSnapshot;
 
 #[path = "tls_target.rs"]
 mod tls_target;
-#[path = "udp_mux.rs"]
-mod udp_mux;
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedServer {
@@ -40,18 +40,21 @@ pub struct EmbeddedOptions {
     pub observed_host_key: Option<Arc<std::sync::Mutex<Option<String>>>>,
     pub protect_socket: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,
     pub probe_ipv6: bool,
+    pub max_connections: usize,
 }
 
 #[derive(Debug)]
 pub struct EmbeddedTunnelHandle {
-    stop_tx: Sender<()>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
     join: Option<JoinHandle<()>>,
     counters: Arc<TrafficCounters>,
     outcome: Receiver<Result<(), String>>,
     ipv6_supported: Option<bool>,
+    transport: Endpoint,
 }
 
 impl EmbeddedTunnelHandle {
+    pub fn transport_stats(&self) -> TransportSnapshot { self.transport.snapshot() }
     pub fn ipv6_supported(&self) -> Option<bool> { self.ipv6_supported }
     pub fn try_wait(&self) -> Option<String> {
         match self.outcome.try_recv() {
@@ -65,11 +68,13 @@ impl EmbeddedTunnelHandle {
         self.counters.totals()
     }
 
-    pub fn stop(mut self) {
-        let _ = self.stop_tx.send(());
+    pub fn stop(self) { let _ = self.stop_with_stats(); }
+    pub fn stop_with_stats(mut self) -> TransportSnapshot {
+        let _ = self.stop_tx.send(true);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
+        self.transport.snapshot()
     }
 }
 
@@ -327,13 +332,13 @@ pub fn start_with_options(
 
     let counters = Arc::new(TrafficCounters::default());
     let tunnel_counters = Arc::clone(&counters);
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let (ready_tx, ready_rx) = mpsc::channel();
     let (outcome_tx, outcome) = mpsc::channel();
     let join = thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        if options.protect_socket.is_some() { builder.worker_threads(2); }
+        let runtime = match builder.enable_all().build()
         {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -354,9 +359,9 @@ pub fn start_with_options(
         let _ = outcome_tx.send(result);
     });
 
-    let readiness = ready_rx.recv_timeout(Duration::from_secs(20));
+    let readiness = ready_rx.recv_timeout(Duration::from_secs(35));
     if readiness.is_err() {
-        let _ = stop_tx.send(());
+        let _ = stop_tx.send(true);
         let _ = join.join();
         return Err(outcome
             .try_recv()
@@ -365,81 +370,73 @@ pub fn start_with_options(
             .unwrap_or_else(|| "Embedded SSH startup failed".into()));
     }
 
+    let (ipv6_supported, transport) = readiness.unwrap();
     Ok(EmbeddedTunnelHandle {
         stop_tx,
         join: Some(join),
         counters,
         outcome,
-        ipv6_supported: readiness.unwrap(),
+        ipv6_supported,
+        transport,
     })
 }
 
 async fn run_embedded_tunnel(
     listener: TcpListener,
     server: EmbeddedServer,
-    stop_rx: mpsc::Receiver<()>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
     counters: Arc<TrafficCounters>,
-    ready: Sender<Option<bool>>,
+    ready: Sender<(Option<bool>, Endpoint)>,
     logs: Arc<std::sync::Mutex<Vec<String>>>,
     options: EmbeddedOptions,
 ) -> Result<(), String> {
-    let listener =
-        tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
+    let listener = tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
-    let session = tokio::time::timeout(
-        Duration::from_secs(15),
-        connect_ssh(&server, (server.host.as_str(), server.port), options),
-    )
-    .await
-    .map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
+    let max_connections = if options.max_connections == 0 { 1024 } else { options.max_connections.clamp(64, 4096) };
+    let session = tokio::time::timeout(Duration::from_secs(15),
+        connect_ssh(&server, (server.host.as_str(), server.port), options))
+        .await.map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
     let session = Arc::new(session);
+    let transport = tokio::time::timeout(Duration::from_secs(10), async {
+        let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+        channel.exec(true, "exec \"$HOME/.local/bin/secret-tunnel-agent\" --stdio-v3").await.map_err(|e| e.to_string())?;
+        Endpoint::start(channel.into_stream(), Role::Client, MuxConfig { max_flows: max_connections, ..Default::default() }).await
+    }).await.map_err(|_| "Server agent startup timed out".to_owned())?
+        .map_err(|error| format!("STMUX003 server agent required: {error}"))?;
+    super::log_line(&logs, format!("Transport v3 ready: one SSH channel, {} flows, bounded credit windows", transport.snapshot().limit));
     let ipv6_supported = if probe_ipv6 {
-        async fn reachable(session: &SharedSession, host: &str) -> bool {
-            match tokio::time::timeout(Duration::from_secs(3),
-                session.channel_open_direct_tcpip(host, 443, "127.0.0.1", 0)).await {
-                Ok(Ok(channel)) => { let _ = channel.close().await; true }
-                _ => false,
-            }
+        async fn reachable(transport: &Endpoint, host: &str) -> bool {
+            let Ok(target) = udp_protocol::encode_target(host, 443) else { return false };
+            matches!(tokio::time::timeout(Duration::from_secs(3), transport.open(FlowKind::Tcp, target)).await, Ok(Ok(_)))
         }
-        let (cloudflare, google) = tokio::join!(
-            reachable(&session, "2606:4700:4700::1111"),
-            reachable(&session, "2001:4860:4860::8888"));
+        let (cloudflare, google) = tokio::join!(reachable(&transport, "2606:4700:4700::1111"), reachable(&transport, "2001:4860:4860::8888"));
         let supported = cloudflare || google;
-        super::log_line(&logs, if supported { "Android: server IPv6 egress available" }
-            else { "Android: server IPv6 egress unavailable; using IPv4 compatibility mode" });
+        super::log_line(&logs, if supported { "Android: server IPv6 egress available" } else { "Android: server IPv6 egress unavailable; using IPv4 compatibility mode" });
         Some(supported)
     } else { None };
-    let udp = Arc::new(udp_mux::UdpService::default());
-    let connection_limit = Arc::new(tokio::sync::Semaphore::new(256));
-    let _ = ready.send(ipv6_supported);
-
+    let buffers = DatagramBuffers::default();
+    let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
+    let _ = ready.send((ipv6_supported, transport.clone()));
     loop {
-        if stop_rx.try_recv().is_ok() {
-            disconnect_ssh(&session).await;
-            return Ok(());
-        }
-
+        if *stop.borrow() { transport.shutdown(); disconnect_ssh(&session).await; return Ok(()); }
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, originator_addr) = accepted.map_err(|error| error.to_string())?;
                 let permit = match Arc::clone(&connection_limit).try_acquire_owned() {
                     Ok(permit) => permit,
-                    Err(_) => { super::log_line(&logs, "SOCKS connection limit reached"); continue; }
+                    Err(_) => { super::log_line(&logs, "SOCKS admission capacity reached"); continue; }
                 };
-                let session = Arc::clone(&session);
-                let counters = Arc::clone(&counters);
-                let logs = Arc::clone(&logs);
-                let udp = Arc::clone(&udp);
+                let transport = transport.clone();
+                let counters = counters.clone(); let logs = logs.clone(); let buffers = buffers.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_socks_client(stream, originator_addr, session, counters, &logs, udp).await {
+                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers).await {
                         super::log_line(&logs, format!("SOCKS connection: {error}"));
                     }
                 });
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                if session.is_closed() { return Err("SSH connection closed".into()); }
-            }
+            _ = stop.changed() => { transport.shutdown(); disconnect_ssh(&session).await; return Ok(()); }
+            _ = transport.closed() => return Err(transport.error().unwrap_or_else(|| "Transport stopped".into())),
         }
     }
 }
@@ -451,6 +448,7 @@ async fn handshake<A: ToSocketAddrs>(
 ) -> Result<client::Handle<SshClient>, String> {
     let config = Arc::new(client::Config {
         nodelay: true,
+        channel_buffer_size: 32,
         inactivity_timeout: Some(Duration::from_secs(30)),
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
@@ -638,10 +636,10 @@ async fn disconnect_ssh(session: &SharedSession) {
 async fn handle_socks_client(
     mut stream: TcpStream,
     originator_addr: std::net::SocketAddr,
-    session: SharedSession,
+    transport: Endpoint,
     counters: Arc<TrafficCounters>,
     logs: &Arc<std::sync::Mutex<Vec<String>>>,
-    udp: Arc<udp_mux::UdpService>,
+    buffers: DatagramBuffers,
 ) -> Result<(), String> {
     let request =
         match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
@@ -656,7 +654,7 @@ async fn handle_socks_client(
         };
 
     if request.command == 0x03 {
-        return relay_udp_association(stream, originator_addr, request.port, session, counters, &udp, logs)
+        return relay_udp_association(stream, originator_addr, request.port, transport, counters, buffers)
             .await;
     }
 
@@ -689,20 +687,9 @@ async fn handle_socks_client(
         );
     }
 
-    let channel = tokio::time::timeout(Duration::from_secs(10), async {
-        session
-            .channel_open_direct_tcpip(
-                destination,
-                request.port.into(),
-                originator_addr.ip().to_string(),
-                originator_addr.port().into(),
-            )
-            .await
-            .map_err(|error| error.to_string())
-    }).await.map_err(|_| "SOCKS destination connect timed out".to_owned())
-        .and_then(|result| result);
-    let channel = match channel {
-        Ok(channel) => channel,
+    let target = udp_protocol::encode_target(&destination, request.port).map_err(|e|e.to_string())?;
+    let mut flow = match transport.open(FlowKind::Tcp, target).await {
+        Ok(flow) => flow,
         Err(error) => {
             if !fake_ip { let _ = write_socks5_reply(&mut stream, 0x04).await; }
             return Err(error);
@@ -712,53 +699,16 @@ async fn handle_socks_client(
     if !fake_ip {
         write_socks5_reply(&mut stream, 0x00).await?;
     }
-    let mut channel_stream = channel.into_stream();
     if !preface.is_empty() {
-        channel_stream
-            .write_all(&preface)
-            .await
-            .map_err(|e| e.to_string())?;
+        for chunk in preface.chunks(secret_tunnel_mux::TCP_CHUNK) { flow.sender().send(chunk.to_vec()).await?; }
         counters.add_tx(preface.len() as u64);
     }
-    relay_with_counters(&mut stream, &mut channel_stream, &counters).await?;
+    secret_tunnel_mux::relay(&mut flow, &mut stream, |direction,count| {
+        match direction { secret_tunnel_mux::Direction::Upload => counters.add_tx(count as u64), secret_tunnel_mux::Direction::Download => counters.add_rx(count as u64) }
+    }).await?;
     Ok(())
 }
 
-async fn relay_with_counters<A, B>(
-    client: &mut A,
-    remote: &mut B,
-    counters: &TrafficCounters,
-) -> Result<(), String>
-where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
-{
-    let (mut client_read, mut client_write) = tokio::io::split(client);
-    let (mut remote_read, mut remote_write) = tokio::io::split(remote);
-    async fn copy_counted<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-        reader: &mut R,
-        writer: &mut W,
-        counter: &AtomicU64,
-    ) -> Result<(), String> {
-        let mut buffer = vec![0; 32768];
-        loop {
-            let count = reader.read(&mut buffer).await.map_err(|e| e.to_string())?;
-            if count == 0 {
-                return writer.shutdown().await.map_err(|e| e.to_string());
-            }
-            writer
-                .write_all(&buffer[..count])
-                .await
-                .map_err(|e| e.to_string())?;
-            counter.fetch_add(count as u64, Ordering::Relaxed);
-        }
-    }
-    tokio::try_join!(
-        copy_counted(&mut client_read, &mut remote_write, &counters.tx_total),
-        copy_counted(&mut remote_read, &mut client_write, &counters.rx_total),
-    )?;
-    Ok(())
-}
 
 #[derive(Clone, Debug)]
 struct SocksRequest {
@@ -858,50 +808,43 @@ async fn read_socks5_request(stream: &mut TcpStream) -> Result<SocksRequest, Str
 }
 
 async fn relay_udp_association(
-    mut control: TcpStream,
-    peer: std::net::SocketAddr,
-    requested_port: u16,
-    session: SharedSession,
-    counters: Arc<TrafficCounters>,
-    udp: &udp_mux::UdpService,
-    logs: &Arc<std::sync::Mutex<Vec<String>>>,
+    mut control: TcpStream, peer: std::net::SocketAddr, requested_port: u16,
+    transport: Endpoint, counters: Arc<TrafficCounters>, buffers: DatagramBuffers,
 ) -> Result<(), String> {
-    let mut agent = udp.associate(&session, logs).await?;
+    let mut flow = match transport.open(FlowKind::Udp, Vec::new()).await {
+        Ok(flow) => flow,
+        Err(error) => {
+            let _ = write_socks5_reply(&mut control, 0x01).await;
+            return Err(error);
+        }
+    };
+    let sender = flow.sender();
     let local = control.local_addr().map_err(|e| e.to_string())?;
-    let socket = tokio::net::UdpSocket::bind((local.ip(), 0))
-        .await
-        .map_err(|e| e.to_string())?;
+    let socket = tokio::net::UdpSocket::bind((local.ip(), 0)).await.map_err(|e| e.to_string())?;
     let bound = socket.local_addr().map_err(|e| e.to_string())?;
-    let reply = udp_protocol::encode_packet(bound, &[]).map_err(|e| e.to_string())?;
-    // UDP packet has an extra FRAG byte; SOCKS reply uses VER/REP/RSV.
-    let mut reply = reply;
+    let mut reply = udp_protocol::encode_packet(bound, &[]).map_err(|e| e.to_string())?;
     reply[0] = 5;
     control.write_all(&reply).await.map_err(|e| e.to_string())?;
-    let mut buffer = vec![0; 65535];
     let mut control_buffer = [0; 1];
-    let mut endpoint = if requested_port == 0 {
-        None
-    } else {
-        Some(std::net::SocketAddr::new(peer.ip(), requested_port))
-    };
+    let mut endpoint = if requested_port == 0 { None } else { Some(std::net::SocketAddr::new(peer.ip(), requested_port)) };
     loop {
         tokio::select! {
             _ = control.read(&mut control_buffer) => return Ok(()),
-            _ = agent.closed.changed() => return Err("UDP agent channel closed".into()),
-            packet = socket.recv_from(&mut buffer) => {
-                let (length, source) = packet.map_err(|e| e.to_string())?;
-                if source.ip() != peer.ip() || endpoint.map(|expected| expected != source).unwrap_or(false) { continue; }
-                let payload_len = match udp_protocol::parse_packet(&buffer[..length]) { Ok(packet) => packet.payload.len(), Err(_) => continue };
+            received = buffers.recv(&socket) => {
+                let (packet, source) = received.map_err(|e| e.to_string())?;
+                if source.ip() != peer.ip() || endpoint.is_some_and(|expected| expected != source) { continue; }
+                let payload = match udp_protocol::parse_packet(&packet) { Ok(packet) => packet.payload.len(), Err(_) => continue };
                 endpoint = Some(source);
-                agent.send(buffer[..length].to_vec()).await?;
-                counters.add_tx(payload_len as u64);
+                if sender.try_send_datagram(packet)? { counters.add_tx(payload as u64); }
             }
-            Some(packet) = agent.incoming.recv() => {
+            received = flow.recv() => {
+                let Some(packet) = received? else { return Ok(()); };
                 if let Some(endpoint) = endpoint {
-                    socket.send_to(&packet,endpoint).await.map_err(|e|e.to_string())?;
-                    let packet = udp_protocol::parse_packet(&packet).map_err(|e|e.to_string())?;
-                    counters.add_rx(packet.payload.len() as u64);
+                    socket.send_to(&packet, endpoint).await.map_err(|e| e.to_string())?;
+                    let parsed = udp_protocol::parse_packet(&packet).map_err(|e| e.to_string())?;
+                    counters.add_rx(parsed.payload.len() as u64);
                 }
+                drop(packet);
             }
         }
     }

@@ -6,16 +6,16 @@ macOS supports selecting installed `.app` programs and routing their traffic thr
 
 Android client in the same repository: per-app VPN with TCP/UDP over the shared Rust SSH core, traffic chart, managed server trust, key import and device-key enrollment. Build and device-check instructions: [Android](docs/ANDROID.md). Run `bash scripts/build-android.sh` on macOS/Linux or `./scripts/build-android.ps1` through WSL on Windows. APK output: `artifacts/android/SecretTunnel-debug.apk`.
 
-Signed Android release APKs, complete Windows setup/portable packages, universal macOS DMG/ZIP and the Linux UDP-agent are published together by [Publish releases](.github/workflows/release.yml). See [release instructions](docs/RELEASES.md) and [Windows package contents](docs/WINDOWS-RELEASE.md).
+Signed Android release APKs, complete Windows setup/portable packages, universal macOS DMG/ZIP and the Linux server agent are published together by [Publish releases](.github/workflows/release.yml). See [release instructions](docs/RELEASES.md) and [Windows package contents](docs/WINDOWS-RELEASE.md).
 
 Select installed programs using the searchable checkbox list in Applications. See [selector and UDP performance validation](docs/APPLICATION-SELECTOR.md).
 
 Experimental Windows per-app interception: [implementation and validation status](docs/APPLICATION-REDIRECT.md).
 
 Experimental UDP-over-SSH work: [architecture and validation plan](docs/UDP-OVER-SSH.md).
-The embedded engine supports SOCKS5 UDP ASSOCIATE using `secret-tunnel-agent`
+The embedded engine multiplexes TCP and SOCKS5 UDP ASSOCIATE using the v0.2.3 `secret-tunnel-agent`
 installed at `~/.local/bin/secret-tunnel-agent` on the server. It opens an exec channel on the existing
-SSH connection; System OpenSSH `-D` remains TCP-only. This does not yet capture
+SSH connection with bounded per-flow credit. Update both client and server agent; an older agent is rejected. System OpenSSH `-D` remains TCP-only. This does not yet capture
 traffic from Windows applications automatically. See the [baseline audit](docs/AUDIT-2026-11-07.md).
 
 ![Secret Tunnel connection screen](docs/screenshots/connection.svg)

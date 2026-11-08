@@ -2,11 +2,11 @@
 
 ## Как работает
 
-`Выбранное приложение → ProxyBridge Network Extension → локальный SOCKS5 → Embedded Rust SSH → SSH-сервер → secret-tunnel-agent (UDP) / direct-tcpip (TCP)`.
+`Выбранное приложение → ProxyBridge Network Extension → локальный SOCKS5 → Embedded Rust SSH → SSH-сервер → secret-tunnel-agent --stdio-v3 (TCP и UDP)`.
 
 Secret Tunnel управляет подписанным ProxyBridge через CLI, используя **формат профиля macOS** и передачу JSON в stdin. Требуется ProxyBridge **4.1.2 или новее**, macOS 13+ и разрешённое системное расширение. Windows-комплект с WinDivert на Mac не используется. Системный SOCKS/HTTP proxy и маршруты остальных приложений Secret Tunnel не меняет.
 
-- **Embedded Rust SSH:** TCP и UDP внутри существующей SSH-сессии. Для UDP серверу нужен исполняемый `~/.local/bin/secret-tunnel-agent`; см. [установку агента](SERVER-UDP-SETUP.md).
+- **Embedded Rust SSH:** TCP и UDP внутри существующей SSH-сессии. Для TCP и UDP серверу нужен обновлённый исполняемый `~/.local/bin/secret-tunnel-agent`; см. [установку агента](SERVER-UDP-SETUP.md).
 - **System OpenSSH:** TCP через `ssh -D`. UDP выбранных приложений блокируется, чтобы не подменять туннелирование незаметным прямым выходом.
 - Системный DNS может идти напрямую. В этом адаптере DNS proxy ProxyBridge выключен, DNS и доменные regex-правила Windows не переносятся. DNS-конфигурации с fake IP, защищённый DNS и другие VPN требуют отдельного совместного тестирования.
 - Перехват применяется к новым соединениям. После включения или изменения выбора переподключите приложения.

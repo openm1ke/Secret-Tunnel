@@ -161,6 +161,23 @@ pub fn encode_packet(address: SocketAddr, payload: &[u8]) -> io::Result<Vec<u8>>
     Ok(packet)
 }
 
+#[allow(dead_code)] // Client target builder; server parses the same representation.
+pub fn encode_target(host: &str, port: u16) -> io::Result<Vec<u8>> {
+    if port == 0 {
+        return Err(invalid());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return encode_packet(SocketAddr::new(ip, port), &[]);
+    }
+    if host.is_empty() || host.len() > 255 {
+        return Err(invalid());
+    }
+    let mut packet = vec![0, 0, 0, 3, host.len() as u8];
+    packet.extend_from_slice(host.as_bytes());
+    packet.extend_from_slice(&port.to_be_bytes());
+    Ok(packet)
+}
+
 pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Vec<u8>> {
     // EOF before a new frame is clean; EOF inside a frame is malformed input.
     let high = reader.read_u8().await?;

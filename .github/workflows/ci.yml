@@ -17,14 +17,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo test --manifest-path routing-engine/Cargo.toml --locked
+      - run: cargo test --manifest-path stream-mux/Cargo.toml --locked
       - run: cargo test --locked
         working-directory: src-tauri
       - run: cargo test --features embedded-ssh --locked
         working-directory: src-tauri
       - run: cargo build --manifest-path src-tauri/Cargo.toml --locked
       - run: python3 scripts/check-macos-redirect.py src-tauri/target/debug/secret-tunnel
-      - run: cargo test --manifest-path udp-agent/Cargo.toml
-      - run: cargo build --manifest-path udp-agent/Cargo.toml
+      - run: cargo test --manifest-path udp-agent/Cargo.toml --locked
+      - run: cargo build --manifest-path udp-agent/Cargo.toml --locked
       - run: python3 udp-agent/test_echo.py udp-agent/target/debug/secret-tunnel-agent
 
   windows:
@@ -48,8 +49,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --manifest-path routing-engine/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --manifest-path udp-agent/Cargo.toml
+          cargo test --manifest-path stream-mux/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --manifest-path udp-agent/Cargo.toml
+          cargo test --manifest-path udp-agent/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --manifest-path udp-agent/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python udp-agent/test_echo.py udp-agent/target/debug/secret-tunnel-agent.exe

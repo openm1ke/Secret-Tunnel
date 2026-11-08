@@ -2,9 +2,9 @@ name: Android APK
 on:
   workflow_dispatch:
   push:
-    paths: ['android/**', 'tunnel-core/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/udp_mux.rs', 'src-tauri/src/tls_target.rs', 'scripts/build-android.sh', '.github/workflows/android.yml']
+    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'scripts/build-android.sh', '.github/workflows/android.yml']
   pull_request:
-    paths: ['android/**', 'tunnel-core/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/udp_mux.rs', 'src-tauri/src/tls_target.rs', 'scripts/build-android.sh', '.github/workflows/android.yml']
+    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'scripts/build-android.sh', '.github/workflows/android.yml']
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -22,6 +22,7 @@ jobs:
           targets: aarch64-linux-android,x86_64-linux-android
       - run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;27.0.12077973'
       - run: cargo test --manifest-path tunnel-core/Cargo.toml --locked
+      - run: cargo test --manifest-path stream-mux/Cargo.toml --locked
       - run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973" bash scripts/build-android.sh
       - uses: actions/upload-artifact@v4
         with:

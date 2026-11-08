@@ -1,0 +1,19 @@
+[package]
+name = "secret-tunnel-android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "secret_tunnel_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+secret-tunnel-core = { path = "../../tunnel-core" }
+jni = "=0.21.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

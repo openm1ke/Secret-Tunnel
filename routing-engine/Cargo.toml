@@ -1,0 +1,14 @@
+[package]
+name = "secret-tunnel-routing"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+regex = "=1.12.4"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+panic = "abort"

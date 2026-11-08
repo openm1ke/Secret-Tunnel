@@ -1,0 +1,192 @@
+name: Publish releases
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to publish after successful builds, for example v0.2.0'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]] || exit 1
+          version="${RELEASE_TAG#v}"
+          test "$(node -p 'require("./package.json").version')" = "$version"
+          commit=$(git rev-parse HEAD)
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$commit"
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  agent:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
+      - run: cargo test --manifest-path udp-agent/Cargo.toml --locked
+      - run: cargo build --manifest-path udp-agent/Cargo.toml --release --target x86_64-unknown-linux-musl --locked
+      - run: python3 udp-agent/test_echo.py udp-agent/target/x86_64-unknown-linux-musl/release/secret-tunnel-agent
+      - name: Package server agent
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          mkdir -p artifacts/server artifacts/release
+          cp udp-agent/target/x86_64-unknown-linux-musl/release/secret-tunnel-agent artifacts/server/secret-tunnel-agent-linux-x86_64
+          cp scripts/install-server-agent.sh artifacts/server/install-server-agent.sh
+          cp LICENSE artifacts/server/LICENSE.txt
+          cp docs/SERVER-UDP-SETUP.md artifacts/server/README.md
+          tar -czf "artifacts/release/SecretTunnel-$VERSION-server-linux-x86_64.tar.gz" -C artifacts/server .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-agent-runtime
+          path: artifacts/server/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-server
+          path: artifacts/release/
+  android:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/secret-tunnel-android
+          key: android-release-ndk27-${{ hashFiles('android/native/Cargo.lock', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+      - run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;27.0.12077973'
+      - run: cargo test --manifest-path tunnel-core/Cargo.toml --locked
+      - name: Build signed release APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ST_VERSION_NAME: ${{ needs.metadata.outputs.version }}
+          ST_VERSION_CODE: ${{ github.run_number }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/android-release.p12"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_FILE"
+          chmod 600 "$ANDROID_KEYSTORE_FILE"
+          trap 'rm -f "$ANDROID_KEYSTORE_FILE"' EXIT
+          export ANDROID_BUILD_TYPE=release
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          export ST_VERSION_CODE=$((20000 + ST_VERSION_CODE))
+          bash scripts/build-android.sh
+          mkdir -p artifacts/release
+          cp artifacts/android/SecretTunnel-release.apk "artifacts/release/SecretTunnel-$ST_VERSION_NAME-android.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: artifacts/release/
+  windows:
+    needs: [metadata, agent]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            routing-engine -> target
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-agent-runtime
+          path: src-tauri/resources/server
+      - run: choco install nasm -y --no-progress
+      - name: Build complete Windows distribution
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $ErrorActionPreference='Stop'
+          $env:PATH="C:\Program Files\NASM;$env:PATH"
+          npm ci
+          if($LASTEXITCODE -ne 0){throw 'npm ci failed'}
+          ./scripts/prepare-windows-component.ps1 -WorkDirectory "$env:RUNNER_TEMP/secret-tunnel-components"
+          cargo test --manifest-path src-tauri/Cargo.toml --features embedded-ssh --lib --locked
+          if($LASTEXITCODE -ne 0){throw 'Windows tests failed'}
+          python scripts/collect-android-licenses.py src-tauri/resources/licenses --manifest src-tauri/Cargo.toml --platform x86_64-pc-windows-msvc --features embedded-ssh
+          if($LASTEXITCODE -ne 0){throw 'License collection failed'}
+          npm run tauri -- build --features embedded-ssh --config src-tauri/tauri.release.conf.json --bundles nsis
+          if($LASTEXITCODE -ne 0){throw 'Windows packaging failed'}
+          ./scripts/package-windows.ps1 -Version $env:VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: artifacts/release/
+  publish:
+    needs: [metadata, android, windows, agent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          COMMIT: ${{ needs.metadata.outputs.commit }}
+        run: |
+          cd release-assets
+          sha256sum *.apk *.zip *.exe *.tar.gz > SHA256SUMS.txt
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" ./* --target "$COMMIT" --title "Secret Tunnel $TAG" --notes-file ../docs/RELEASE-NOTES.md --repo "$GITHUB_REPOSITORY"
+          fi

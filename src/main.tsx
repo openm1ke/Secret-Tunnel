@@ -1,3 +1,4 @@
+import DomainsPanel from "./DomainsPanel";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
@@ -47,6 +48,9 @@ type ProxyProfile = {
 };
 
 type AppSettings = {
+  redirect_cli_path: string;
+  redirect_processes: string[];
+  domain_rules: DomainRule[];
   ipinfo_token: string;
   ssh_engine: string;
   hide_sensitive: boolean;
@@ -96,7 +100,13 @@ type TrafficPoint = {
   latency_ms: number | null;
 };
 
-type Tab = "connect" | "servers" | "proxies" | "settings";
+type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "settings";
+type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
+type DomainStats = { events: number; unknown: number; rules: {id: string; observed: number; tunnel: number; direct: number}[] };
+type RedirectStatus = { running: boolean; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
+type InstalledApp = { id: string; name: string; executable: string; patterns: string[]; source: string };
+const normalizeAppPattern = (value: string) => value.trim().replace(/\//g, "\\").toLowerCase();
+const appAliases = (app: InstalledApp) => [...app.patterns, app.executable.split(/[\\/]/).pop() || ""].map(normalizeAppPattern);
 type BusyAction = "connect" | "disconnect" | "restart" | "save" | "delete" | "test" | "logs" | null;
 type CopyField = "proxy-ip" | "server-host" | "ipinfo-token" | null;
 
@@ -127,6 +137,9 @@ const emptyConfig: AppConfig = {
   servers: [],
   proxies: [],
   settings: {
+    redirect_cli_path: "",
+    redirect_processes: ["Discord.exe"],
+    domain_rules: [],
     ipinfo_token: "",
     ssh_engine: "system",
     hide_sensitive: true,
@@ -139,6 +152,9 @@ const emptyConfig: AppConfig = {
 };
 
 const defaultSettings: AppSettings = {
+  redirect_cli_path: "",
+  redirect_processes: ["Discord.exe"],
+    domain_rules: [],
   ipinfo_token: "",
   ssh_engine: "system",
   hide_sensitive: true,
@@ -364,6 +380,13 @@ function App() {
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(emptyConfig.settings);
   const [traffic, setTraffic] = useState<TrafficPoint[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
+  const [redirect, setRedirect] = useState<RedirectStatus>({ running: false, pid: null, administrator: false, component_available: false, last_error: "" });
+  const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
+  const [appsLoaded, setAppsLoaded] = useState(false);
+  const [appsScanning, setAppsScanning] = useState(false);
+  const [appsError, setAppsError] = useState("");
+  const [appSearch, setAppSearch] = useState("");
+  const [selectedAppsOnly, setSelectedAppsOnly] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<BusyAction>(null);
   const [showServerHost, setShowServerHost] = useState(false);
@@ -379,19 +402,69 @@ function App() {
   const stateClass = connected ? "state good" : status.last_error ? "state bad" : "state idle";
   const showSensitive = !config.settings.hide_sensitive;
   const visibleProxyIp = showSensitive ? status.ip || "-" : maskValue(status.ip);
+  const selectedPatterns = new Set(settingsDraft.redirect_processes.map(normalizeAppPattern));
+  const isAppSelected = (app: InstalledApp) => appAliases(app).some(pattern => selectedPatterns.has(pattern));
+  const appChoices = useMemo(() => {
+    const known = new Set(installedApps.flatMap(appAliases));
+    const custom = settingsDraft.redirect_processes.filter(pattern => pattern && !known.has(normalizeAppPattern(pattern)))
+      .map(pattern => ({ id: normalizeAppPattern(pattern), name: pattern.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || pattern,
+        executable: pattern, patterns: [pattern], source: "manual" }));
+    return [...installedApps, ...custom].sort((a,b) => a.name.localeCompare(b.name));
+  }, [installedApps, settingsDraft.redirect_processes]);
+  const visibleApps = appChoices.filter(app => (!selectedAppsOnly || isAppSelected(app)) &&
+    `${app.name} ${app.executable}`.toLowerCase().includes(appSearch.toLowerCase()));
+  const selectedAppCount = appChoices.filter(isAppSelected).length;
+
+  async function scanApplications() {
+    setAppsScanning(true); setAppsError("");
+    try { setInstalledApps(await invoke<InstalledApp[]>("scan_installed_applications")); }
+    catch (error) { setAppsError(String(error)); }
+    finally { setAppsScanning(false); setAppsLoaded(true); }
+  }
+
+  function toggleApplication(app: InstalledApp, checked: boolean) {
+    const aliases = new Set(appAliases(app));
+    const patterns = settingsDraft.redirect_processes.filter(pattern => !aliases.has(normalizeAppPattern(pattern)));
+    updateSettings("redirect_processes", checked ? [...patterns, ...app.patterns] : patterns);
+  }
+
+  async function addApplicationFile() {
+    try {
+      const chosen = await open({ multiple: true, filters: [{ name: "Приложения Windows", extensions: ["exe"] }] });
+      const paths = typeof chosen === "string" ? [chosen] : chosen || [];
+      if (!paths.length) return;
+      const entries = paths.map(path => installedApps.find(app => normalizeAppPattern(app.executable) === normalizeAppPattern(path)) ||
+        ({id: normalizeAppPattern(path), name: path.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || path,
+        executable: path, patterns: [path], source: "manual"}));
+      setInstalledApps(current => [...current.filter(app => !entries.some(entry => entry.id === app.id)), ...entries]);
+      updateSettings("redirect_processes", [...new Set([...settingsDraft.redirect_processes, ...entries.flatMap(app => app.patterns)])]);
+    } catch (error) { setMessage(String(error)); }
+  }
+
+  function applicationSettings() {
+    // Expand selected app families, including their updaters, when saving old rules.
+    let patterns = [...settingsDraft.redirect_processes];
+    for (const app of appChoices.filter(isAppSelected)) {
+      const aliases = new Set(appAliases(app));
+      patterns = [...patterns.filter(pattern => !aliases.has(normalizeAppPattern(pattern))), ...app.patterns];
+    }
+    return {...settingsDraft, redirect_processes: [...new Map(patterns.filter(Boolean).map(pattern => [normalizeAppPattern(pattern), pattern])).values()]};
+  }
 
   async function refreshAll() {
     try {
-      const [nextConfig, nextStatus, nextTraffic, nextLogs] = await Promise.all([
+      const [nextConfig, nextStatus, nextTraffic, nextLogs, nextRedirect] = await Promise.all([
         invoke<AppConfig>("get_config"),
         invoke<TunnelStatus>("tunnel_status"),
         invoke<TrafficPoint[]>("traffic_history"),
         invoke<string[]>("get_logs"),
+        invoke<RedirectStatus>("redirect_status"),
       ]);
       setConfig(nextConfig);
       setStatus(nextStatus);
       setTraffic(nextTraffic);
       setLogs(nextLogs);
+      setRedirect(nextRedirect);
       if (!settingsDirtyRef.current) setSettingsDraft(nextConfig.settings);
       setServerDraft((current) => (serverDraftDirtyRef.current ? current : selectedServer(nextConfig)));
       setProxyDraft((current) => (proxyDraftDirtyRef.current ? current : selectedProxy(nextConfig)));
@@ -491,6 +564,10 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (activeTab === "applications" && !appsLoaded && !appsScanning) scanApplications();
+  }, [activeTab]);
+
   return (
     <main className="app">
       <aside className="sidebar">
@@ -568,10 +645,16 @@ function App() {
             <Settings size={16} />
             Настройки
           </button>
+          <button className={activeTab === "applications" ? "active" : ""} onClick={() => setActiveTab("applications")}>
+            <Shield size={18} />
+            Приложения
+          </button>
+          <button className={activeTab === "domains" ? "active" : ""} onClick={() => setActiveTab("domains")}><SlidersHorizontal size={18} />Домены</button>
         </nav>
       </aside>
 
-      <section className="workspace">
+      <section className={`workspace${message ? " hasMessage" : ""}${(activeTab === "applications" || activeTab === "domains") ? " appsWorkspace" : ""}`}>
+        {message && <div className="actionMessage" role="status"><span>{message}</span><button onClick={() => setMessage("")} aria-label="Скрыть сообщение">×</button></div>}
         <div className={activeTab === "connect" ? "workspaceContent noScroll" : "workspaceContent"}>
           {activeTab === "connect" && (
             <section className="panel connectPanel">
@@ -931,6 +1014,106 @@ function App() {
               </section>
             </div>
           )}
+
+          {activeTab === "applications" && (
+            <section className="panel narrow applicationsPanel">
+              <div className="panelTitle"><Shield size={18} />Трафик приложений</div>
+              <p>Отметьте программы: их TCP и UDP будут идти через SSH-туннель.</p>
+              <div className={redirect.running ? "state good" : "state idle"}>
+                {redirect.running ? "Перехват включён" : "Перехват выключен"}
+              </div>
+              <p>Остальные приложения работают напрямую. После выключения перехвата выбранные приложения также выходят напрямую.</p>
+              {!redirect.administrator && <div className="notice">Для включения перехвата запустите Secret Tunnel от имени администратора.</div>}
+              {!redirect.component_available && <div className="notice">Комплект перехвата не установлен или неполон. Укажите путь к проверенному компоненту и сохраните настройки.</div>}
+              {status.ssh_engine !== "embedded" && <div className="notice">Для TCP и UDP выберите Embedded Rust SSH в настройках и запустите туннель.</div>}
+              {redirect.last_error && <div className="notice">{redirect.last_error}</div>}
+              <div className="appChooser">
+                <div className="appChooserToolbar">
+                  <input aria-label="Поиск программы" placeholder="Найти программу: Telegram, Firefox…" value={appSearch} onChange={event => setAppSearch(event.target.value)} />
+                  <button disabled={appsScanning} onClick={scanApplications}><RefreshCcw size={16} />{appsScanning ? "Ищем…" : "Обновить"}</button>
+                </div>
+                <div className="appChooserSummary">
+                  <span>Выбрано: {selectedAppCount} · Найдено: {installedApps.length}</span>
+                  <label className="checkboxLine"><input type="checkbox" checked={selectedAppsOnly} onChange={event => setSelectedAppsOnly(event.target.checked)} />Только выбранные</label>
+                </div>
+                {appsError && <div className="notice">{appsError}</div>}
+                <div className="appChoices" aria-label="Установленные программы" aria-busy={appsScanning}>
+                  {visibleApps.map(app => <label key={app.id} className={isAppSelected(app) ? "appChoice selected" : "appChoice"}>
+                    <input type="checkbox" checked={isAppSelected(app)} disabled={busy !== null} onChange={event => toggleApplication(app, event.target.checked)} />
+                    <span className="appBadge" aria-hidden="true">{app.name.slice(0,1).toUpperCase()}</span>
+                    <span className="appDescription"><strong>{app.name}</strong><small title={app.executable}>{app.executable}</small>
+                      {app.patterns.length > 1 && <small>Включая обновлятор и вспомогательные процессы</small>}</span>
+                  </label>)}
+                  {!visibleApps.length && <p className="appListEmpty">{appsScanning ? "Ищем установленные программы…" : "Программы не найдены. Измените поиск или добавьте exe-файл."}</p>}
+                </div>
+                <button disabled={busy !== null} onClick={addApplicationFile}><Plus size={16} />Добавить программу из файла</button>
+              </div>
+              <details className="appAdvanced"><summary>Дополнительные настройки</summary>
+              <label>Правила вручную (имена exe или полные пути через запятую)
+                <input disabled={redirect.running} value={settingsDraft.redirect_processes.join(", ")}
+                  onChange={event => updateSettings("redirect_processes",event.target.value.split(",").map(name=>name.trim()))} />
+              </label>
+              <label>
+                Компонент перехвата
+                <div className="fileField">
+                  <input disabled={redirect.running} value={settingsDraft.redirect_cli_path}
+                    onChange={(event) => updateSettings("redirect_cli_path", event.target.value)} placeholder="Путь к ProxyBridge_CLI.exe" />
+                  <button disabled={redirect.running} title="Выбрать компонент" onClick={async () => {
+                    try {
+                      const selected = await open({ multiple: false, filters: [{ name: "ProxyBridge CLI", extensions: ["exe"] }] });
+                      if (typeof selected === "string") updateSettings("redirect_cli_path", selected);
+                    } catch (error) { setMessage(String(error)); }
+                  }}><FolderOpen size={16} /></button>
+                </div>
+              </label>
+              <p>Нужен проверенный комплект ProxyBridge с WinDivert. Перехват действует на новые соединения: после включения переподключите или перезапустите выбранные программы.</p>
+              </details>
+              <div className="actions left applicationActions">
+                <button className="primary" disabled={busy !== null || redirect.running || !connected || !redirect.administrator || !redirect.component_available || (selectedAppCount === 0 && !(settingsDraft.domain_rules || []).some(r => r.enabled)) || status.ssh_engine !== "embedded"}
+                  onClick={() => runAction("connect", async () => {
+                    const settings = applicationSettings();
+                    await invoke<AppConfig>("save_settings", { settings });
+                    setSettingsDraft(settings);
+                    settingsDirtyRef.current = false;
+                    return invoke<string>("start_redirect");
+                  })}><Play size={16} />Включить перехват</button>
+                <button disabled={busy !== null || !redirect.running}
+                  onClick={() => runAction("disconnect", () => invoke<string>("stop_redirect"))}>
+                  <CircleStop size={16} />Выключить
+                </button>
+                <button disabled={busy !== null} onClick={() => runAction("save", async () => {
+                  const settings = applicationSettings();
+                    await invoke<AppConfig>("save_settings", { settings });
+                    setSettingsDraft(settings);
+                  settingsDirtyRef.current = false;
+                  if (redirect.running) {
+                    await invoke<string>("stop_redirect");
+                    if (settings.redirect_processes.length || (settings.domain_rules || []).some(r => r.enabled)) return invoke<string>("start_redirect");
+                    return "Выбор очищен. Перехват выключен";
+                  }
+                  return "Выбор приложений сохранён";
+                })}><Save size={16} />{redirect.running ? "Применить выбор" : "Сохранить выбор"}</button>
+              </div>
+            </section>
+          )}
+
+          {activeTab === "domains" && <DomainsPanel rules={settingsDraft.domain_rules || []} stats={redirect.domain_stats}
+            running={redirect.running} busy={busy !== null} canStart={connected && redirect.administrator && redirect.component_available && status.ssh_engine === "embedded"}
+            onChange={rules => updateSettings("domain_rules", rules)}
+            onSave={() => runAction("save", async () => {
+              await invoke<AppConfig>("save_settings", {settings: settingsDraft});
+              settingsDirtyRef.current = false;
+              if (redirect.running) {
+                await invoke<string>("stop_redirect");
+                return invoke<string>("start_redirect");
+              }
+              return "Правила доменов сохранены. Включите перехват для применения";
+            })}
+            onStart={() => runAction("connect", async () => {
+              await invoke<AppConfig>("save_settings", {settings: settingsDraft}); settingsDirtyRef.current = false;
+              return invoke<string>("start_redirect");
+            })}
+            onStop={() => runAction("disconnect", () => invoke<string>("stop_redirect"))} />}
 
           {activeTab === "settings" && (
             <section className="panel narrow">

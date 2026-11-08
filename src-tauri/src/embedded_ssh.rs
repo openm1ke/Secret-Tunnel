@@ -1,15 +1,15 @@
+use crate::udp_protocol;
 use russh::client;
 use russh::keys::known_hosts::learn_known_hosts;
 use russh::keys::{check_known_hosts, load_secret_key, ssh_key, PrivateKeyWithHashAlg};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedServer {
@@ -27,14 +27,32 @@ pub struct EmbeddedProxy {
     pub port: u16,
 }
 
+/// Platform integration without changing desktop defaults. Pinning is mandatory
+/// in the Android adapter; an empty pin observes the host key but rejects it.
+#[derive(Clone, Default)]
+pub struct EmbeddedOptions {
+    pub host_key_sha256: Option<String>,
+    pub observed_host_key: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    pub protect_socket: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,
+}
+
 #[derive(Debug)]
 pub struct EmbeddedTunnelHandle {
     stop_tx: Sender<()>,
     join: Option<JoinHandle<()>>,
     counters: Arc<TrafficCounters>,
+    outcome: Receiver<Result<(), String>>,
 }
 
 impl EmbeddedTunnelHandle {
+    pub fn try_wait(&self) -> Option<String> {
+        match self.outcome.try_recv() {
+            Ok(Err(error)) => Some(error),
+            Ok(Ok(())) => Some("Embedded SSH stopped".into()),
+            Err(mpsc::TryRecvError::Disconnected) => Some("Embedded SSH worker exited".into()),
+            Err(mpsc::TryRecvError::Empty) => None,
+        }
+    }
     pub fn traffic_totals(&self) -> (u64, u64) {
         self.counters.totals()
     }
@@ -74,6 +92,7 @@ struct SshClient {
     host: String,
     port: u16,
     strict_host_key_checking: String,
+    options: EmbeddedOptions,
 }
 
 impl client::Handler for SshClient {
@@ -83,6 +102,17 @@ impl client::Handler for SshClient {
         &mut self,
         server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
+        let fingerprint = server_public_key
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string();
+        if let Some(observed) = &self.options.observed_host_key {
+            if let Ok(mut observed) = observed.lock() {
+                *observed = Some(fingerprint.clone());
+            }
+        }
+        if let Some(expected) = &self.options.host_key_sha256 {
+            return Ok(!expected.is_empty() && expected == &fingerprint);
+        }
         match self.strict_host_key_checking.as_str() {
             "no" => Ok(true),
             "accept-new" => match check_known_hosts(&self.host, self.port, server_public_key) {
@@ -97,7 +127,45 @@ impl client::Handler for SshClient {
     }
 }
 
-type SharedSession = Arc<Mutex<client::Handle<SshClient>>>;
+type SharedSession = Arc<client::Handle<SshClient>>;
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+    #[tokio::test]
+    async fn explicit_host_pin_never_falls_back_to_accept_all() {
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&11u32.to_be_bytes());
+        wire.extend_from_slice(b"ssh-ed25519");
+        wire.extend_from_slice(&32u32.to_be_bytes());
+        wire.extend_from_slice(&[7u8; 32]);
+        let key = ssh_key::PublicKey::from_bytes(&wire).unwrap();
+        let fingerprint = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut handler = SshClient {
+            host: "example.test".into(),
+            port: 22,
+            strict_host_key_checking: "no".into(),
+            options: EmbeddedOptions {
+                host_key_sha256: Some(String::new()),
+                observed_host_key: Some(observed.clone()),
+                ..Default::default()
+            },
+        };
+        assert!(!client::Handler::check_server_key(&mut handler, &key)
+            .await
+            .unwrap());
+        assert_eq!(*observed.lock().unwrap(), Some(fingerprint.clone()));
+        handler.options.host_key_sha256 = Some(fingerprint);
+        assert!(client::Handler::check_server_key(&mut handler, &key)
+            .await
+            .unwrap());
+        handler.options.host_key_sha256 = Some("SHA256:wrong".into());
+        assert!(!client::Handler::check_server_key(&mut handler, &key)
+            .await
+            .unwrap());
+    }
+}
 
 fn friendly_key_error(key_path: &str, error: impl std::fmt::Display) -> String {
     let raw = error.to_string();
@@ -148,7 +216,28 @@ fn friendly_auth_error(server: &EmbeddedServer, error: impl std::fmt::Display) -
     )
 }
 
-pub fn start(server: EmbeddedServer, proxy: EmbeddedProxy) -> Result<EmbeddedTunnelHandle, String> {
+pub fn start(
+    server: EmbeddedServer,
+    proxy: EmbeddedProxy,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+) -> Result<EmbeddedTunnelHandle, String> {
+    start_with_options(server, proxy, logs, EmbeddedOptions::default())
+}
+
+pub fn start_with_options(
+    server: EmbeddedServer,
+    proxy: EmbeddedProxy,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    options: EmbeddedOptions,
+) -> Result<EmbeddedTunnelHandle, String> {
+    if !proxy
+        .host
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+    {
+        return Err("Embedded SOCKS currently requires a loopback bind address".into());
+    }
     let listener = TcpListener::bind((proxy.host.as_str(), proxy.port)).map_err(|error| {
         format!(
             "Cannot bind embedded SOCKS listener on {}:{}: {error}",
@@ -162,27 +251,47 @@ pub fn start(server: EmbeddedServer, proxy: EmbeddedProxy) -> Result<EmbeddedTun
     let counters = Arc::new(TrafficCounters::default());
     let tunnel_counters = Arc::clone(&counters);
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (outcome_tx, outcome) = mpsc::channel();
     let join = thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
         {
             Ok(runtime) => runtime,
-            Err(_) => return,
+            Err(error) => {
+                let _ = outcome_tx.send(Err(error.to_string()));
+                return;
+            }
         };
 
-        let _ = runtime.block_on(run_embedded_tunnel(
+        let result = runtime.block_on(run_embedded_tunnel(
             listener,
             server,
             stop_rx,
             tunnel_counters,
+            ready_tx,
+            logs,
+            options,
         ));
+        let _ = outcome_tx.send(result);
     });
+
+    if ready_rx.recv_timeout(Duration::from_secs(20)).is_err() {
+        let _ = stop_tx.send(());
+        let _ = join.join();
+        return Err(outcome
+            .try_recv()
+            .ok()
+            .and_then(Result::err)
+            .unwrap_or_else(|| "Embedded SSH startup failed".into()));
+    }
 
     Ok(EmbeddedTunnelHandle {
         stop_tx,
         join: Some(join),
         counters,
+        outcome,
     })
 }
 
@@ -191,11 +300,21 @@ async fn run_embedded_tunnel(
     server: EmbeddedServer,
     stop_rx: mpsc::Receiver<()>,
     counters: Arc<TrafficCounters>,
+    ready: Sender<()>,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    options: EmbeddedOptions,
 ) -> Result<(), String> {
     let listener =
         tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
-    let session = connect_ssh(&server, (server.host.as_str(), server.port)).await?;
-    let session = Arc::new(Mutex::new(session));
+    let session = tokio::time::timeout(
+        Duration::from_secs(15),
+        connect_ssh(&server, (server.host.as_str(), server.port), options),
+    )
+    .await
+    .map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
+    let session = Arc::new(session);
+    let connection_limit = Arc::new(tokio::sync::Semaphore::new(256));
+    let _ = ready.send(());
 
     loop {
         if stop_rx.try_recv().is_ok() {
@@ -206,13 +325,23 @@ async fn run_embedded_tunnel(
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, originator_addr) = accepted.map_err(|error| error.to_string())?;
+                let permit = match Arc::clone(&connection_limit).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => { super::log_line(&logs, "SOCKS connection limit reached"); continue; }
+                };
                 let session = Arc::clone(&session);
                 let counters = Arc::clone(&counters);
+                let logs = Arc::clone(&logs);
                 tokio::spawn(async move {
-                    let _ = handle_socks_client(stream, originator_addr, session, counters).await;
+                    let _permit = permit;
+                    if let Err(error) = handle_socks_client(stream, originator_addr, session, counters).await {
+                        super::log_line(&logs, format!("SOCKS connection: {error}"));
+                    }
                 });
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                if session.is_closed() { return Err("SSH connection closed".into()); }
+            }
         }
     }
 }
@@ -220,6 +349,7 @@ async fn run_embedded_tunnel(
 async fn connect_ssh<A: ToSocketAddrs>(
     server: &EmbeddedServer,
     addrs: A,
+    options: EmbeddedOptions,
 ) -> Result<client::Handle<SshClient>, String> {
     let key_pair = load_secret_key(&server.key_path, None)
         .map_err(|error| friendly_key_error(&server.key_path, error))?;
@@ -231,17 +361,53 @@ async fn connect_ssh<A: ToSocketAddrs>(
         keepalive_max: 3,
         ..Default::default()
     });
-    let mut session = client::connect(
-        config,
-        addrs,
-        SshClient {
-            host: server.host.clone(),
-            port: server.port,
-            strict_host_key_checking: server.strict_host_key_checking.clone(),
-        },
-    )
-    .await
-    .map_err(|error| friendly_connect_error(server, error))?;
+    let handler = SshClient {
+        host: server.host.clone(),
+        port: server.port,
+        strict_host_key_checking: server.strict_host_key_checking.clone(),
+        options: options.clone(),
+    };
+    // Create and protect the transport before connect: VPN routes must never
+    // capture their own SSH connection. No extra transport connection is made.
+    let mut connected = None;
+    let mut last_error = "SSH hostname has no addresses".to_string();
+    for addr in tokio::net::lookup_host(addrs)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        let socket = if addr.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .map_err(|e| e.to_string())?;
+        if let Some(protect) = &options.protect_socket {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                if !protect(socket.as_raw_fd()) {
+                    return Err("Android refused to protect SSH socket".into());
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = protect;
+                return Err("Socket protection is only supported on Unix".into());
+            }
+        }
+        match socket.connect(addr).await {
+            Ok(stream) => {
+                connected = Some(stream);
+                break;
+            }
+            Err(e) => last_error = e.to_string(),
+        }
+    }
+    let stream = connected.ok_or(last_error)?;
+    let _ = stream.set_nodelay(true);
+    let mut session = client::connect_stream(config, stream, handler)
+        .await
+        .map_err(|error| friendly_connect_error(server, error))?;
 
     let hash = session
         .best_supported_rsa_hash()
@@ -267,7 +433,6 @@ async fn connect_ssh<A: ToSocketAddrs>(
 }
 
 async fn disconnect_ssh(session: &SharedSession) {
-    let session = session.lock().await;
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "", "English")
         .await;
@@ -279,16 +444,24 @@ async fn handle_socks_client(
     session: SharedSession,
     counters: Arc<TrafficCounters>,
 ) -> Result<(), String> {
-    let request = match read_socks5_request(&mut stream).await {
-        Ok(request) => request,
-        Err(error) => {
-            let _ = stream.shutdown().await;
-            return Err(error);
-        }
-    };
+    let request =
+        match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
+            .await
+            .map_err(|_| "SOCKS handshake timed out".to_string())?
+        {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = stream.shutdown().await;
+                return Err(error);
+            }
+        };
+
+    if request.command == 0x03 {
+        return relay_udp_association(stream, originator_addr, request.port, session, counters)
+            .await;
+    }
 
     let channel = {
-        let session = session.lock().await;
         session
             .channel_open_direct_tcpip(
                 request.host.clone(),
@@ -315,45 +488,36 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut client_closed = false;
-    let mut remote_closed = false;
-    let mut client_buf = vec![0_u8; 32 * 1024];
-    let mut remote_buf = vec![0_u8; 32 * 1024];
-
-    while !client_closed || !remote_closed {
-        tokio::select! {
-            read = client.read(&mut client_buf), if !client_closed => {
-                match read.map_err(|error| error.to_string())? {
-                    0 => {
-                        client_closed = true;
-                        remote.shutdown().await.map_err(|error| error.to_string())?;
-                    }
-                    n => {
-                        remote.write_all(&client_buf[..n]).await.map_err(|error| error.to_string())?;
-                        counters.add_tx(n as u64);
-                    }
-                }
+    let (mut client_read, mut client_write) = tokio::io::split(client);
+    let (mut remote_read, mut remote_write) = tokio::io::split(remote);
+    async fn copy_counted<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+        reader: &mut R,
+        writer: &mut W,
+        counter: &AtomicU64,
+    ) -> Result<(), String> {
+        let mut buffer = vec![0; 32768];
+        loop {
+            let count = reader.read(&mut buffer).await.map_err(|e| e.to_string())?;
+            if count == 0 {
+                return writer.shutdown().await.map_err(|e| e.to_string());
             }
-            read = remote.read(&mut remote_buf), if !remote_closed => {
-                match read.map_err(|error| error.to_string())? {
-                    0 => {
-                        remote_closed = true;
-                        client.shutdown().await.map_err(|error| error.to_string())?;
-                    }
-                    n => {
-                        client.write_all(&remote_buf[..n]).await.map_err(|error| error.to_string())?;
-                        counters.add_rx(n as u64);
-                    }
-                }
-            }
+            writer
+                .write_all(&buffer[..count])
+                .await
+                .map_err(|e| e.to_string())?;
+            counter.fetch_add(count as u64, Ordering::Relaxed);
         }
     }
-
+    tokio::try_join!(
+        copy_counted(&mut client_read, &mut remote_write, &counters.tx_total),
+        copy_counted(&mut remote_read, &mut client_write, &counters.rx_total),
+    )?;
     Ok(())
 }
 
 #[derive(Clone, Debug)]
 struct SocksRequest {
+    command: u8,
     host: String,
     port: u16,
 }
@@ -394,9 +558,9 @@ async fn read_socks5_request(stream: &mut TcpStream) -> Result<SocksRequest, Str
     if head[0] != 0x05 {
         return Err("Unsupported SOCKS request version".to_string());
     }
-    if head[1] != 0x01 {
+    if head[2] != 0 || !matches!(head[1], 0x01 | 0x03) {
         write_socks5_reply(stream, 0x07).await?;
-        return Err("Only SOCKS CONNECT is supported".to_string());
+        return Err("Only SOCKS CONNECT and UDP ASSOCIATE are supported".to_string());
     }
 
     let host = match head[3] {
@@ -442,9 +606,91 @@ async fn read_socks5_request(stream: &mut TcpStream) -> Result<SocksRequest, Str
         .map_err(|error| error.to_string())?;
 
     Ok(SocksRequest {
+        command: head[1],
         host,
         port: u16::from_be_bytes(port),
     })
+}
+
+async fn relay_udp_association(
+    mut control: TcpStream,
+    peer: std::net::SocketAddr,
+    requested_port: u16,
+    session: SharedSession,
+    counters: Arc<TrafficCounters>,
+) -> Result<(), String> {
+    let channel = {
+        session
+            .channel_open_session()
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    channel
+        .exec(true, "exec \"$HOME/.local/bin/secret-tunnel-agent\"")
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut agent = channel.into_stream();
+    let mut magic = [0; 8];
+    tokio::time::timeout(Duration::from_secs(10), agent.read_exact(&mut magic))
+        .await
+        .map_err(|_| {
+            "UDP agent startup timed out; install secret-tunnel-agent on the server".to_string()
+        })?
+        .map_err(|e| format!("UDP agent startup: {e}"))?;
+    if &magic != udp_protocol::MAGIC {
+        return Err("Incompatible UDP agent protocol".into());
+    }
+    let local = control.local_addr().map_err(|e| e.to_string())?;
+    let socket = tokio::net::UdpSocket::bind((local.ip(), 0))
+        .await
+        .map_err(|e| e.to_string())?;
+    let bound = socket.local_addr().map_err(|e| e.to_string())?;
+    let reply = udp_protocol::encode_packet(bound, &[]).map_err(|e| e.to_string())?;
+    // UDP packet has an extra FRAG byte; SOCKS reply uses VER/REP/RSV.
+    let mut reply = reply;
+    reply[0] = 5;
+    control.write_all(&reply).await.map_err(|e| e.to_string())?;
+    let (mut reader, mut writer) = tokio::io::split(agent);
+    let (packets, mut incoming) = tokio::sync::mpsc::channel(16);
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        loop {
+            let packet = udp_protocol::read_frame(&mut reader).await;
+            let failed = packet.is_err();
+            if packets.send(packet).await.is_err() || failed {
+                break;
+            }
+        }
+    });
+    let mut buffer = vec![0; 65535];
+    let mut control_buffer = [0; 1];
+    let mut endpoint = if requested_port == 0 {
+        None
+    } else {
+        Some(std::net::SocketAddr::new(peer.ip(), requested_port))
+    };
+    loop {
+        tokio::select! {
+            _ = control.read(&mut control_buffer) => return Ok(()),
+            packet = socket.recv_from(&mut buffer) => {
+                let (length, source) = packet.map_err(|e| e.to_string())?;
+                if source.ip() != peer.ip() || endpoint.map(|expected| expected != source).unwrap_or(false) { continue; }
+                let payload_len = match udp_protocol::parse_packet(&buffer[..length]) { Ok(packet) => packet.payload.len(), Err(_) => continue };
+                endpoint = Some(source);
+                tokio::time::timeout(Duration::from_secs(5), udp_protocol::write_frame(&mut writer, &buffer[..length]))
+                    .await.map_err(|_| "UDP agent write timed out")?.map_err(|e|e.to_string())?;
+                counters.add_tx(payload_len as u64);
+            }
+            Some(packet) = incoming.recv() => {
+                let packet = packet.map_err(|e|format!("UDP agent: {e}"))?;
+                if let Some(endpoint) = endpoint {
+                    socket.send_to(&packet,endpoint).await.map_err(|e|e.to_string())?;
+                    let packet = udp_protocol::parse_packet(&packet).map_err(|e|e.to_string())?;
+                    counters.add_rx(packet.payload.len() as u64);
+                }
+            }
+        }
+    }
 }
 
 async fn write_socks5_reply(stream: &mut TcpStream, status: u8) -> Result<(), String> {

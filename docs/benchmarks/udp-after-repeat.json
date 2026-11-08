@@ -1,0 +1,35 @@
+{
+  "64": {
+    "packets": 20,
+    "integrity": "ok",
+    "rtt_p50_ms": 49.179,
+    "rtt_p95_ms": 60.866
+  },
+  "1200": {
+    "packets": 20,
+    "integrity": "ok",
+    "rtt_p50_ms": 49.308,
+    "rtt_p95_ms": 56.579
+  },
+  "8192": {
+    "packets": 20,
+    "integrity": "ok",
+    "rtt_p50_ms": 50.037,
+    "rtt_p95_ms": 72.758
+  },
+  "60000": {
+    "packets": 20,
+    "integrity": "ok",
+    "rtt_p50_ms": 56.566,
+    "rtt_p95_ms": 104.772
+  },
+  "pipeline": {
+    "sent": 2000,
+    "received": 2000,
+    "missing": 0,
+    "payload_bytes": 1200,
+    "seconds": 1.666,
+    "payload_mbps": 11.528,
+    "integrity": "ok"
+  }
+}

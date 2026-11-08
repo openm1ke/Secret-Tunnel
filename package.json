@@ -1,6 +1,6 @@
 {
   "name": "secret-tunnel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "android:build": "bash scripts/build-android.sh",
+    "android:build:windows": "pwsh -NoProfile -File scripts/build-android.ps1",
     "release": "bash scripts/build-release.sh",
     "release:embedded": "bash scripts/build-release.sh current --embedded"
   },

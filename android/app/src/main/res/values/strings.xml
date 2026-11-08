@@ -1,0 +1,7 @@
+<resources>
+    <string name="status_lines">%1$s\n%2$s</string>
+    <string name="traffic_totals">↓ %1$s   ↑ %2$s</string>
+    <string name="app_entry">%1$s\n%2$s</string>
+    <string name="selected_count">Выбрано: %1$d</string>
+    <string name="key_imported">SSH-ключ импортирован · заменить</string>
+</resources>

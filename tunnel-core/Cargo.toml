@@ -1,0 +1,11 @@
+[package]
+name = "secret-tunnel-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+russh = { version = "=0.61.2", default-features = false, features = ["ring", "rsa"] }
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "sync", "time", "macros"] }
+
+[profile.release]
+strip = true

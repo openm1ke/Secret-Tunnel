@@ -2,6 +2,7 @@ node_modules/
 dist/
 
 src-tauri/target/
+udp-agent/target/
 src-tauri/gen/
 
 .DS_Store
@@ -30,3 +31,20 @@ known_hosts
 
 .idea/
 .vscode/
+
+routing-engine/target/
+__pycache__/
+android/.gradle/
+android/local.properties
+android/app/build/
+android/app/src/main/jniLibs/
+android/app/src/main/assets/licenses/
+android/app/src/main/assets/hev-revision.txt
+android/native/target/
+tunnel-core/target/
+artifacts/
+src-tauri/resources/
+*.jks
+*.keystore
+*.p12
+*.pfx

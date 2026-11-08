@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -10,8 +10,33 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State, WindowEvent};
 
+// Console utilities must stay in the background when launched by the GUI.
+fn background_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
+
+mod app_redirect;
+mod installed_apps;
+pub use installed_apps::InstalledApp;
+
+/// Local application inventory, also used by the diagnostic example.
+pub fn application_catalog() -> Result<Vec<InstalledApp>, String> {
+    installed_apps::scan()
+}
+mod traffic_relay;
+
+#[cfg(feature = "embedded-ssh")]
+mod udp_protocol;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ServerProfile {
@@ -43,6 +68,12 @@ struct ProxyProfile {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AppSettings {
+    #[serde(default = "default_redirect_cli")]
+    redirect_cli_path: String,
+    #[serde(default = "default_redirect_processes")]
+    redirect_processes: Vec<String>,
+    #[serde(default)]
+    domain_rules: Vec<secret_tunnel_routing::DomainRule>,
     ipinfo_token: String,
     #[serde(default = "default_ssh_engine")]
     ssh_engine: String,
@@ -63,6 +94,9 @@ struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            redirect_cli_path: default_redirect_cli(),
+            redirect_processes: default_redirect_processes(),
+            domain_rules: Vec::new(),
             ipinfo_token: String::new(),
             ssh_engine: default_ssh_engine(),
             hide_sensitive: true,
@@ -132,7 +166,7 @@ struct IpInfo {
 }
 
 enum TunnelHandle {
-    System(Child),
+    System(Child, traffic_relay::TrafficRelay),
     #[cfg(feature = "embedded-ssh")]
     Embedded(embedded_ssh::EmbeddedTunnelHandle),
 }
@@ -149,7 +183,7 @@ struct TunnelRuntime {
 impl TunnelRuntime {
     fn ssh_engine(&self) -> String {
         match &self.handle {
-            TunnelHandle::System(_) => "system".to_string(),
+            TunnelHandle::System(..) => "system".to_string(),
             #[cfg(feature = "embedded-ssh")]
             TunnelHandle::Embedded(_) => "embedded".to_string(),
         }
@@ -157,7 +191,7 @@ impl TunnelRuntime {
 
     fn pid(&self) -> Option<u32> {
         match &self.handle {
-            TunnelHandle::System(child) => Some(child.id()),
+            TunnelHandle::System(child, _) => Some(child.id()),
             #[cfg(feature = "embedded-ssh")]
             TunnelHandle::Embedded(_) => None,
         }
@@ -165,18 +199,18 @@ impl TunnelRuntime {
 
     fn try_wait(&mut self) -> Result<Option<String>, String> {
         match &mut self.handle {
-            TunnelHandle::System(child) => child
+            TunnelHandle::System(child, _) => child
                 .try_wait()
                 .map(|status| status.map(|status| format!("ssh exited with {status}")))
                 .map_err(|error| error.to_string()),
             #[cfg(feature = "embedded-ssh")]
-            TunnelHandle::Embedded(_) => Ok(None),
+            TunnelHandle::Embedded(handle) => Ok(handle.try_wait()),
         }
     }
 
     fn traffic_totals(&self) -> Result<Option<(u64, u64)>, String> {
         match &self.handle {
-            TunnelHandle::System(child) => sample_process_traffic(child.id()),
+            TunnelHandle::System(_, relay) => Ok(Some(relay.totals())),
             #[cfg(feature = "embedded-ssh")]
             TunnelHandle::Embedded(handle) => Ok(Some(handle.traffic_totals())),
         }
@@ -184,7 +218,8 @@ impl TunnelRuntime {
 
     fn stop(self, logs: &Arc<Mutex<Vec<String>>>) {
         match self.handle {
-            TunnelHandle::System(mut child) => {
+            TunnelHandle::System(mut child, relay) => {
+                drop(relay);
                 log_line(
                     logs,
                     format!("Stopping tunnel '{}', pid={}", self.server.name, child.id()),
@@ -209,8 +244,35 @@ fn default_true() -> bool {
     true
 }
 
+fn default_redirect_processes() -> Vec<String> {
+    vec!["Discord.exe".into()]
+}
+
+fn default_redirect_cli() -> String {
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            let bundled = directory.join("tools/proxybridge/ProxyBridge_CLI.exe");
+            if bundled.is_file() {
+                return bundled.to_string_lossy().into_owned();
+            }
+        }
+    }
+    app_config_dir("secret-tunnel")
+        .map(|dir| {
+            dir.join("tools/proxybridge/ProxyBridge_CLI.exe")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default()
+}
+
 fn default_ssh_engine() -> String {
-    "system".to_string()
+    if cfg!(feature = "embedded-ssh") {
+        "embedded"
+    } else {
+        "system"
+    }
+    .to_string()
 }
 
 fn default_strict_host_key_checking() -> String {
@@ -235,6 +297,7 @@ fn default_reconnect_delay_seconds() -> u16 {
 
 #[derive(Default)]
 struct AppState {
+    redirect: Mutex<app_redirect::RedirectState>,
     runtime: Mutex<Option<TunnelRuntime>>,
     logs: Arc<Mutex<Vec<String>>>,
     traffic: Mutex<Vec<TrafficPoint>>,
@@ -437,6 +500,21 @@ fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
 }
 
 fn validate_settings(settings: &AppSettings) -> Result<(), String> {
+    secret_tunnel_routing::validate(&settings.domain_rules)?;
+    if !settings.redirect_processes.is_empty() || !settings.domain_rules.is_empty() {
+        let current = std::env::current_exe().map_err(|e| e.to_string())?;
+        let own_exe = current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("secret-tunnel.exe");
+        app_redirect::domain_profile(
+            &settings.redirect_processes,
+            &settings.domain_rules,
+            "127.0.0.1",
+            1080,
+            own_exe,
+        )?;
+    }
     match settings.ssh_engine.as_str() {
         "system" | "embedded" => {}
         _ => return Err("SSH engine must be system or embedded".to_string()),
@@ -504,60 +582,6 @@ fn attach_log_reader(
     });
 }
 
-#[cfg(target_os = "macos")]
-fn sample_process_traffic(pid: u32) -> Result<Option<(u64, u64)>, String> {
-    let output = Command::new("nettop")
-        .arg("-P")
-        .arg("-p")
-        .arg(pid.to_string())
-        .arg("-L")
-        .arg("1")
-        .arg("-x")
-        .output()
-        .map_err(|error| error.to_string())?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("nettop exited with {}", output.status)
-        } else {
-            stderr
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut bytes_in_idx = None;
-    let mut bytes_out_idx = None;
-
-    for line in stdout.lines() {
-        let cols: Vec<&str> = line.split(',').collect();
-        if cols.iter().any(|col| *col == "bytes_in") {
-            bytes_in_idx = cols.iter().position(|col| *col == "bytes_in");
-            bytes_out_idx = cols.iter().position(|col| *col == "bytes_out");
-            continue;
-        }
-
-        let (Some(in_idx), Some(out_idx)) = (bytes_in_idx, bytes_out_idx) else {
-            continue;
-        };
-        if cols.len() <= in_idx || cols.len() <= out_idx {
-            continue;
-        }
-
-        let rx = cols[in_idx].trim().parse::<u64>().ok();
-        let tx = cols[out_idx].trim().parse::<u64>().ok();
-        if let (Some(rx), Some(tx)) = (rx, tx) {
-            return Ok(Some((rx, tx)));
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sample_process_traffic(_pid: u32) -> Result<Option<(u64, u64)>, String> {
-    Ok(None)
-}
-
 fn update_traffic(state: &State<'_, AppState>, runtime: &mut TunnelRuntime) {
     let now = now_epoch();
     match runtime.traffic_totals() {
@@ -619,7 +643,7 @@ fn fetch_ipinfo(token: &str, proxy: Option<&ProxyProfile>) -> Result<Option<IpIn
     }
 
     let url = format!("https://api.ipinfo.io/lite/me?token={token}");
-    let mut command = Command::new("curl");
+    let mut command = background_command("curl");
     command.arg("-sS").arg("--max-time").arg("6");
     if let Some(proxy) = proxy {
         command
@@ -659,7 +683,7 @@ fn fetch_ipinfo(token: &str, proxy: Option<&ProxyProfile>) -> Result<Option<IpIn
 }
 
 fn verify_proxy(proxy: &ProxyProfile) -> Result<String, String> {
-    let output = Command::new("curl")
+    let output = background_command("curl")
         .arg("-sS")
         .arg("--max-time")
         .arg("8")
@@ -880,8 +904,9 @@ fn save_settings(settings: AppSettings) -> Result<AppConfig, String> {
     save_config(config)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
+    state.redirect.lock().map_err(|e| e.to_string())?.stop();
     {
         let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
         if let Some(runtime) = runtime_guard.take() {
@@ -899,7 +924,7 @@ fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     save_config(config)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<String, String> {
     validate_server(&server)?;
     log_line(
@@ -919,7 +944,7 @@ fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<Stri
     let key_path = expand_home(&server.key_path);
     let destination = format!("{}@{}", server.user, server.host);
     log_line(&state.logs, "Testing SSH key authentication...");
-    let output = Command::new("ssh")
+    let output = background_command("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -957,7 +982,7 @@ fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<Stri
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_tunnel(state: State<'_, AppState>) -> Result<String, String> {
     let config = load_config()?;
     let server = selected_server(&config)?;
@@ -1038,6 +1063,7 @@ fn start_embedded_ssh_tunnel(
             host: proxy.host.clone(),
             port: proxy.port,
         },
+        Arc::clone(&state.logs),
     )?;
 
     *runtime_guard = Some(TunnelRuntime {
@@ -1045,14 +1071,11 @@ fn start_embedded_ssh_tunnel(
         server,
         proxy,
         started_at: now_epoch(),
-        last_error: "Embedded russh direct-tcpip transport is not implemented yet".to_string(),
+        last_error: String::new(),
         last_traffic: None,
     });
 
-    Ok(
-        "Embedded SOCKS listener started; russh direct-tcpip transport is not implemented yet"
-            .to_string(),
-    )
+    Ok("Embedded SOCKS listener started (TCP and experimental UDP-over-SSH)".to_string())
 }
 
 fn start_system_ssh_tunnel(
@@ -1080,7 +1103,14 @@ fn start_system_ssh_tunnel(
         traffic.clear();
     }
     let key_path = expand_home(&server.key_path);
-    let proxy_addr = format!("{}:{}", proxy.host, proxy.port);
+    // OpenSSH listens privately; the public relay owns the configured SOCKS port.
+    let reservation = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let upstream = reservation.local_addr().map_err(|e| e.to_string())?;
+    let listener =
+        TcpListener::bind((proxy.host.as_str(), proxy.port)).map_err(|e| e.to_string())?;
+    let relay =
+        traffic_relay::TrafficRelay::start(listener, upstream).map_err(|e| e.to_string())?;
+    let proxy_addr = upstream.to_string();
     let destination = format!("{}@{}", server.user, server.host);
 
     log_line(
@@ -1091,7 +1121,7 @@ fn start_system_ssh_tunnel(
         ),
     );
 
-    let mut command = Command::new("ssh");
+    let mut command = background_command("ssh");
     command
         .arg("-NT")
         .arg("-o")
@@ -1124,6 +1154,7 @@ fn start_system_ssh_tunnel(
     if server.compression {
         command.arg("-C");
     }
+    drop(reservation);
     let mut child = command
         .arg("-p")
         .arg(server.port.to_string())
@@ -1153,7 +1184,7 @@ fn start_system_ssh_tunnel(
             log_line(&state.logs, &message);
             return Err(message);
         }
-        if tcp_connects(&proxy.host, proxy.port, Duration::from_millis(200)) {
+        if tcp_connects("127.0.0.1", upstream.port(), Duration::from_millis(200)) {
             log_line(&state.logs, format!("Tunnel is running, ssh pid={pid}"));
             if config.settings.verify_proxy_on_start {
                 match verify_proxy(&proxy) {
@@ -1177,7 +1208,7 @@ fn start_system_ssh_tunnel(
                 }
             }
             *runtime_guard = Some(TunnelRuntime {
-                handle: TunnelHandle::System(child),
+                handle: TunnelHandle::System(child, relay),
                 server,
                 proxy,
                 started_at: now_epoch(),
@@ -1195,8 +1226,9 @@ fn start_system_ssh_tunnel(
     Err(message)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_tunnel(state: State<'_, AppState>) -> Result<String, String> {
+    state.redirect.lock().map_err(|e| e.to_string())?.stop();
     let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
     let Some(runtime) = runtime_guard.take() else {
         return Ok("Tunnel is already stopped".to_string());
@@ -1205,14 +1237,14 @@ fn stop_tunnel(state: State<'_, AppState>) -> Result<String, String> {
     Ok("Tunnel stopped".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn restart_tunnel(state: State<'_, AppState>) -> Result<String, String> {
     let _ = stop_tunnel(state.clone());
     thread::sleep(Duration::from_millis(500));
     start_tunnel(state)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn tunnel_status(state: State<'_, AppState>) -> Result<TunnelStatus, String> {
     let config = load_config()?;
     let mut reconnect_status = None;
@@ -1288,6 +1320,104 @@ fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command(async)]
+fn redirect_status(state: State<'_, AppState>) -> Result<app_redirect::RedirectStatus, String> {
+    let mut status = state.redirect.lock().map_err(|e| e.to_string())?.status();
+    let config = load_config()?;
+    let executable = if config.settings.redirect_cli_path.trim().is_empty() {
+        default_redirect_cli()
+    } else {
+        config.settings.redirect_cli_path
+    };
+    status.component_available = Path::new(&executable).is_file()
+        && Path::new(&executable)
+            .parent()
+            .map(|directory| {
+                [
+                    "ProxyBridgeCore.dll",
+                    "WinDivert.dll",
+                    "WinDivert64.sys",
+                    "source-revision.txt",
+                ]
+                .iter()
+                .all(|file| directory.join(file).is_file())
+            })
+            .unwrap_or(false);
+    Ok(status)
+}
+
+#[tauri::command]
+fn discord_redirect_processes() -> Vec<String> {
+    app_redirect::discord_processes()
+}
+
+#[tauri::command]
+fn check_domain_rule(pattern: String, domain: String) -> Result<bool, String> {
+    let regex = secret_tunnel_routing::compile(&pattern)?;
+    if domain.trim().is_empty() {
+        return Ok(false);
+    }
+    Ok(regex.is_match(&secret_tunnel_routing::normalize(&domain)?))
+}
+
+#[tauri::command(async)]
+fn scan_installed_applications() -> Result<Vec<installed_apps::InstalledApp>, String> {
+    application_catalog()
+}
+
+#[tauri::command(async)]
+fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
+    let config = load_config()?;
+    let proxy = {
+        let runtime = state.runtime.lock().map_err(|e| e.to_string())?;
+        let runtime = runtime.as_ref().ok_or("Сначала запустите SSH-туннель")?;
+        if runtime.ssh_engine() != "embedded" {
+            return Err("Для TCP и UDP выберите Embedded Rust SSH и перезапустите туннель".into());
+        }
+        runtime.proxy.clone()
+    };
+    let own_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let own_exe = own_exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("Не удалось определить имя клиента")?;
+    let value = app_redirect::domain_profile(
+        &config.settings.redirect_processes,
+        &config.settings.domain_rules,
+        &proxy.host,
+        proxy.port,
+        own_exe,
+    )?;
+    let profile_path = app_config_dir("secret-tunnel")?.join("applications.pbprofile");
+    let executable = if config.settings.redirect_cli_path.trim().is_empty() {
+        default_redirect_cli()
+    } else {
+        config.settings.redirect_cli_path.clone()
+    };
+    state.redirect.lock().map_err(|e| e.to_string())?.start(
+        Path::new(&executable),
+        &profile_path,
+        &value,
+        Arc::clone(&state.logs),
+        config.settings.hide_sensitive,
+    )?;
+    log_line(&state.logs, "Перехват выбранных приложений включён");
+    Ok(
+        "Перехват включён. Перезапустите выбранные программы, чтобы создать новые соединения"
+            .into(),
+    )
+}
+
+#[tauri::command(async)]
+fn stop_redirect(state: State<'_, AppState>) -> Result<String, String> {
+    state.redirect.lock().map_err(|e| e.to_string())?.stop();
+    log_line(
+        &state.logs,
+        "Перехват приложений выключен; новые соединения идут напрямую",
+    );
+    Ok("Перехват выключен".into())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -1315,6 +1445,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
                 let state = window.app_handle().state::<AppState>();
+                if let Ok(mut redirect) = state.redirect.lock() {
+                    redirect.stop();
+                }
                 let runtime = match state.runtime.lock() {
                     Ok(mut runtime_guard) => runtime_guard.take(),
                     Err(_) => None,
@@ -1326,6 +1459,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
+            redirect_status,
+            discord_redirect_processes,
+            check_domain_rule,
+            scan_installed_applications,
+            start_redirect,
+            stop_redirect,
             save_server,
             delete_server,
             select_server,

@@ -282,7 +282,7 @@ select:focus {
 .workspace {
   padding: 20px;
   display: grid;
-  grid-template-rows: auto minmax(176px, 1fr);
+  grid-template-rows: minmax(0, 1fr) 176px;
   gap: 14px;
   height: 100vh;
   overflow: hidden;
@@ -752,3 +752,60 @@ label {
 .trafficStats strong {
   font-size: 16px;
 }
+
+.appChooser { display: grid; gap: 12px; margin: 18px 0; }
+.appChooserToolbar { display: flex; gap: 8px; }
+.appChooserToolbar input { flex: 1; min-width: 0; }
+.appChooserSummary { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; color: #64717a; font-size: 13px; }
+.appChooserSummary .checkboxLine { margin: 0; }
+.appChoices { max-height: 420px; overflow-y: auto; border: 1px solid #d8dde1; border-radius: 10px; background: #fff; }
+.appChoice { display: grid; grid-template-columns: 18px 34px minmax(0,1fr); align-items: center; gap: 12px; margin: 0; padding: 12px 14px; cursor: pointer; border-bottom: 1px solid #edf0f2; }
+.appChoice:last-child { border-bottom: none; }
+.appChoice.selected { background: #eef6ff; }
+.appChoice:hover { background: #f4f7fa; }
+.appChoice input[type="checkbox"] { width: 17px; height: 17px; margin: 0; accent-color: #2563eb; }
+.appBadge { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 9px; background: #e6edf5; color: #375577; font-weight: 700; }
+.appDescription { display: grid; gap: 3px; min-width: 0; }
+.appDescription strong { color: #243342; font-size: 14px; }
+.appDescription small { color: #6a7784; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appListEmpty { padding: 18px; color: #64717a; }
+.appAdvanced { margin: 18px 0; }
+.appAdvanced summary { cursor: pointer; margin-bottom: 12px; color: #52677c; }
+.workspace.hasMessage { grid-template-rows: auto minmax(0,1fr) 176px; }
+.actionMessage { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border: 1px solid #b9cce2; border-radius: 8px; color: #294968; background: #f0f6fc; font-size: 13px; }
+.actionMessage button { flex: none; padding: 2px 8px; }
+.workspace.appsWorkspace { grid-template-rows: minmax(0,1fr) 120px; }
+.workspace.appsWorkspace.hasMessage { grid-template-rows: auto minmax(0,1fr) 120px; }
+.panel.narrow.applicationsPanel { max-width: none; height: 100%; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+.applicationsPanel > p { margin: 0; font-size: 13px; }
+.applicationsPanel .panelTitle { margin-bottom: 0; }
+.applicationsPanel .appChooser { flex: 1; min-height: 220px; margin: 4px 0; display: flex; flex-direction: column; }
+.applicationsPanel .appChoices { flex: 1; min-height: 80px; max-height: none; }
+.applicationsPanel .appAdvanced { margin: 0; }
+.applicationsPanel .appAdvanced summary { margin-bottom: 0; }
+.applicationsPanel .applicationActions { flex: none; margin-top: 0; }
+.domainPanel { gap: 10px; }
+.domainPanel p { margin: 0; }
+.domainState { margin-left: auto; font-size: 12px; font-weight: normal; color: var(--muted, #5c6d7c); }
+.domainTest { display: grid; grid-template-columns: minmax(200px, 1fr) 1fr; align-items: center; gap: 16px; }
+.domainHelp { font-size: 12px; color: var(--muted, #5c6d7c); line-height: 1.5; }
+.domainHelp code { color: #245d94; user-select: text; }
+.domainList { overflow: auto; flex: 1; min-height: 130px; display: flex; flex-direction: column; gap: 10px; padding: 2px; }
+.domainRule { border: 1px solid #ccd6de; border-radius: 8px; padding: 12px; }
+.disabledRule { border-style: dashed; }
+.domainRuleTop { display: flex; align-items: center; gap: 12px; }
+.domainRuleTop label { margin: 0; }
+.domainPattern { flex: 1; min-width: 120px; }
+.domainPattern input { font-family: Consolas, monospace; }
+.domainToggle { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.domainToggle input { width: 17px; height: 17px; }
+.domainOrder { display: flex; gap: 4px; }
+.domainOrder button { padding: 5px 9px; }
+.domainError { color: #a52a32; white-space: pre-wrap; font-size: 12px; margin-top: 8px; overflow-wrap: anywhere; }
+.domainValidation, .domainCounters { color: #52687b; font-size: 12px; margin-top: 6px; }
+.domainActions { flex-wrap: wrap; flex-shrink: 0; }
+@media(max-width:1000px) { .domainRuleTop { flex-wrap: wrap; } .domainPattern { flex-basis: 65%; } }
+
+.domainDetails { font-size: 12px; color: #52687b; }
+.domainDetails summary { cursor: pointer; padding: 3px 0; }
+.domainDetails p { padding-top: 8px; }

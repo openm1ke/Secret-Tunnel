@@ -16,7 +16,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run build
+      - run: cargo test --manifest-path routing-engine/Cargo.toml --locked
       - run: cargo check
         working-directory: src-tauri
       - run: cargo check --features embedded-ssh
         working-directory: src-tauri
+      - run: cargo test --manifest-path udp-agent/Cargo.toml
+      - run: cargo build --manifest-path udp-agent/Cargo.toml
+      - run: python3 udp-agent/test_echo.py udp-agent/target/debug/secret-tunnel-agent
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: choco install nasm -y --no-progress
+      - shell: pwsh
+        run: |
+          $env:PATH = "C:\Program Files\NASM;$env:PATH"
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo check --manifest-path src-tauri/Cargo.toml --features embedded-ssh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path routing-engine/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path udp-agent/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --manifest-path udp-agent/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python udp-agent/test_echo.py udp-agent/target/debug/secret-tunnel-agent.exe

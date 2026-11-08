@@ -3562,15 +3562,24 @@ dependencies = [
 
 [[package]]
 name = "secret-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "russh",
+ "secret-tunnel-routing",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
+]
+
+[[package]]
+name = "secret-tunnel-routing"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
 ]
 
 [[package]]

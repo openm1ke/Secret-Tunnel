@@ -2,6 +2,20 @@
 
 Desktop app for managing SSH dynamic SOCKS tunnels.
 
+Android client in the same repository: per-app VPN with TCP/UDP over the shared Rust SSH core, traffic chart, and key import. Build and device-check instructions: [Android](docs/ANDROID.md). Run `bash scripts/build-android.sh` on Linux or `./scripts/build-android.ps1` through WSL on Windows. APK output: `artifacts/android/SecretTunnel-debug.apk`.
+
+Signed Android release APKs, complete Windows setup/portable packages and the Linux UDP-agent are published together by [Publish releases](.github/workflows/release.yml). See [release instructions](docs/RELEASES.md) and [Windows package contents](docs/WINDOWS-RELEASE.md).
+
+Select installed programs using the searchable checkbox list in Applications. See [selector and UDP performance validation](docs/APPLICATION-SELECTOR.md).
+
+Experimental Windows per-app interception: [implementation and validation status](docs/APPLICATION-REDIRECT.md).
+
+Experimental UDP-over-SSH work: [architecture and validation plan](docs/UDP-OVER-SSH.md).
+The embedded engine supports SOCKS5 UDP ASSOCIATE using `secret-tunnel-agent`
+installed at `~/.local/bin/secret-tunnel-agent` on the server. It opens an exec channel on the existing
+SSH connection; System OpenSSH `-D` remains TCP-only. This does not yet capture
+traffic from Windows applications automatically. See the [baseline audit](docs/AUDIT-2026-11-07.md).
+
 ![Secret Tunnel connection screen](docs/screenshots/connection.svg)
 
 ![Secret Tunnel settings screen](docs/screenshots/settings.svg)
@@ -27,7 +41,7 @@ On Windows the config is stored in:
 - Server profiles support picking an SSH private key through the native file dialog.
 - The status block shows tunnel state, proxy IP, country flag/country, and total received/sent traffic.
 - The status block also shows the active SSH engine and app version to make support/debugging easier.
-- The traffic graph reads per-process counters for the child `ssh` process in System OpenSSH mode. On macOS it uses `nettop`; other operating systems need their own sampler implementation. Embedded Rust SSH mode counts received/sent bytes inside the forwarding loop.
+- In System OpenSSH mode a local TCP relay owns the configured SOCKS port and counts bytes forwarded to/from a private loopback OpenSSH listener on Windows, macOS and Linux. These totals include SOCKS negotiation bytes and proxy verification requests; they do not measure encrypted SSH wire traffic. Embedded Rust SSH mode counts received/sent bytes inside the forwarding loop.
 - The IP and country lookup uses the IPinfo Lite API through the running SOCKS proxy. Add the token on the Settings tab.
 - The Settings tab includes inline help, per-setting defaults, and an option to clear runtime logs on tunnel start.
 

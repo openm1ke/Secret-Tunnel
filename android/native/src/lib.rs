@@ -22,6 +22,8 @@ struct Config {
     host_key_sha256: String,
     socks_port: u16,
     #[serde(default)]
+    device_key_path: String,
+    #[serde(default)]
     new_session: bool,
 }
 #[derive(Default)]
@@ -194,4 +196,75 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
     );
     let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_probe(
+    mut env: JNIEnv,
+    _: JObject,
+    host: JString,
+    port: i32,
+) -> jstring {
+    let result = (|| -> Result<String, String> {
+        let host: String = env.get_string(&host).map_err(|e| e.to_string())?.into();
+        if host.trim().is_empty() || !(1..=65535).contains(&port) {
+            return Err("Invalid server address or port".into());
+        }
+        embedded_ssh::probe_server(&host, port as u16)
+    })();
+    output(
+        &mut env,
+        match result {
+            Ok(pin) => json!({"fingerprint":pin}).to_string(),
+            Err(e) => json!({"error":e}).to_string(),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_generateKey(
+    mut env: JNIEnv,
+    _: JObject,
+) -> jstring {
+    let result =
+        (|| -> Result<String, String> {
+            use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+            let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({"private":key.to_openssh(LineEnding::LF).map_err(|e| e.to_string())?.as_str(),
+            "public":key.public_key().to_openssh().map_err(|e| e.to_string())?}).to_string())
+        })();
+    output(
+        &mut env,
+        result.unwrap_or_else(|e| json!({"error":e}).to_string()),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_registerKey(
+    mut env: JNIEnv,
+    _: JObject,
+    config: JString,
+    public: JString,
+) -> jstring {
+    let result = (|| -> Result<(), String> {
+        let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();
+        let cfg: Config = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let public: String = env.get_string(&public).map_err(|e| e.to_string())?.into();
+        let mut server = EmbeddedServer {
+            name: "Android".into(),
+            host: cfg.host,
+            port: cfg.port,
+            user: cfg.user,
+            key_path: cfg.key_path,
+            strict_host_key_checking: "yes".into(),
+        };
+        embedded_ssh::register_device_key(server.clone(), cfg.host_key_sha256.clone(), public)?;
+        if cfg.device_key_path.is_empty() {
+            return Err("Missing device key verification path".into());
+        }
+        server.key_path = cfg.device_key_path;
+        embedded_ssh::verify_login(server, cfg.host_key_sha256)
+    })();
+    output(&mut env, result.err().unwrap_or_default())
 }

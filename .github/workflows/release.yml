@@ -110,7 +110,7 @@ jobs:
           trap 'rm -f "$ANDROID_KEYSTORE_FILE"' EXIT
           export ANDROID_BUILD_TYPE=release
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          export ST_VERSION_CODE=$((20000 + ST_VERSION_CODE))
+          export ST_VERSION_CODE=$(python3 scripts/android-version-code.py "$ST_VERSION_NAME" --build "$ST_VERSION_CODE")
           bash scripts/build-android.sh
           mkdir -p artifacts/release
           cp artifacts/android/SecretTunnel-release.apk "artifacts/release/SecretTunnel-$ST_VERSION_NAME-android.apk"

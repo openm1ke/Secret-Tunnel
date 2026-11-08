@@ -25,7 +25,8 @@ with zipfile.ZipFile(sys.argv[1]) as apk:
             if library == 'libhev-socks5-tunnel.so':
                 assert b'dev/secrettunnel/android/TunnelVpnService' in data, 'Wrong native JNI registration class'
             else:
-                assert b'Java_dev_secrettunnel_android_NativeBridge_start' in data, 'Missing SSH JNI export'
+                for method in ('start', 'probe', 'generateKey', 'registerKey'):
+                    assert ('Java_dev_secrettunnel_android_NativeBridge_' + method).encode() in data, f'Missing SSH JNI export: {method}'
     assert 'assets/licenses/hev-socks5-tunnel.txt' in names
     assert 'assets/licenses/rust-dependencies.json' in names
     assert apk.read('assets/hev-revision.txt').strip() == b'8e3b4cd7168fe64b64f8b58537b5623fb6a7074d'

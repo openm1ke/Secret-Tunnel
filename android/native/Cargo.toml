@@ -12,6 +12,8 @@ secret-tunnel-core = { path = "../../tunnel-core" }
 jni = "=0.21.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rand = "0.10"
+russh = { version = "=0.61.2", default-features = false, features = ["ring", "rsa"] }
 
 [profile.release]
 strip = true

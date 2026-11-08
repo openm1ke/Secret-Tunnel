@@ -2,7 +2,7 @@
 
 Desktop app for managing SSH dynamic SOCKS tunnels.
 
-Android client in the same repository: per-app VPN with TCP/UDP over the shared Rust SSH core, traffic chart, and key import. Build and device-check instructions: [Android](docs/ANDROID.md). Run `bash scripts/build-android.sh` on Linux or `./scripts/build-android.ps1` through WSL on Windows. APK output: `artifacts/android/SecretTunnel-debug.apk`.
+Android client in the same repository: per-app VPN with TCP/UDP over the shared Rust SSH core, traffic chart, managed server trust, key import and device-key enrollment. Build and device-check instructions: [Android](docs/ANDROID.md). Run `bash scripts/build-android.sh` on Linux or `./scripts/build-android.ps1` through WSL on Windows. APK output: `artifacts/android/SecretTunnel-debug.apk`.
 
 Signed Android release APKs, complete Windows setup/portable packages and the Linux UDP-agent are published together by [Publish releases](.github/workflows/release.yml). See [release instructions](docs/RELEASES.md) and [Windows package contents](docs/WINDOWS-RELEASE.md).
 

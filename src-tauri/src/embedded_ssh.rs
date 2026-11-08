@@ -184,9 +184,12 @@ fn friendly_key_error(key_path: &str, error: impl std::fmt::Display) -> String {
 fn friendly_connect_error(server: &EmbeddedServer, error: impl std::fmt::Display) -> String {
     let raw = error.to_string();
     let lower = raw.to_lowercase();
-    if lower.contains("key") && lower.contains("reject") || lower.contains("unknownkey") {
+    if lower.contains("key") && lower.contains("reject")
+        || lower.contains("unknownkey")
+        || lower.contains("unknown server key")
+    {
         return format!(
-            "Embedded SSH rejected the server host key for {}:{}. Check ~/.ssh/known_hosts or use StrictHostKeyChecking=accept-new for the first connection.",
+            "Embedded SSH rejected the server host key for {}:{}. Verify the server fingerprint and update the trusted host key before reconnecting.",
             server.host, server.port
         );
     }
@@ -346,14 +349,11 @@ async fn run_embedded_tunnel(
     }
 }
 
-async fn connect_ssh<A: ToSocketAddrs>(
+async fn handshake<A: ToSocketAddrs>(
     server: &EmbeddedServer,
     addrs: A,
     options: EmbeddedOptions,
 ) -> Result<client::Handle<SshClient>, String> {
-    let key_pair = load_secret_key(&server.key_path, None)
-        .map_err(|error| friendly_key_error(&server.key_path, error))?;
-
     let config = Arc::new(client::Config {
         nodelay: true,
         inactivity_timeout: Some(Duration::from_secs(30)),
@@ -405,9 +405,111 @@ async fn connect_ssh<A: ToSocketAddrs>(
     }
     let stream = connected.ok_or(last_error)?;
     let _ = stream.set_nodelay(true);
-    let mut session = client::connect_stream(config, stream, handler)
+    let session = client::connect_stream(config, stream, handler)
         .await
         .map_err(|error| friendly_connect_error(server, error))?;
+
+    Ok(session)
+}
+
+/// Observe a host key without loading credentials or authenticating. The handler
+/// rejects the key: discovery must never implicitly establish trust.
+pub fn probe_server(host: &str, port: u16) -> Result<String, String> {
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let server = EmbeddedServer {
+        name: "Android".into(),
+        host: host.into(),
+        port,
+        user: String::new(),
+        key_path: String::new(),
+        strict_host_key_checking: "yes".into(),
+    };
+    let options = EmbeddedOptions {
+        host_key_sha256: Some(String::new()),
+        observed_host_key: Some(observed.clone()),
+        ..Default::default()
+    };
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let result = runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            handshake(&server, (host, port), options).await
+        })
+        .await
+    });
+    let seen = observed.lock().map_err(|e| e.to_string())?.clone();
+    if let Some(pin) = seen {
+        return Ok(pin);
+    }
+    Err(match result {
+        Ok(Err(e)) => e,
+        _ => "SSH server did not present a key within 15 seconds".into(),
+    })
+}
+
+pub fn verify_login(server: EmbeddedServer, pin: String) -> Result<(), String> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let session = tokio::time::timeout(
+            Duration::from_secs(15),
+            connect_ssh(
+                &server,
+                (server.host.as_str(), server.port),
+                EmbeddedOptions {
+                    host_key_sha256: Some(pin),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .map_err(|_| "SSH authentication timed out".to_string())??;
+        session
+            .disconnect(russh::Disconnect::ByApplication, "", "English")
+            .await
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Register one device key after authenticating with the existing account key.
+/// Preserve all pre-existing authorized_keys entries; never touch server services.
+pub fn register_device_key(
+    server: EmbeddedServer,
+    pin: String,
+    public_key: String,
+) -> Result<(), String> {
+    if !public_key.starts_with("ssh-ed25519 ")
+        || public_key.len() > 512
+        || !public_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " +/=@._-".contains(c))
+    {
+        return Err("Invalid device public key".into());
+    }
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let session = connect_ssh(&server, (server.host.as_str(), server.port),
+                EmbeddedOptions { host_key_sha256: Some(pin), ..Default::default() }).await?;
+            let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+            let command = format!("set -eu; umask 077; mkdir -p \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; grep -qxF '{}' \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' '{}' >> \"$HOME/.ssh/authorized_keys\"", public_key, public_key);
+            channel.exec(true, command).await.map_err(|e| e.to_string())?;
+            let mut success = false;
+            while let Some(message) = channel.wait().await {
+                if let russh::ChannelMsg::ExitStatus { exit_status } = message { success = exit_status == 0; }
+            }
+            let _ = session.disconnect(russh::Disconnect::ByApplication, "", "English").await;
+            if success { Ok(()) } else { Err("Could not add device key to authorized_keys".into()) }
+        }).await.map_err(|_| "Device registration timed out".to_string())?
+    })
+}
+
+async fn connect_ssh<A: ToSocketAddrs>(
+    server: &EmbeddedServer,
+    addrs: A,
+    options: EmbeddedOptions,
+) -> Result<client::Handle<SshClient>, String> {
+    let key_pair = load_secret_key(&server.key_path, None)
+        .map_err(|error| friendly_key_error(&server.key_path, error))?;
+    let mut session = handshake(server, addrs, options).await?;
 
     let hash = session
         .best_supported_rsa_hash()

@@ -1365,6 +1365,8 @@ name = "secret-tunnel-android"
 version = "0.1.0"
 dependencies = [
  "jni",
+ "rand",
+ "russh",
  "secret-tunnel-core",
  "serde",
  "serde_json",

@@ -5,10 +5,11 @@ android {
     ndkVersion = "27.0.12077973"
     defaultConfig {
         applicationId = "dev.secrettunnel.android"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 20000
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.2.0"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 20200
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.2.2"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -26,7 +27,11 @@ android {
     } }
     packaging { jniLibs { useLegacyPackaging = false; keepDebugSymbols += "**/*.so" } }
 }
-dependencies { testImplementation("junit:junit:4.13.2") }
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+}
 tasks.register("checkNativeLibraries") {
     doLast {
         listOf("arm64-v8a", "x86_64").forEach { abi ->

@@ -16,6 +16,7 @@ class TunnelVpnService : VpnService() {
         @Volatile var phase = "Остановлен"
         @Volatile var detail = ""
         @Volatile var active = false
+        val traffic=TrafficHistory()
         private const val CHANNEL = "ssh-tunnel"
         private const val NOTICE = 1080
     }
@@ -29,6 +30,7 @@ class TunnelVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private val main = Handler(Looper.getMainLooper())
     private var retries = 0
+    private var session:TunnelSession?=null
     private val monitor = object : Runnable {
         override fun run() {
             if (stopping.get() || !active) return
@@ -38,6 +40,7 @@ class TunnelVpnService : VpnService() {
                         val nativeLog = File(filesDir, "tun.log")
                         if (nativeLog.length() > 1_048_576) java.io.RandomAccessFile(nativeLog, "rw").use { it.setLength(0) }
                         val status = JSONObject(NativeBridge.status())
+                        traffic.sample(SystemClock.elapsedRealtime(),status.optLong("rx"),status.optLong("tx"))
                         if (!TProxyIsRunning()) throw IllegalStateException("Обработчик TCP/UDP остановился")
                         if (!status.optBoolean("running")) {
                             phase = "Переподключение"
@@ -63,6 +66,7 @@ class TunnelVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") { stopAsync(); return START_NOT_STICKY }
         if (!started.compareAndSet(false, true)) return START_NOT_STICKY
+        traffic.clear()
         stopping.set(false); active = true; phase = "Подключение"; detail = "Проверка SSH-сервера"
         val notification = notification()
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -70,7 +74,8 @@ class TunnelVpnService : VpnService() {
         worker.execute {
             try {
                 val settings = SettingsStore(this)
-                val packages = settings.packages
+                session = settings.snapshot()
+                val packages = session!!.packages
                 require(packages.isNotEmpty()) { "Выберите хотя бы одно приложение" }
                 require(packageName !in packages) { "Нельзя перехватывать собственный SSH-транспорт" }
                 // SSH authenticates before claiming routes. Socket protection also
@@ -90,7 +95,7 @@ class TunnelVpnService : VpnService() {
                       ipv6: 'fd00:198:18::1'
                     socks5:
                       address: 127.0.0.1
-                      port: 1080
+                      port: ${session!!.socksPort}
                       udp: 'udp'
                     misc:
                       task-stack-size: 65536
@@ -117,15 +122,16 @@ class TunnelVpnService : VpnService() {
     }
     private fun connectSsh() {
         if (stopping.get()) return
-        val settings = SettingsStore(this)
+        val current = session ?: error("Нет параметров сеанса")
+        val settings = SettingsStore(this,current.serverId)
         val key = File(filesDir, "ssh-key.runtime")
         try {
             val bytes = settings.decryptKey()
             try {
                 openFileOutput(key.name, MODE_PRIVATE).use { it.write(bytes) }
             } finally { bytes.fill(0) }
-            val config = JSONObject().put("host", settings.host).put("port", settings.port).put("user", settings.user)
-                .put("key_path", key.absolutePath).put("host_key_sha256", settings.fingerprint).put("socks_port", 1080)
+            val config = JSONObject().put("host", current.host).put("port", current.port).put("user", current.user)
+                .put("key_path", key.absolutePath).put("host_key_sha256", current.fingerprint).put("socks_port", current.socksPort)
                 .put("new_session", tun == null)
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }

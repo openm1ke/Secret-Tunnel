@@ -1,12 +1,11 @@
-SSH TCP/UDP tunneling for Windows and Android with per-application routing.
+Secret Tunnel v0.2.2 adds a native Android interface for managing SSH servers, local SOCKS5 profiles and selected applications.
 
-- **Android APK:** release build with a persistent private signing key; native VpnService, app checkboxes, SSH key import, host-key pinning, traffic chart and reconnect. Android 8+, ARM64/x86_64. Physical-device VPN testing is still pending; the common transport and APK packaging have been tested.
-- **Windows setup:** application, interception engine, signed upstream WinDivert driver, licenses, server agent and offline Microsoft WebView2 installer.
-- **Windows portable ZIP:** application, interception engine/driver, licenses and server agent. Requires an existing WebView2 Runtime. Run as administrator for interception.
-- **Server archive:** static Linux x86_64 UDP-agent and user-only installation script. No public UDP listener, system service or changes to existing Xray/wstunnel are needed.
+- **Android:** separate Home, Servers, Proxies, Applications and Diagnostics screens; dark interface, native application icons and switches, current upload/download speeds, cumulative traffic and a rolling chart recorded by the VPN service.
+- **Profiles:** multiple named SSH servers and local SOCKS5 profiles with configurable ports. Credentials and trusted fingerprints are isolated per server. Existing settings migrate automatically. A running VPN session keeps its original configuration until stopped.
+- **SSH onboarding:** discover and confirm the server fingerprint without typing it; optionally register a dedicated device key using an existing authorized key, then verify the new login before saving it.
+- **Validation:** Android compilation, lint and 16 KiB native alignment/signature checks; two traffic unit tests and six emulator integration/UI tests passed locally. The shared TCP/UDP transport was also tested against a real SSH server. Physical-device validation of this release is still pending.
+- **Android updates:** versionCode now derives from the release version, retaining compatibility with v0.2.0 and allowing future releases to upgrade earlier builds.
+- **Windows setup/portable:** application, interception engine, upstream signed WinDivert driver, licenses and Linux UDP agent. Setup includes the offline WebView2 installer; portable requires an existing WebView2 Runtime. Interception requires administrator rights.
+- **Linux agent:** static x86_64 executable and user-only installation script. No public UDP listener or changes to existing Xray/wstunnel services are required.
 
-Windows supports regex domain routing with direct/tunnel actions and decision counters. Android currently routes by application; its domain-rule editor is not included yet.
-
-Import your own SSH key and server settings; distributions contain no user credentials. Desktop EXE/setup currently have no commercial Authenticode signature. The WinDivert driver retains its verified upstream signature.
-
-SHA256SUMS.txt covers the downloadable files. See the repository's docs/ANDROID.md and docs/WINDOWS-RELEASE.md for setup.
+Android 8+, ARM64/x86_64. Android routes by application; the regex domain-rule editor remains a Windows feature. Import your own SSH credentials; releases contain no user keys or server configuration. Desktop binaries currently have no commercial Authenticode signature. SHA256SUMS.txt covers the downloadable assets.

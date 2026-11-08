@@ -25,6 +25,11 @@ if [[ "$ndk" == /mnt/* && -O "$ndk" ]] && { [[ ! -x "$llvm/aarch64-linux-android
     chmod -R u+rwX "$ndk"
     chmod u+rwx "$ndk/ndk-build" "$ndk/prebuilt/linux-x86_64/bin/"* "$llvm/"*
 fi
+# Gradle also reads NDK metadata and launches objcopy when assembling release APKs.
+if [[ "$ndk" == /mnt/* && -O "$ndk" ]]; then
+    chmod u+r "$ndk/source.properties"
+    chmod u+rx "$llvm/llvm-objcopy" "$llvm/llvm-readelf"
+fi
 "$llvm/clang" --version >/dev/null
 export CARGO_TARGET_DIR="$work/rust-target"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$llvm/aarch64-linux-android26-clang"
@@ -67,6 +72,11 @@ if [[ "$JAVA_HOME" == /mnt/* && -O "$JAVA_HOME" ]] && { [[ ! -r "$JAVA_HOME/lib/
     echo 'Restoring access to the owned JDK on the Windows drive'
     chmod -R u+rwX "$JAVA_HOME"
     chmod u+rwx "$JAVA_HOME/bin/"*
+fi
+# drvfs may allow java itself while denying executable mappings of JDK .so files.
+# Lint's icon checks load AWT even in headless builds.
+if [[ "$JAVA_HOME" == /mnt/* && -O "$JAVA_HOME" ]]; then
+    chmod u+rx "$JAVA_HOME/lib/"*.so "$JAVA_HOME/lib/server/"*.so
 fi
 export PATH="$JAVA_HOME/bin:$PATH"
 if [[ -n ${GRADLE_CMD:-} ]]; then gradle=("$GRADLE_CMD")

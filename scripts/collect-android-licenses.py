@@ -20,7 +20,7 @@ command = [
 ]
 if args.features:
     command.extend(['--features', args.features])
-metadata = json.loads(subprocess.check_output(command, text=True))
+metadata = json.loads(subprocess.check_output(command, text=True, encoding='utf-8'))
 resolved = {node['id'] for node in metadata['resolve']['nodes']}
 index = []
 for package in metadata['packages']:

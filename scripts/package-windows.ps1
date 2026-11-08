@@ -15,11 +15,12 @@ Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination (Join-Path $stag
 $required=@('SecretTunnel.exe','tools/proxybridge/ProxyBridge_CLI.exe','tools/proxybridge/ProxyBridgeCore.dll','tools/proxybridge/WinDivert.dll','tools/proxybridge/WinDivert64.sys','server/secret-tunnel-agent-linux-x86_64','README-Windows.md')
 foreach($file in $required){if(-not(Test-Path -LiteralPath (Join-Path $stage $file))){throw "Missing release runtime: $file"}}
 if(-not (Get-Content -Raw (Join-Path $stage 'tools/proxybridge/source-revision.txt')).Contains('domain-regex-v1')){throw 'Missing domain engine patch'}
-$manifest=Get-ChildItem -LiteralPath $stage -File -Recurse | Sort-Object FullName | ForEach-Object {
+$manifest=Get-ChildItem -LiteralPath $stage -File -Recurse | Where-Object {$_.FullName -ne (Join-Path $stage 'SHA256SUMS.txt')} | Sort-Object FullName | ForEach-Object {
     "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $([IO.Path]::GetRelativePath($stage,$_.FullName).Replace('\','/'))"
 }
 $manifest | Set-Content -Encoding utf8 (Join-Path $stage 'SHA256SUMS.txt')
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path $release "SecretTunnel-$Version-windows-x64-portable.zip") -Force
-$installer=Get-ChildItem -Path (Join-Path $repo 'src-tauri/target/release/bundle/nsis/*.exe') | Select-Object -First 1
-if(-not $installer){throw 'NSIS installer was not produced'}
+$installers=@(Get-ChildItem -Path (Join-Path $repo 'src-tauri/target/release/bundle/nsis/*.exe') | Where-Object {$_.Name.Contains("_${Version}_")})
+if($installers.Count -ne 1){throw "Expected one NSIS installer for version $Version; found $($installers.Count)"}
+$installer=$installers[0]
 Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $release "SecretTunnel-$Version-windows-x64-setup.exe")

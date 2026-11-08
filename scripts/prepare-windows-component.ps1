@@ -12,7 +12,16 @@ if(-not(Test-Path -LiteralPath (Join-Path $source '.git'))){
 $driver=Join-Path $WorkDirectory 'WinDivert-2.2.2-A'
 if(-not(Test-Path -LiteralPath (Join-Path $driver 'x64/WinDivert64.sys'))){
     $archive=Join-Path $WorkDirectory 'WinDivert-2.2.2-A.zip'
-    Invoke-WebRequest https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip -OutFile $archive
+    for($attempt=1;$attempt -le 5;$attempt++){
+        try {
+            Invoke-WebRequest https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip -OutFile $archive -TimeoutSec 180
+            break
+        } catch {
+            if($attempt -eq 5){throw}
+            Write-Warning "WinDivert download failed (attempt $attempt/5); retrying in 5 seconds."
+            Start-Sleep -Seconds 5
+        }
+    }
     Expand-Archive -LiteralPath $archive -DestinationPath $WorkDirectory -Force
 }
 $pins=@{

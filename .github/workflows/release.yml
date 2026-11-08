@@ -94,6 +94,16 @@ jobs:
           key: android-release-ndk27-${{ hashFiles('android/native/Cargo.lock', 'android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
       - run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;27.0.12077973'
       - run: cargo test --manifest-path tunnel-core/Cargo.toml --locked
+      - name: Fetch verified Gradle distribution with retries
+        run: |
+          archive="$RUNNER_TEMP/gradle-8.7-bin.zip"
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 180 \
+            https://downloads.gradle.org/distributions/gradle-8.7-bin.zip --output "$archive"
+          checksum=$(sed -n 's/^distributionSha256Sum=//p' android/gradle/wrapper/gradle-wrapper.properties | tr -d '\r')
+          test -n "$checksum"
+          echo "$checksum  $archive" | sha256sum --check
+          unzip -q "$archive" -d "$RUNNER_TEMP/gradle-release"
+          echo "GRADLE_CMD=$RUNNER_TEMP/gradle-release/gradle-8.7/bin/gradle" >> "$GITHUB_ENV"
       - name: Build signed release APK
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}

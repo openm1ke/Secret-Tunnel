@@ -167,6 +167,7 @@ jobs:
         shell: pwsh
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
           $ErrorActionPreference='Stop'

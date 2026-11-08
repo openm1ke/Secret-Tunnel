@@ -12,15 +12,25 @@ if(-not(Test-Path -LiteralPath (Join-Path $source '.git'))){
 $driver=Join-Path $WorkDirectory 'WinDivert-2.2.2-A'
 if(-not(Test-Path -LiteralPath (Join-Path $driver 'x64/WinDivert64.sys'))){
     $archive=Join-Path $WorkDirectory 'WinDivert-2.2.2-A.zip'
-    for($attempt=1;$attempt -le 5;$attempt++){
+    $downloaded=$false
+    $downloadError=$null
+    for($attempt=1;$attempt -le 3;$attempt++){
         try {
             Invoke-WebRequest https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip -OutFile $archive -TimeoutSec 180
+            $downloaded=$true
             break
         } catch {
-            if($attempt -eq 5){throw}
-            Write-Warning "WinDivert download failed (attempt $attempt/5); retrying in 5 seconds."
+            $downloadError=$_
+            if($attempt -eq 3){break}
+            Write-Warning "WinDivert download failed (attempt $attempt/3); retrying in 5 seconds."
             Start-Sleep -Seconds 5
         }
+    }
+    if(-not $downloaded){
+        if(-not(Get-Command gh -ErrorAction SilentlyContinue)){throw $downloadError}
+        Write-Warning 'Using the official GitHub release asset API for WinDivert.'
+        & gh release download v2.2.2 --repo basil00/WinDivert --pattern WinDivert-2.2.2-A.zip --dir $WorkDirectory --clobber
+        if($LASTEXITCODE -ne 0){throw 'WinDivert release asset API download failed'}
     }
     Expand-Archive -LiteralPath $archive -DestinationPath $WorkDirectory -Force
 }

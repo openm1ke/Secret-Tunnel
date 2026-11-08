@@ -3569,6 +3569,7 @@ dependencies = [
  "russh",
  "secret-tunnel-mux",
  "secret-tunnel-routing",
+ "secret-tunnel-session-control",
  "serde",
  "serde_json",
  "tauri",
@@ -3592,6 +3593,10 @@ dependencies = [
  "regex",
  "serde",
 ]
+
+[[package]]
+name = "secret-tunnel-session-control"
+version = "0.1.0"
 
 [[package]]
 name = "selectors"

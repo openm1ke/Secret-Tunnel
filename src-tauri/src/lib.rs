@@ -1,3 +1,4 @@
+use secret_tunnel_session_control::{Controller, Phase};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -5,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -186,6 +188,7 @@ enum TunnelHandle {
 }
 
 struct TunnelRuntime {
+    generation: u64,
     handle: TunnelHandle,
     server: ServerProfile,
     proxy: ProxyProfile,
@@ -321,6 +324,10 @@ fn default_reconnect_delay_seconds() -> u16 {
 struct AppState {
     redirect: Mutex<platform_redirect::RedirectState>,
     runtime: Mutex<Option<TunnelRuntime>>,
+    control: Controller<AppConfig>,
+    cached_status: Mutex<TunnelStatus>,
+    closing: AtomicBool,
+    latency: Mutex<Option<u64>>,
     logs: Arc<Mutex<Vec<String>>>,
     traffic: Mutex<Vec<TrafficPoint>>,
     ip_cache: Mutex<Option<(u64, String, IpInfo)>>,
@@ -405,7 +412,7 @@ fn parse_config(raw: &str) -> Result<AppConfig, String> {
         value
             .get("servers")
             .cloned()
-            .unwrap_or_else(|| serde_json::json!([])),
+            .ok_or_else(|| "Missing servers in configuration".to_string())?,
     )
     .map_err(|error| error.to_string())?;
 
@@ -441,26 +448,64 @@ fn parse_config(raw: &str) -> Result<AppConfig, String> {
     })
 }
 
-fn load_config() -> Result<AppConfig, String> {
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+static CONFIG_RECOVERY_NOTICE: Mutex<bool> = Mutex::new(false);
+fn read_config_at(path: &Path) -> Result<AppConfig, String> {
+    let primary = fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| parse_config(&raw));
+    primary.or_else(|primary_error| {
+        let backup = path.with_extension("json.bak");
+        let recovered = fs::read_to_string(&backup)
+            .map_err(|_| primary_error.clone())
+            .and_then(|raw| parse_config(&raw).map_err(|_| primary_error))?;
+        *CONFIG_RECOVERY_NOTICE.lock().unwrap() = true;
+        Ok(recovered)
+    })
+}
+fn report_config_recovery(state: &AppState) {
+    if std::mem::take(&mut *CONFIG_RECOVERY_NOTICE.lock().unwrap()) {
+        log_line(&state.logs, "Основной файл настроек повреждён или недоступен. Загружена резервная копия; проверьте профили и сохраните настройки.");
+    }
+}
+fn write_config_at(path: &Path, config: &AppConfig) -> Result<(), String> {
+    let raw = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
+    if let Ok(previous) = fs::read_to_string(path) {
+        if parse_config(&previous).is_ok() {
+            secret_tunnel_session_control::storage::replace(
+                &path.with_extension("json.bak"),
+                previous.as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    secret_tunnel_session_control::storage::replace(path, &raw).map_err(|e| e.to_string())
+}
+fn load_config_unlocked() -> Result<AppConfig, String> {
     let path = config_path()?;
-    if !path.exists() {
+    if !path.exists() && !path.with_extension("json.bak").exists() {
         let config = default_config();
-        save_config(config.clone())?;
+        write_config_at(&path, &config)?;
         return Ok(config);
     }
-
-    let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    parse_config(&raw)
+    read_config_at(&path)
 }
-
+fn load_config() -> Result<AppConfig, String> {
+    let _guard = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+    load_config_unlocked()
+}
 fn save_config(config: AppConfig) -> Result<AppConfig, String> {
-    let path = config_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-
-    let raw = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    fs::write(path, raw).map_err(|error| error.to_string())?;
+    let _guard = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+    write_config_at(&config_path()?, &config)?;
+    Ok(config)
+}
+fn mutate_config(
+    update: impl FnOnce(&mut AppConfig) -> Result<(), String>,
+) -> Result<AppConfig, String> {
+    let _guard = CONFIG_LOCK.lock().map_err(|e| e.to_string())?;
+    let mut config = load_config_unlocked()?;
+    update(&mut config)?;
+    write_config_at(&config_path()?, &config)?;
     Ok(config)
 }
 
@@ -612,17 +657,25 @@ fn attach_log_reader(
     label: &'static str,
     reader: impl std::io::Read + Send + 'static,
     logs: Arc<Mutex<Vec<String>>>,
-) {
+) -> std::sync::mpsc::Receiver<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     thread::spawn(move || {
+        let mut diagnostic = String::new();
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
             if !line.trim().is_empty() {
+                // Retain a terminal SSH diagnostic even if later lines are generic.
+                if diagnostic.is_empty() || !secret_tunnel_session_control::retryable(&line) {
+                    diagnostic = line.chars().take(4096).collect();
+                }
                 log_line(&logs, format!("{label}: {line}"));
             }
         }
+        let _ = sender.send(diagnostic);
     });
+    receiver
 }
 
-fn update_traffic(state: &State<'_, AppState>, runtime: &mut TunnelRuntime) {
+fn update_traffic(state: &AppState, runtime: &mut TunnelRuntime) {
     let now = now_epoch();
     match runtime.traffic_totals() {
         Ok(Some((rx_total, tx_total))) => {
@@ -630,11 +683,7 @@ fn update_traffic(state: &State<'_, AppState>, runtime: &mut TunnelRuntime) {
                 let elapsed = now.saturating_sub(previous.ts).max(1);
                 let rx_bps = rx_total.saturating_sub(previous.rx_total) / elapsed;
                 let tx_bps = tx_total.saturating_sub(previous.tx_total) / elapsed;
-                let latency_ms = tcp_latency_ms(
-                    &runtime.server.host,
-                    runtime.server.port,
-                    Duration::from_secs(2),
-                );
+                let latency_ms = state.latency.lock().ok().and_then(|value| *value);
                 if let Ok(mut traffic) = state.traffic.lock() {
                     traffic.push(TrafficPoint {
                         ts: now,
@@ -722,16 +771,35 @@ fn fetch_ipinfo(token: &str, proxy: Option<&ProxyProfile>) -> Result<Option<IpIn
     }))
 }
 
-fn verify_proxy(proxy: &ProxyProfile) -> Result<String, String> {
-    let output = background_command("curl")
+fn verify_proxy_cancellable(
+    proxy: &ProxyProfile,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let mut child = background_command("curl")
         .arg("-sS")
         .arg("--max-time")
         .arg("8")
         .arg("--socks5-hostname")
         .arg(format!("{}:{}", proxy.host, proxy.port))
         .arg("https://api.ipify.org")
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| error.to_string())?;
+
+    let deadline = Instant::now() + Duration::from_secs(9);
+    loop {
+        if cancelled() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Proxy verification cancelled or timed out".into());
+        }
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -753,13 +821,13 @@ fn verify_proxy(proxy: &ProxyProfile) -> Result<String, String> {
 fn status_emoji(state: &str) -> String {
     match state {
         "running" => "🟢",
-        "unknown" => "🟡",
+        "unknown" | "starting" | "reconnecting" | "stopping" => "🟡",
         _ => "🔴",
     }
     .to_string()
 }
 
-fn totals_from_traffic(state: &State<'_, AppState>) -> (u64, u64) {
+fn totals_from_traffic(state: &AppState) -> (u64, u64) {
     state
         .traffic
         .lock()
@@ -773,7 +841,7 @@ fn build_status(
     state_name: &str,
     runtime: Option<&TunnelRuntime>,
     config: &AppConfig,
-    app_state: &State<'_, AppState>,
+    app_state: &AppState,
 ) -> TunnelStatus {
     let server = runtime
         .map(|runtime| runtime.server.clone())
@@ -804,23 +872,11 @@ fn build_status(
     let (rx_total, tx_total) = totals_from_traffic(app_state);
     let mut ip_info = IpInfo::default();
     if state_name == "running" {
-        let cache_key = format!("{}:{}", proxy.host, proxy.port);
-        let now = now_epoch();
-        if let Ok(mut cache) = app_state.ip_cache.lock() {
-            let cached = cache
-                .as_ref()
-                .filter(|(ts, key, _)| *key == cache_key && now.saturating_sub(*ts) <= 60)
-                .map(|(_, _, info)| info.clone());
-            if let Some(info) = cached {
-                ip_info = info;
-            } else {
-                match fetch_ipinfo(&config.settings.ipinfo_token, Some(&proxy)) {
-                    Ok(Some(info)) => {
-                        ip_info = info.clone();
-                        *cache = Some((now, cache_key, info));
-                    }
-                    Ok(None) => {}
-                    Err(error) => log_line(&app_state.logs, format!("IPinfo: {error}")),
+        let key = format!("{}:{}", proxy.host, proxy.port);
+        if let Ok(cache) = app_state.ip_cache.lock() {
+            if let Some((ts, cache_key, info)) = &*cache {
+                if cache_key == &key && now_epoch().saturating_sub(*ts) <= 90 {
+                    ip_info = info.clone();
                 }
             }
         }
@@ -854,94 +910,103 @@ fn build_status(
 }
 
 #[tauri::command]
-fn get_config() -> Result<AppConfig, String> {
-    load_config()
+fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
+    let config = load_config()?;
+    report_config_recovery(&state);
+    Ok(config)
 }
 
 #[tauri::command]
 fn save_server(server: ServerProfile) -> Result<AppConfig, String> {
     validate_server(&server)?;
-    let mut config = load_config()?;
-    if let Some(existing) = config.servers.iter_mut().find(|item| item.id == server.id) {
-        *existing = server.clone();
-    } else {
-        config.servers.push(server.clone());
-    }
-    if config.selected_server_id.is_empty() {
-        config.selected_server_id = server.id;
-    }
-    save_config(config)
+    mutate_config(|config| {
+        if let Some(existing) = config.servers.iter_mut().find(|item| item.id == server.id) {
+            *existing = server.clone();
+        } else {
+            config.servers.push(server.clone());
+        }
+        if config.selected_server_id.is_empty() {
+            config.selected_server_id = server.id;
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn delete_server(id: String) -> Result<AppConfig, String> {
-    let mut config = load_config()?;
-    config.servers.retain(|server| server.id != id);
-    if config.selected_server_id == id {
-        config.selected_server_id = config
-            .servers
-            .first()
-            .map(|server| server.id.clone())
-            .unwrap_or_default();
-    }
-    save_config(config)
+    mutate_config(|config| {
+        config.servers.retain(|server| server.id != id);
+        if config.selected_server_id == id {
+            config.selected_server_id = config
+                .servers
+                .first()
+                .map(|server| server.id.clone())
+                .unwrap_or_default();
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn select_server(id: String) -> Result<AppConfig, String> {
-    let mut config = load_config()?;
-    if !config.servers.iter().any(|server| server.id == id) {
-        return Err("Server profile not found".to_string());
-    }
-    config.selected_server_id = id;
-    save_config(config)
+    mutate_config(|config| {
+        if !config.servers.iter().any(|server| server.id == id) {
+            return Err("Server profile not found".to_string());
+        }
+        config.selected_server_id = id;
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn save_proxy(proxy: ProxyProfile) -> Result<AppConfig, String> {
     validate_proxy(&proxy)?;
-    let mut config = load_config()?;
-    if let Some(existing) = config.proxies.iter_mut().find(|item| item.id == proxy.id) {
-        *existing = proxy.clone();
-    } else {
-        config.proxies.push(proxy.clone());
-    }
-    if config.selected_proxy_id.is_empty() {
-        config.selected_proxy_id = proxy.id;
-    }
-    save_config(config)
+    mutate_config(|config| {
+        if let Some(existing) = config.proxies.iter_mut().find(|item| item.id == proxy.id) {
+            *existing = proxy.clone();
+        } else {
+            config.proxies.push(proxy.clone());
+        }
+        if config.selected_proxy_id.is_empty() {
+            config.selected_proxy_id = proxy.id;
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn delete_proxy(id: String) -> Result<AppConfig, String> {
-    let mut config = load_config()?;
-    config.proxies.retain(|proxy| proxy.id != id);
-    if config.selected_proxy_id == id {
-        config.selected_proxy_id = config
-            .proxies
-            .first()
-            .map(|proxy| proxy.id.clone())
-            .unwrap_or_default();
-    }
-    save_config(config)
+    mutate_config(|config| {
+        config.proxies.retain(|proxy| proxy.id != id);
+        if config.selected_proxy_id == id {
+            config.selected_proxy_id = config
+                .proxies
+                .first()
+                .map(|proxy| proxy.id.clone())
+                .unwrap_or_default();
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn select_proxy(id: String) -> Result<AppConfig, String> {
-    let mut config = load_config()?;
-    if !config.proxies.iter().any(|proxy| proxy.id == id) {
-        return Err("Proxy profile not found".to_string());
-    }
-    config.selected_proxy_id = id;
-    save_config(config)
+    mutate_config(|config| {
+        if !config.proxies.iter().any(|proxy| proxy.id == id) {
+            return Err("Proxy profile not found".to_string());
+        }
+        config.selected_proxy_id = id;
+        Ok(())
+    })
 }
 
 #[tauri::command]
 fn save_settings(settings: AppSettings) -> Result<AppConfig, String> {
     validate_settings(&settings)?;
-    let mut config = load_config()?;
-    config.settings = settings;
-    save_config(config)
+    mutate_config(|config| {
+        config.settings = settings;
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -951,6 +1016,7 @@ fn default_settings() -> AppSettings {
 
 #[tauri::command(async)]
 fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
+    state.control.cancel();
     let redirect_result = stop_application_redirect(&state);
     {
         let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
@@ -1044,20 +1110,211 @@ fn start_tunnel(state: State<'_, AppState>) -> Result<String, String> {
         }
     }
 
-    match config.settings.ssh_engine.as_str() {
-        "system" => start_system_ssh_tunnel(state, config, server, proxy),
-        "embedded" => start_embedded_ssh_tunnel(state, config, server, proxy),
-        _ => Err("Unknown SSH engine".to_string()),
+    if state.closing.load(Ordering::SeqCst) {
+        return Err("Application is closing".into());
     }
+    if !state.control.request(config) {
+        return Ok("Tunnel is already running or connecting".into());
+    }
+    *state.ip_cache.lock().unwrap() = None;
+    *state.latency.lock().unwrap() = None;
+    Ok("Tunnel startup requested".into())
+}
+
+// OpenSSH must not outlive a failed/cancelled startup attempt.
+struct StartupChild(Option<Child>);
+impl Drop for StartupChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn start_session_workers(app: tauri::AppHandle) {
+    let telemetry_app = app.clone();
+    thread::spawn(move || {
+        let mut last_ip = Instant::now() - Duration::from_secs(60);
+        let mut ip_generation = 0;
+        loop {
+            let state = telemetry_app.state::<AppState>();
+            if state.closing.load(Ordering::SeqCst) {
+                break;
+            }
+            let snapshot = state.control.snapshot();
+            if snapshot.phase == Phase::Running {
+                if ip_generation != snapshot.generation {
+                    last_ip = Instant::now() - Duration::from_secs(60);
+                    ip_generation = snapshot.generation;
+                }
+                if let Some(plan) = snapshot.plan {
+                    if let (Ok(server), Ok(proxy)) = (selected_server(&plan), selected_proxy(&plan))
+                    {
+                        let latency =
+                            tcp_latency_ms(&server.host, server.port, Duration::from_secs(2));
+                        if state.control.current(snapshot.generation) {
+                            *state.latency.lock().unwrap() = latency;
+                        }
+                        if last_ip.elapsed() >= Duration::from_secs(60) {
+                            last_ip = Instant::now();
+                            match fetch_ipinfo(&plan.settings.ipinfo_token, Some(&proxy)) {
+                                Ok(Some(info)) if state.control.current(snapshot.generation) => {
+                                    *state.ip_cache.lock().unwrap() = Some((
+                                        now_epoch(),
+                                        format!("{}:{}", proxy.host, proxy.port),
+                                        info,
+                                    ));
+                                }
+                                Err(error) => log_line(&state.logs, format!("IPinfo: {error}")),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            // This sampler never owns the runtime or blocks Stop.
+            for _ in 0..20 {
+                if state.closing.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    });
+    thread::spawn(move || {
+        let mut last_sample = Instant::now();
+        loop {
+            let state = app.state::<AppState>();
+            if state.closing.load(Ordering::SeqCst) {
+                break;
+            }
+            let snapshot = state.control.snapshot();
+            let mut failure = None;
+            let retired = {
+                let mut slot = state.runtime.lock().unwrap();
+                if let Some(runtime) = slot.as_mut() {
+                    if snapshot.plan.is_none() || runtime.generation != snapshot.generation {
+                        slot.take()
+                    } else {
+                        match runtime.try_wait() {
+                            Ok(None) => {
+                                if last_sample.elapsed() >= Duration::from_secs(1) {
+                                    update_traffic(&state, runtime);
+                                    last_sample = Instant::now();
+                                }
+                                if let Some(plan) = &snapshot.plan {
+                                    *state.cached_status.lock().unwrap() =
+                                        build_status("running", Some(runtime), plan, &state);
+                                }
+                                None
+                            }
+                            result => {
+                                failure = Some(match result {
+                                    Ok(Some(error)) => error,
+                                    Err(error) => error,
+                                    _ => unreachable!(),
+                                });
+                                slot.take()
+                            }
+                        }
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(runtime) = retired {
+                let generation = runtime.generation;
+                runtime.stop(&state.logs);
+                if let Err(error) = stop_application_redirect(&state) {
+                    log_line(&state.logs, error);
+                }
+                if let Some(error) = failure {
+                    log_line(&state.logs, format!("Tunnel failed: {error}"));
+                    let retry = snapshot
+                        .plan
+                        .as_ref()
+                        .filter(|plan| {
+                            plan.settings.auto_reconnect
+                                && secret_tunnel_session_control::retryable(&error)
+                        })
+                        .map(|plan| {
+                            Duration::from_secs(plan.settings.reconnect_delay_seconds.max(1).into())
+                        });
+                    state
+                        .control
+                        .failed(generation, error, retry, Instant::now());
+                }
+            }
+            if let Some(attempt) = state.control.attempt(Instant::now()) {
+                let plan = attempt.plan.unwrap();
+                let generation = attempt.generation;
+                *state.cached_status.lock().unwrap() =
+                    build_status("starting", None, &plan, &state);
+                let result = (|| {
+                    let server = selected_server(&plan)?;
+                    let proxy = selected_proxy(&plan)?;
+                    match plan.settings.ssh_engine.as_str() {
+                        "system" => {
+                            start_system_ssh_tunnel(&state, plan.clone(), server, proxy, generation)
+                        }
+                        "embedded" => start_embedded_ssh_tunnel(
+                            &state,
+                            plan.clone(),
+                            server,
+                            proxy,
+                            generation,
+                        ),
+                        _ => Err("Unknown SSH engine".into()),
+                    }
+                })();
+                match result {
+                    Ok(runtime) => {
+                        let mut runtime = Some(runtime);
+                        if !state.control.publish(generation, || {
+                            *state.runtime.lock().unwrap() = runtime.take();
+                        }) {
+                            runtime.unwrap().stop(&state.logs);
+                        } else {
+                            log_line(
+                                &state.logs,
+                                "Tunnel ready; interception can be enabled explicitly",
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let retry = if plan.settings.auto_reconnect
+                            && secret_tunnel_session_control::retryable(&error)
+                        {
+                            Some(Duration::from_secs(
+                                plan.settings.reconnect_delay_seconds.max(1).into(),
+                            ))
+                        } else {
+                            None
+                        };
+                        log_line(&state.logs, format!("Tunnel startup: {error}"));
+                        state
+                            .control
+                            .failed(generation, error, retry, Instant::now());
+                    }
+                }
+            }
+            if state.control.snapshot().plan.is_none() {
+                state.control.stopped();
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
 }
 
 #[cfg(not(feature = "embedded-ssh"))]
 fn start_embedded_ssh_tunnel(
-    state: State<'_, AppState>,
+    state: &AppState,
     _config: AppConfig,
     _server: ServerProfile,
     _proxy: ProxyProfile,
-) -> Result<String, String> {
+    _generation: u64,
+) -> Result<TunnelRuntime, String> {
     let message = "Embedded Rust SSH engine is disabled in this build. Build with Cargo feature 'embedded-ssh' or switch SSH engine to System OpenSSH.".to_string();
     log_line(&state.logs, &message);
     Err(message)
@@ -1065,19 +1322,12 @@ fn start_embedded_ssh_tunnel(
 
 #[cfg(feature = "embedded-ssh")]
 fn start_embedded_ssh_tunnel(
-    state: State<'_, AppState>,
+    state: &AppState,
     _config: AppConfig,
     server: ServerProfile,
     proxy: ProxyProfile,
-) -> Result<String, String> {
-    let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
-    if let Some(runtime) = runtime_guard.as_mut() {
-        if runtime.try_wait()?.is_none() {
-            return Ok("Tunnel is already running".to_string());
-        }
-        *runtime_guard = None;
-    }
-
+    generation: u64,
+) -> Result<TunnelRuntime, String> {
     if tcp_connects(&proxy.host, proxy.port, Duration::from_millis(200)) {
         return Err(format!(
             "Local proxy {}:{} is already occupied",
@@ -1097,7 +1347,7 @@ fn start_embedded_ssh_tunnel(
         ),
     );
 
-    let handle = embedded_ssh::start(
+    let handle = embedded_ssh::start_cancellable(
         embedded_ssh::EmbeddedServer {
             name: server.name.clone(),
             host: server.host.clone(),
@@ -1111,34 +1361,27 @@ fn start_embedded_ssh_tunnel(
             port: proxy.port,
         },
         Arc::clone(&state.logs),
+        &|| !state.control.current(generation) || state.closing.load(Ordering::SeqCst),
     )?;
 
-    *runtime_guard = Some(TunnelRuntime {
+    Ok(TunnelRuntime {
+        generation,
         handle: TunnelHandle::Embedded(handle),
         server,
         proxy,
         started_at: now_epoch(),
         last_error: String::new(),
         last_traffic: None,
-    });
-
-    Ok("Embedded SOCKS listener started (TCP and experimental UDP-over-SSH)".to_string())
+    })
 }
 
 fn start_system_ssh_tunnel(
-    state: State<'_, AppState>,
+    state: &AppState,
     config: AppConfig,
     server: ServerProfile,
     proxy: ProxyProfile,
-) -> Result<String, String> {
-    let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
-    if let Some(runtime) = runtime_guard.as_mut() {
-        if runtime.try_wait()?.is_none() {
-            return Ok("Tunnel is already running".to_string());
-        }
-        *runtime_guard = None;
-    }
-
+    generation: u64,
+) -> Result<TunnelRuntime, String> {
     if tcp_connects(&proxy.host, proxy.port, Duration::from_millis(200)) {
         return Err(format!(
             "Local proxy {}:{} is already occupied",
@@ -1220,22 +1463,34 @@ fn start_system_ssh_tunnel(
     if let Some(stdout) = child.stdout.take() {
         attach_log_reader("ssh stdout", stdout, Arc::clone(&state.logs));
     }
-    if let Some(stderr) = child.stderr.take() {
-        attach_log_reader("ssh stderr", stderr, Arc::clone(&state.logs));
-    }
+    let stderr = child
+        .stderr
+        .take()
+        .map(|reader| attach_log_reader("ssh stderr", reader, Arc::clone(&state.logs)));
 
+    let mut startup = StartupChild(Some(child));
+    let child = startup.0.as_mut().unwrap();
     let pid = child.id();
-    for _ in 0..24 {
-        thread::sleep(Duration::from_millis(250));
+    for _ in 0..120 {
+        if !state.control.current(generation) || state.closing.load(Ordering::SeqCst) {
+            return Err("Tunnel startup cancelled".into());
+        }
+        thread::sleep(Duration::from_millis(50));
         if let Some(exit_status) = child.try_wait().map_err(|error| error.to_string())? {
-            let message = format!("ssh exited during startup with {exit_status}");
+            let diagnostic = stderr
+                .as_ref()
+                .and_then(|reader| reader.recv_timeout(Duration::from_millis(100)).ok())
+                .unwrap_or_default();
+            let message = format!("ssh exited during startup with {exit_status}: {diagnostic}");
             log_line(&state.logs, &message);
             return Err(message);
         }
         if tcp_connects("127.0.0.1", upstream.port(), Duration::from_millis(200)) {
             log_line(&state.logs, format!("Tunnel is running, ssh pid={pid}"));
             if config.settings.verify_proxy_on_start {
-                match verify_proxy(&proxy) {
+                match verify_proxy_cancellable(&proxy, &|| {
+                    !state.control.current(generation) || state.closing.load(Ordering::SeqCst)
+                }) {
                     Ok(ip) => {
                         if config.settings.hide_sensitive {
                             log_line(&state.logs, "Proxy verification OK, public IP hidden");
@@ -1255,15 +1510,15 @@ fn start_system_ssh_tunnel(
                     }
                 }
             }
-            *runtime_guard = Some(TunnelRuntime {
-                handle: TunnelHandle::System(child, relay),
+            return Ok(TunnelRuntime {
+                generation,
+                handle: TunnelHandle::System(startup.0.take().unwrap(), relay),
                 server,
                 proxy,
                 started_at: now_epoch(),
                 last_error: String::new(),
                 last_traffic: None,
             });
-            return Ok("Tunnel started".to_string());
         }
     }
 
@@ -1276,74 +1531,45 @@ fn start_system_ssh_tunnel(
 
 #[tauri::command(async)]
 fn stop_tunnel(state: State<'_, AppState>) -> Result<String, String> {
-    let redirect_result = stop_application_redirect(&state);
-    let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
-    let Some(runtime) = runtime_guard.take() else {
-        redirect_result?;
-        return Ok("Tunnel is already stopped".to_string());
-    };
-    runtime.stop(&state.logs);
-    redirect_result?;
-    Ok("Tunnel stopped".to_string())
+    state.control.cancel();
+    Ok("Tunnel stop requested".into())
 }
 
 #[tauri::command(async)]
 fn restart_tunnel(state: State<'_, AppState>) -> Result<String, String> {
-    stop_tunnel(state.clone())?;
-    thread::sleep(Duration::from_millis(500));
-    start_tunnel(state)
+    let config = load_config()?;
+    validate_server(&selected_server(&config)?)?;
+    validate_proxy(&selected_proxy(&config)?)?;
+    validate_settings(&config.settings)?;
+    state.control.cancel();
+    *state.ip_cache.lock().unwrap() = None;
+    *state.latency.lock().unwrap() = None;
+    state.control.request(config);
+    Ok("Tunnel restart requested".into())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn tunnel_status(state: State<'_, AppState>) -> Result<TunnelStatus, String> {
-    let config = load_config()?;
-    let mut reconnect_status = None;
-
-    {
-        let mut runtime_guard = state.runtime.lock().map_err(|error| error.to_string())?;
-        if let Some(runtime) = runtime_guard.as_mut() {
-            match runtime.try_wait()? {
-                Some(exit_message) => {
-                    runtime.last_error = exit_message;
-                    let status = build_status("stopped", Some(runtime), &config, &state);
-                    log_line(&state.logs, status.last_error.clone());
-                    *runtime_guard = None;
-                    reconnect_status = Some(status);
-                }
-                None => {
-                    update_traffic(&state, runtime);
-                    return Ok(build_status("running", Some(runtime), &config, &state));
-                }
-            }
-        }
+    let snapshot = state.control.snapshot();
+    let mut status = state
+        .cached_status
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    status.state = snapshot.phase.label().into();
+    status.state_emoji = status_emoji(&status.state);
+    if snapshot.phase != Phase::Running {
+        status.pid = None;
+        status.started_at = None;
+        status.ip.clear();
+        status.country_flag.clear();
+        status.country_code.clear();
+        status.country_name.clear();
     }
-
-    if let Some(mut status) = reconnect_status {
-        // A failed SSH transport must not leave a running routing process pointed
-        // at a dead SOCKS endpoint. Re-enabling interception is an explicit action.
-        stop_application_redirect(&state)?;
-        if config.settings.auto_reconnect {
-            let delay = config.settings.reconnect_delay_seconds.max(1);
-            log_line(
-                &state.logs,
-                format!("Auto reconnect in {delay}s using selected profiles"),
-            );
-            thread::sleep(Duration::from_secs(delay.into()));
-            match start_tunnel(state.clone()) {
-                Ok(message) => {
-                    log_line(&state.logs, format!("Auto reconnect: {message}"));
-                    return tunnel_status(state);
-                }
-                Err(error) => {
-                    status.last_error = format!("Auto reconnect failed: {error}");
-                    log_line(&state.logs, status.last_error.clone());
-                }
-            }
-        }
-        return Ok(status);
+    if !snapshot.error.is_empty() {
+        status.last_error = snapshot.error;
     }
-
-    Ok(build_status("stopped", None, &config, &state))
+    Ok(status)
 }
 
 #[tauri::command]
@@ -1542,6 +1768,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
+            let initial = load_config().unwrap_or_else(|_| default_config());
+            report_config_recovery(&app.state::<AppState>());
+            *app.state::<AppState>().cached_status.lock().unwrap() =
+                build_status("stopped", None, &initial, &app.state::<AppState>());
+            start_session_workers(app.handle().clone());
             let should_start = load_config()
                 .map(|config| config.settings.start_tunnel_on_launch)
                 .unwrap_or(false);
@@ -1564,6 +1795,8 @@ pub fn run() {
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
                 let state = window.app_handle().state::<AppState>();
+                state.closing.store(true, Ordering::SeqCst);
+                state.control.cancel();
                 if let Ok(mut redirect) = state.redirect.lock() {
                     let _ = redirect.stop();
                 }
@@ -1605,4 +1838,71 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Secret Tunnel application");
+}
+
+#[cfg(test)]
+mod recovery_storage_tests {
+    use super::*;
+    #[test]
+    fn openssh_startup_preserves_terminal_auth_errors_for_retry_policy() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let output = std::io::Cursor::new(
+            b"user@fixture: Permission denied (publickey).\nConnection closed\n".to_vec(),
+        );
+        let diagnostic = attach_log_reader("fixture", output, logs.clone())
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(!secret_tunnel_session_control::retryable(&diagnostic));
+        assert!(diagnostic.contains("Permission denied"));
+        assert_eq!(logs.lock().unwrap().len(), 2);
+    }
+    #[test]
+    fn corrupt_primary_restores_backup_and_does_not_overwrite_it_with_corruption() {
+        let root = std::env::temp_dir().join(format!(
+            "st-recovery-{}-{}",
+            std::process::id(),
+            now_epoch()
+        ));
+        let path = root.join("config.json");
+        let mut config = AppConfig {
+            selected_server_id: String::new(),
+            selected_proxy_id: String::new(),
+            servers: vec![],
+            proxies: vec![],
+            settings: AppSettings::default(),
+        };
+        write_config_at(&path, &config).unwrap();
+        config.selected_server_id = "new-version".into();
+        write_config_at(&path, &config).unwrap();
+        for broken in ["{broken", "{}", "null", "{\"proxies\":[]}"] {
+            fs::write(&path, broken).unwrap();
+            let recovered = read_config_at(&path).unwrap();
+            assert!(recovered.selected_server_id.is_empty());
+            write_config_at(&path, &config).unwrap();
+        }
+        assert_eq!(
+            read_config_at(&path).unwrap().selected_server_id,
+            "new-version"
+        );
+        assert!(
+            parse_config(&fs::read_to_string(path.with_extension("json.bak")).unwrap())
+                .unwrap()
+                .selected_server_id
+                .is_empty()
+        );
+        fs::write(
+            &path,
+            r#"{"servers":[],"proxy":{"host":"127.0.0.1","port":1081}}"#,
+        )
+        .unwrap();
+        write_config_at(&path, &config).unwrap();
+        assert_eq!(
+            parse_config(&fs::read_to_string(path.with_extension("json.bak")).unwrap())
+                .unwrap()
+                .proxies[0]
+                .port,
+            1081
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

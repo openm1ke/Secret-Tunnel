@@ -224,7 +224,7 @@ impl Inner {
         if !*self.closed.borrow() {
             *self.error.lock().unwrap() = error.into();
         }
-        let _ = self.closed.send(true);
+        self.closed.send_replace(true);
         for state in self.flows.lock().unwrap().values() {
             state.window.ready.notify_waiters();
         }
@@ -530,7 +530,7 @@ struct State {
 impl State {
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
-        let _ = self.closed.send(true);
+        self.closed.send_replace(true);
         if let Some(ack) = self.opening.lock().unwrap().take() {
             let _ = ack.send(Err("Flow closed before destination acceptance".into()));
         }
@@ -960,7 +960,6 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 let _ = ack.send(Err(String::from_utf8_lossy(&data).into_owned()));
             }
             state.cancel();
-            inner.remove(id);
         }
         Kind::Credit => {
             if data.len() != 8 {
@@ -985,7 +984,6 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 // application owns admission until it has consumed those bytes.
             } else {
                 state.cancel();
-                inner.remove(id);
             }
         }
         Kind::Abort => {
@@ -993,7 +991,6 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 return Err("Invalid abort frame".into());
             }
             state.cancel();
-            inner.remove(id);
         }
         Kind::Eof => {
             if !data.is_empty() || state.peer_eof.swap(true, Ordering::Relaxed) {

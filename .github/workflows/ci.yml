@@ -17,6 +17,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: cargo test --manifest-path routing-engine/Cargo.toml --locked
+      - run: cargo test --manifest-path session-control/Cargo.toml --locked
       - run: cargo test --manifest-path stream-mux/Cargo.toml --locked
       - run: cargo test --locked
         working-directory: src-tauri
@@ -47,7 +48,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo check --manifest-path src-tauri/Cargo.toml --features embedded-ssh
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path src-tauri/Cargo.toml --features embedded-ssh --lib --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --manifest-path routing-engine/Cargo.toml --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path session-control/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --manifest-path stream-mux/Cargo.toml --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

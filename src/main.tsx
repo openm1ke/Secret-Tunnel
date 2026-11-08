@@ -202,6 +202,10 @@ function makeId(name: string) {
 function stateLabel(state: string) {
   if (state === "running") return "Работает";
   if (state === "unknown") return "Неизвестно";
+  if (state === "starting") return "Подключение";
+  if (state === "reconnecting") return "Переподключение";
+  if (state === "stopping") return "Остановка";
+  if (state === "failed") return "Ошибка подключения";
   return "Остановлен";
 }
 
@@ -386,6 +390,7 @@ function App() {
   const currentServer = useMemo(() => selectedServer(config), [config]);
   const currentProxy = useMemo(() => selectedProxy(config), [config]);
   const connected = status.state === "running";
+  const sessionActive = ["running", "starting", "reconnecting", "stopping"].includes(status.state);
   const isMac = redirect.platform === "macos";
   const redirectActive = redirect.running || redirect.starting;
   const redirectSupported = isMac || redirect.platform === "windows";
@@ -665,13 +670,13 @@ function App() {
                 <div className="actions">
                   <button
                     className="primary"
-                    disabled={busy !== null || connected || !currentServer.id || !currentProxy.id}
+                    disabled={busy !== null || sessionActive || !currentServer.id || !currentProxy.id}
                     onClick={() => runAction("connect", () => invoke<string>("start_tunnel"))}
                   >
                     <Play size={16} />
                     Запустить
                   </button>
-                  <button className="danger" disabled={busy !== null || !connected} onClick={() => runAction("disconnect", () => invoke<string>("stop_tunnel"))}>
+                  <button className="danger" disabled={busy !== null || !sessionActive} onClick={() => runAction("disconnect", () => invoke<string>("stop_tunnel"))}>
                     <CircleStop size={16} />
                     Остановить
                   </button>
@@ -687,7 +692,7 @@ function App() {
                   Сервер
                   <select
                     value={config.selected_server_id}
-                    disabled={connected}
+                    disabled={sessionActive}
                     onChange={(event) =>
                       runAction("save", async () => {
                         await invoke<AppConfig>("select_server", { id: event.target.value });
@@ -706,7 +711,7 @@ function App() {
                   Локальный прокси
                   <select
                     value={config.selected_proxy_id}
-                    disabled={connected}
+                    disabled={sessionActive}
                     onChange={(event) =>
                       runAction("save", async () => {
                         await invoke<AppConfig>("select_proxy", { id: event.target.value });
@@ -918,7 +923,7 @@ function App() {
                     <Terminal size={16} />
                     Проверить
                   </button>
-                  <button disabled={busy !== null || !serverDraft.id || connected} onClick={() => runAction("delete", async () => {
+                  <button disabled={busy !== null || !serverDraft.id || sessionActive} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_server", { id: serverDraft.id });
                     serverDraftDirtyRef.current = false;
                     setServerDraft(emptyServer);
@@ -979,15 +984,15 @@ function App() {
                   </label>
                   <label>
                     Bind address
-                    <input value={proxyDraft.host} disabled={connected} onChange={(event) => updateProxy("host", event.target.value)} placeholder="127.0.0.1" />
+                    <input value={proxyDraft.host} disabled={sessionActive} onChange={(event) => updateProxy("host", event.target.value)} placeholder="127.0.0.1" />
                   </label>
                   <label>
                     Port
-                    <input type="number" disabled={connected} value={proxyDraft.port} onChange={(event) => updateProxy("port", Number(event.target.value))} />
+                    <input type="number" disabled={sessionActive} value={proxyDraft.port} onChange={(event) => updateProxy("port", Number(event.target.value))} />
                   </label>
                 </div>
                 <div className="actions left">
-                  <button className="primary" disabled={busy !== null || connected} onClick={() => runAction("save", async () => {
+                  <button className="primary" disabled={busy !== null || sessionActive} onClick={() => runAction("save", async () => {
                     const savedProxy = proxyDraft;
                     await invoke<AppConfig>("save_proxy", { proxy: savedProxy });
                     await invoke<AppConfig>("select_proxy", { id: savedProxy.id });
@@ -998,7 +1003,7 @@ function App() {
                     <Save size={16} />
                     Сохранить
                   </button>
-                  <button disabled={busy !== null || !proxyDraft.id || connected} onClick={() => runAction("delete", async () => {
+                  <button disabled={busy !== null || !proxyDraft.id || sessionActive} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_proxy", { id: proxyDraft.id });
                     proxyDraftDirtyRef.current = false;
                     setProxyDraft(emptyProxy);

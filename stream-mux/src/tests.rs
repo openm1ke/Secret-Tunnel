@@ -345,3 +345,154 @@ async fn excessive_peer_data_is_rejected_before_exceeding_receive_budget() {
     assert_eq!(server.snapshot().receive_queue_peak, 65536);
     drop(flow);
 }
+
+#[tokio::test]
+async fn late_close_subscriber_observes_cancel_without_another_event() {
+    let (client, server) = pair(Config::default()).await;
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await.unwrap() })
+    };
+    let incoming = server.accept().await.unwrap().flow;
+    incoming.accept().unwrap();
+    let flow = opening.await.unwrap();
+    let sender = incoming.sender();
+    drop(incoming);
+    assert!(sender.is_closed());
+    tokio::time::timeout(Duration::from_secs(1), sender.closed())
+        .await
+        .unwrap();
+    drop(flow);
+    client.shutdown();
+    tokio::time::timeout(Duration::from_secs(1), client.closed())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn abort_reclaims_blocked_relays_and_admission_in_both_directions() {
+    use tokio::io::AsyncReadExt;
+    for abort in [true, false] {
+        let (client, server) = pair(Config {
+            max_flows: 4,
+            ..Default::default()
+        })
+        .await;
+        for _ in 0..500 {
+            let opening = {
+                let client = client.clone();
+                tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await.unwrap() })
+            };
+            let mut incoming = server.accept().await.unwrap().flow;
+            incoming.accept().unwrap();
+            let flow = opening.await.unwrap();
+            let (mut destination, mut blocked) = tokio::io::duplex(1);
+            let mut task =
+                tokio::spawn(
+                    async move { relay(&mut incoming, &mut destination, |_, _| {}).await },
+                );
+            flow.sender().send(vec![7; TCP_CHUNK]).await.unwrap();
+            // One byte has reached the non-reading destination: write_all is blocked.
+            let mut byte = [0];
+            blocked.read_exact(&mut byte).await.unwrap();
+            assert_eq!(byte, [7]);
+            if abort {
+                drop(flow)
+            } else {
+                drop(blocked);
+                drop(flow)
+            }
+            tokio::time::timeout(Duration::from_secs(1), &mut task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            for _ in 0..100 {
+                if server.snapshot().active == 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(server.snapshot().active, 0);
+            assert_eq!(server.snapshot().receive_queue_bytes, 0);
+        }
+        // Transport shutdown must also interrupt local socket reads/writes.
+        let opening = {
+            let client = client.clone();
+            tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await.unwrap() })
+        };
+        let mut incoming = server.accept().await.unwrap().flow;
+        incoming.accept().unwrap();
+        let flow = opening.await.unwrap();
+        let (mut destination, _blocked) = tokio::io::duplex(1);
+        let task =
+            tokio::spawn(async move { relay(&mut incoming, &mut destination, |_, _| {}).await });
+        flow.sender().send(vec![7; TCP_CHUNK]).await.unwrap();
+        server.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        drop(flow);
+        client.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn cancelled_relays_close_real_tcp_sockets_in_both_roles() {
+    use tokio::{
+        io::AsyncReadExt,
+        net::{TcpListener, TcpStream},
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for reverse in [false, true] {
+            let (client, server) = pair(Config::default()).await;
+            let (opening_side, accepting_side) = if reverse {
+                (&server, &client)
+            } else {
+                (&client, &server)
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            for cycle in 0..100 {
+                let opening = {
+                    let endpoint = opening_side.clone();
+                    tokio::spawn(async move { endpoint.open(FlowKind::Tcp, vec![]).await.unwrap() })
+                };
+                let mut incoming = accepting_side.accept().await.unwrap().flow;
+                incoming.accept().unwrap();
+                let flow = opening.await.unwrap();
+                let mut destination = TcpStream::connect(listener.local_addr().unwrap())
+                    .await
+                    .unwrap();
+                let (mut receiver, _) = listener.accept().await.unwrap();
+                let task =
+                    tokio::spawn(
+                        async move { relay(&mut incoming, &mut destination, |_, _| {}).await },
+                    );
+                flow.sender().send(vec![42]).await.unwrap();
+                let mut byte = [0];
+                receiver.read_exact(&mut byte).await.unwrap();
+                assert_eq!(byte, [42]);
+                // Both local TCP read and flow receive are now idle. The last cycle
+                // also covers transport shutdown rather than an individual Abort.
+                if cycle == 99 {
+                    accepting_side.shutdown();
+                }
+                drop(flow);
+                tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert_eq!(receiver.read(&mut byte).await.unwrap(), 0);
+                assert_eq!(accepting_side.snapshot().active, 0);
+                assert_eq!(accepting_side.snapshot().receive_queue_bytes, 0);
+            }
+            client.shutdown();
+            server.shutdown();
+        }
+    })
+    .await
+    .unwrap();
+}

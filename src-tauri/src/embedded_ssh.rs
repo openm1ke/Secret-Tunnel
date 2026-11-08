@@ -2,6 +2,8 @@ use crate::udp_protocol;
 use russh::client;
 use russh::keys::known_hosts::{check_known_hosts_path, known_host_keys_path, learn_known_hosts};
 use russh::keys::{load_secret_key, ssh_key, PrivateKeyWithHashAlg};
+pub use secret_tunnel_mux::Snapshot as TransportSnapshot;
+use secret_tunnel_mux::{Config as MuxConfig, DatagramBuffers, Endpoint, FlowKind, Role};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,8 +12,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use secret_tunnel_mux::{Config as MuxConfig, DatagramBuffers, Endpoint, FlowKind, Role};
-pub use secret_tunnel_mux::Snapshot as TransportSnapshot;
 
 #[path = "tls_target.rs"]
 mod tls_target;
@@ -54,8 +54,12 @@ pub struct EmbeddedTunnelHandle {
 }
 
 impl EmbeddedTunnelHandle {
-    pub fn transport_stats(&self) -> TransportSnapshot { self.transport.snapshot() }
-    pub fn ipv6_supported(&self) -> Option<bool> { self.ipv6_supported }
+    pub fn transport_stats(&self) -> TransportSnapshot {
+        self.transport.snapshot()
+    }
+    pub fn ipv6_supported(&self) -> Option<bool> {
+        self.ipv6_supported
+    }
     pub fn try_wait(&self) -> Option<String> {
         match self.outcome.try_recv() {
             Ok(Err(error)) => Some(error),
@@ -68,7 +72,9 @@ impl EmbeddedTunnelHandle {
         self.counters.totals()
     }
 
-    pub fn stop(self) { let _ = self.stop_with_stats(); }
+    pub fn stop(self) {
+        let _ = self.stop_with_stats();
+    }
     pub fn stop_with_stats(mut self) -> TransportSnapshot {
         let _ = self.stop_tx.send(true);
         if let Some(join) = self.join.take() {
@@ -177,6 +183,79 @@ type SharedSession = Arc<client::Handle<SshClient>>;
 #[cfg(test)]
 mod platform_tests {
     use super::*;
+    #[test]
+    fn cancellation_interrupts_a_stalled_ssh_handshake_and_closes_the_socket() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicBool;
+        use std::time::Instant;
+        // Deliberately public fixture seed: never a user credential or trusted key.
+        let key: ssh_key::PrivateKey =
+            ssh_key::private::Ed25519Keypair::from_seed(&[23; 32]).into();
+        let path = std::env::temp_dir().join(format!("st-cancel-test-{}.key", std::process::id()));
+        std::fs::write(
+            &path,
+            key.to_openssh(ssh_key::LineEnding::LF).unwrap().as_bytes(),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let key_path = path.to_string_lossy().into_owned();
+        let worker = thread::spawn(move || {
+            start_cancellable(
+                EmbeddedServer {
+                    name: "fixture".into(),
+                    host: "127.0.0.1".into(),
+                    port,
+                    user: "fixture".into(),
+                    key_path,
+                    strict_host_key_checking: "yes".into(),
+                },
+                EmbeddedProxy {
+                    host: "127.0.0.1".into(),
+                    port: 0,
+                },
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+                &|| signal.load(Ordering::SeqCst),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let accepted = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break Some(socket),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                _ => break None,
+            }
+        };
+        if accepted.is_none() {
+            cancelled.store(true, Ordering::SeqCst);
+            let result = worker.join();
+            let _ = std::fs::remove_file(&path);
+            panic!("Client did not reach the fixture: {result:?}");
+        }
+        let mut socket = accepted.unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        // Observe the client identification; intentionally never send a server banner.
+        let mut byte = [0];
+        socket.read_exact(&mut byte).unwrap();
+        let started = Instant::now();
+        cancelled.store(true, Ordering::SeqCst);
+        let result = worker.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let mut remaining = Vec::new();
+        socket.read_to_end(&mut remaining).unwrap(); // Must reach EOF, not a read timeout.
+    }
     #[test]
     fn host_wide_trust_never_overrides_a_changed_port_specific_key() {
         let make_key = |byte| {
@@ -312,6 +391,25 @@ pub fn start_with_options(
     logs: Arc<std::sync::Mutex<Vec<String>>>,
     options: EmbeddedOptions,
 ) -> Result<EmbeddedTunnelHandle, String> {
+    start_with_options_cancellable(server, proxy, logs, options, &|| false)
+}
+
+pub fn start_cancellable(
+    server: EmbeddedServer,
+    proxy: EmbeddedProxy,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<EmbeddedTunnelHandle, String> {
+    start_with_options_cancellable(server, proxy, logs, EmbeddedOptions::default(), cancelled)
+}
+
+pub fn start_with_options_cancellable(
+    server: EmbeddedServer,
+    proxy: EmbeddedProxy,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    options: EmbeddedOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<EmbeddedTunnelHandle, String> {
     if !proxy
         .host
         .parse::<std::net::IpAddr>()
@@ -337,9 +435,10 @@ pub fn start_with_options(
     let (outcome_tx, outcome) = mpsc::channel();
     let join = thread::spawn(move || {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
-        if options.protect_socket.is_some() { builder.worker_threads(2); }
-        let runtime = match builder.enable_all().build()
-        {
+        if options.protect_socket.is_some() {
+            builder.worker_threads(2);
+        }
+        let runtime = match builder.enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
                 let _ = outcome_tx.send(Err(error.to_string()));
@@ -347,22 +446,35 @@ pub fn start_with_options(
             }
         };
 
-        let result = runtime.block_on(run_embedded_tunnel(
-            listener,
-            server,
-            stop_rx,
-            tunnel_counters,
-            ready_tx,
-            logs,
-            options,
-        ));
+        let mut interrupted = stop_rx.clone();
+        let result = runtime.block_on(async {
+            tokio::select! {
+                biased;
+                _ = async {if !*interrupted.borrow(){let _=interrupted.changed().await;}} => Ok(()),
+                result=run_embedded_tunnel(listener,server,stop_rx,tunnel_counters,ready_tx,logs,options) => result,
+            }
+        });
         let _ = outcome_tx.send(result);
     });
 
-    let readiness = ready_rx.recv_timeout(Duration::from_secs(35));
+    let deadline = std::time::Instant::now() + Duration::from_secs(35);
+    let readiness = loop {
+        if cancelled() {
+            break Err(mpsc::RecvTimeoutError::Disconnected);
+        }
+        match ready_rx.recv_timeout(Duration::from_millis(50)) {
+            Err(mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < deadline => {
+                continue
+            }
+            result => break result,
+        }
+    };
     if readiness.is_err() {
         let _ = stop_tx.send(true);
         let _ = join.join();
+        if cancelled() {
+            return Err("Tunnel startup cancelled".into());
+        }
         return Err(outcome
             .try_recv()
             .ok()
@@ -390,37 +502,97 @@ async fn run_embedded_tunnel(
     logs: Arc<std::sync::Mutex<Vec<String>>>,
     options: EmbeddedOptions,
 ) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
+    let listener =
+        tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
-    let requested = if options.max_connections == 0 { 1024 } else { options.max_connections.clamp(64, 4096) };
+    let requested = if options.max_connections == 0 {
+        1024
+    } else {
+        options.max_connections.clamp(64, 4096)
+    };
     let max_connections = secret_tunnel_mux::socket_capacity(requested);
-    if max_connections < 32 { return Err("Not enough file descriptors for the tunnel".into()); }
-    let session = tokio::time::timeout(Duration::from_secs(15),
-        connect_ssh(&server, (server.host.as_str(), server.port), options))
-        .await.map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
+    if max_connections < 32 {
+        return Err("Not enough file descriptors for the tunnel".into());
+    }
+    let session = tokio::time::timeout(
+        Duration::from_secs(15),
+        connect_ssh(&server, (server.host.as_str(), server.port), options),
+    )
+    .await
+    .map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
     let session = Arc::new(session);
     let transport = tokio::time::timeout(Duration::from_secs(10), async {
-        let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-        channel.exec(true, "exec \"$HOME/.local/bin/secret-tunnel-agent\" --stdio-v3").await.map_err(|e| e.to_string())?;
-        Endpoint::start(channel.into_stream(), Role::Client, MuxConfig { max_flows: max_connections, ..Default::default() }).await
-    }).await.map_err(|_| "Server agent startup timed out".to_owned())?
-        .map_err(|error| format!("STMUX003 server agent required: {error}"))?;
-    super::log_line(&logs, format!("Transport v3 ready: one SSH channel, {} flows, bounded credit windows", transport.snapshot().limit));
+        let channel = session
+            .channel_open_session()
+            .await
+            .map_err(|e| e.to_string())?;
+        channel
+            .exec(
+                true,
+                "exec \"$HOME/.local/bin/secret-tunnel-agent\" --stdio-v3",
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Endpoint::start(
+            channel.into_stream(),
+            Role::Client,
+            MuxConfig {
+                max_flows: max_connections,
+                ..Default::default()
+            },
+        )
+        .await
+    })
+    .await
+    .map_err(|_| "Server agent startup timed out".to_owned())?
+    .map_err(|error| format!("STMUX003 server agent required: {error}"))?;
+    super::log_line(
+        &logs,
+        format!(
+            "Transport v3 ready: one SSH channel, {} flows, bounded credit windows",
+            transport.snapshot().limit
+        ),
+    );
     let ipv6_supported = if probe_ipv6 {
         async fn reachable(transport: &Endpoint, host: &str) -> bool {
-            let Ok(target) = udp_protocol::encode_target(host, 443) else { return false };
-            matches!(tokio::time::timeout(Duration::from_secs(3), transport.open(FlowKind::Tcp, target)).await, Ok(Ok(_)))
+            let Ok(target) = udp_protocol::encode_target(host, 443) else {
+                return false;
+            };
+            matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    transport.open(FlowKind::Tcp, target)
+                )
+                .await,
+                Ok(Ok(_))
+            )
         }
-        let (cloudflare, google) = tokio::join!(reachable(&transport, "2606:4700:4700::1111"), reachable(&transport, "2001:4860:4860::8888"));
+        let (cloudflare, google) = tokio::join!(
+            reachable(&transport, "2606:4700:4700::1111"),
+            reachable(&transport, "2001:4860:4860::8888")
+        );
         let supported = cloudflare || google;
-        super::log_line(&logs, if supported { "Android: server IPv6 egress available" } else { "Android: server IPv6 egress unavailable; using IPv4 compatibility mode" });
+        super::log_line(
+            &logs,
+            if supported {
+                "Android: server IPv6 egress available"
+            } else {
+                "Android: server IPv6 egress unavailable; using IPv4 compatibility mode"
+            },
+        );
         Some(supported)
-    } else { None };
+    } else {
+        None
+    };
     let buffers = DatagramBuffers::default();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
     let _ = ready.send((ipv6_supported, transport.clone()));
     loop {
-        if *stop.borrow() { transport.shutdown(); disconnect_ssh(&session).await; return Ok(()); }
+        if *stop.borrow() {
+            transport.shutdown();
+            disconnect_ssh(&session).await;
+            return Ok(());
+        }
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, originator_addr) = accepted.map_err(|error| error.to_string())?;
@@ -656,8 +828,15 @@ async fn handle_socks_client(
         };
 
     if request.command == 0x03 {
-        return relay_udp_association(stream, originator_addr, request.port, transport, counters, buffers)
-            .await;
+        return relay_udp_association(
+            stream,
+            originator_addr,
+            request.port,
+            transport,
+            counters,
+            buffers,
+        )
+        .await;
     }
 
     let fake_ip = tls_target::is_fake_ip(&request.host);
@@ -689,11 +868,14 @@ async fn handle_socks_client(
         );
     }
 
-    let target = udp_protocol::encode_target(&destination, request.port).map_err(|e|e.to_string())?;
+    let target =
+        udp_protocol::encode_target(&destination, request.port).map_err(|e| e.to_string())?;
     let mut flow = match transport.open(FlowKind::Tcp, target).await {
         Ok(flow) => flow,
         Err(error) => {
-            if !fake_ip { let _ = write_socks5_reply(&mut stream, 0x04).await; }
+            if !fake_ip {
+                let _ = write_socks5_reply(&mut stream, 0x04).await;
+            }
             return Err(error);
         }
     };
@@ -702,15 +884,18 @@ async fn handle_socks_client(
         write_socks5_reply(&mut stream, 0x00).await?;
     }
     if !preface.is_empty() {
-        for chunk in preface.chunks(secret_tunnel_mux::TCP_CHUNK) { flow.sender().send(chunk.to_vec()).await?; }
+        for chunk in preface.chunks(secret_tunnel_mux::TCP_CHUNK) {
+            flow.sender().send(chunk.to_vec()).await?;
+        }
         counters.add_tx(preface.len() as u64);
     }
-    secret_tunnel_mux::relay(&mut flow, &mut stream, |direction,count| {
-        match direction { secret_tunnel_mux::Direction::Upload => counters.add_tx(count as u64), secret_tunnel_mux::Direction::Download => counters.add_rx(count as u64) }
-    }).await?;
+    secret_tunnel_mux::relay(&mut flow, &mut stream, |direction, count| match direction {
+        secret_tunnel_mux::Direction::Upload => counters.add_tx(count as u64),
+        secret_tunnel_mux::Direction::Download => counters.add_rx(count as u64),
+    })
+    .await?;
     Ok(())
 }
-
 
 #[derive(Clone, Debug)]
 struct SocksRequest {
@@ -810,8 +995,12 @@ async fn read_socks5_request(stream: &mut TcpStream) -> Result<SocksRequest, Str
 }
 
 async fn relay_udp_association(
-    mut control: TcpStream, peer: std::net::SocketAddr, requested_port: u16,
-    transport: Endpoint, counters: Arc<TrafficCounters>, buffers: DatagramBuffers,
+    mut control: TcpStream,
+    peer: std::net::SocketAddr,
+    requested_port: u16,
+    transport: Endpoint,
+    counters: Arc<TrafficCounters>,
+    buffers: DatagramBuffers,
 ) -> Result<(), String> {
     let mut flow = match transport.open(FlowKind::Udp, Vec::new()).await {
         Ok(flow) => flow,
@@ -822,13 +1011,19 @@ async fn relay_udp_association(
     };
     let sender = flow.sender();
     let local = control.local_addr().map_err(|e| e.to_string())?;
-    let socket = tokio::net::UdpSocket::bind((local.ip(), 0)).await.map_err(|e| e.to_string())?;
+    let socket = tokio::net::UdpSocket::bind((local.ip(), 0))
+        .await
+        .map_err(|e| e.to_string())?;
     let bound = socket.local_addr().map_err(|e| e.to_string())?;
     let mut reply = udp_protocol::encode_packet(bound, &[]).map_err(|e| e.to_string())?;
     reply[0] = 5;
     control.write_all(&reply).await.map_err(|e| e.to_string())?;
     let mut control_buffer = [0; 1];
-    let mut endpoint = if requested_port == 0 { None } else { Some(std::net::SocketAddr::new(peer.ip(), requested_port)) };
+    let mut endpoint = if requested_port == 0 {
+        None
+    } else {
+        Some(std::net::SocketAddr::new(peer.ip(), requested_port))
+    };
     loop {
         tokio::select! {
             _ = control.read(&mut control_buffer) => return Ok(()),

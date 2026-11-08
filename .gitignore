@@ -52,3 +52,5 @@ src-tauri/resources/
 *.keystore
 *.p12
 *.pfx
+
+session-control/target/

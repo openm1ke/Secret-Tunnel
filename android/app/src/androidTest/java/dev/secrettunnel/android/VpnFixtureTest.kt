@@ -66,6 +66,15 @@ class VpnFixtureTest {
                 Thread.sleep(200)
             }
             assertEquals("VPN failed to start", "Работает", TunnelVpnService.phase)
+            if(InstrumentationRegistry.getArguments().getString("injectEngineCrash")=="true"){
+                val engine=TunnelVpnService()
+                assertTrue(engine.TProxyIsRunning())
+                engine.TProxyStopService()
+                val recoveryDeadline=System.currentTimeMillis()+30000
+                while(!engine.TProxyIsRunning()&&System.currentTimeMillis()<recoveryDeadline)Thread.sleep(100)
+                assertTrue("Packet engine did not recover",engine.TProxyIsRunning())
+                assertTrue("Recovery must retain the VPN session",TunnelVpnService.active)
+            }
             val before = JSONObject(NativeBridge.status())
             ready.writeText(snapshot().toString())
             val deadline = System.currentTimeMillis() + 180_000

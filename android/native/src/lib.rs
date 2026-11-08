@@ -94,7 +94,7 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                 .and_then(|v| v.z().ok())
                 .unwrap_or(false)
         });
-        embedded_ssh::start_with_options(
+        embedded_ssh::start_with_options_cancellable(
             EmbeddedServer {
                 name: "Android".into(),
                 host: cfg.host,
@@ -113,8 +113,13 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                 observed_host_key: Some(observed()),
                 protect_socket: Some(protect),
                 probe_ipv6: true,
-                max_connections: if cfg.max_connections == 0 { 512 } else { cfg.max_connections.clamp(64, 2048) },
+                max_connections: if cfg.max_connections == 0 {
+                    512
+                } else {
+                    cfg.max_connections.clamp(64, 2048)
+                },
             },
+            &|| GENERATION.load(Ordering::SeqCst) != generation,
         )
     })();
     let mut s = state().lock().map_err(|e| e.to_string())?;
@@ -201,10 +206,15 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         s.totals.0.saturating_add(current.0),
         s.totals.1.saturating_add(current.1),
     );
-    let stats = s.tunnel.as_ref().map(|t|t.transport_stats()).or_else(||s.transport.clone()).unwrap_or_default();
+    let stats = s
+        .tunnel
+        .as_ref()
+        .map(|t| t.transport_stats())
+        .or_else(|| s.transport.clone())
+        .unwrap_or_default();
     let peer=stats.peer.as_ref().map(|p|json!({"active":p.active,"peak":p.peak,"limit":p.limit,"rejected":p.rejected,"udp_drops":p.udp_drops,"last_udp_error":p.last_udp_error,"protocol_errors":p.protocol_errors,
         "receive_queue_bytes":p.receive_queue_bytes,"receive_queue_peak":p.receive_queue_peak,"receive_budget":p.receive_budget,"send_queue_bytes":p.send_queue_bytes,"send_queue_peak":p.send_queue_peak,"send_budget":p.send_budget}));
-    let transport=json!({"version":3,"ssh_channels":if s.tunnel.is_some()&&s.error.is_empty(){1}else{0},"active":stats.active,"peak":stats.peak,"limit":stats.limit,"rejected":stats.rejected,"server":peer,
+    let transport = json!({"version":3,"ssh_channels":if s.tunnel.is_some()&&s.error.is_empty(){1}else{0},"active":stats.active,"peak":stats.peak,"limit":stats.limit,"rejected":stats.rejected,"server":peer,
         "receive_queue_bytes":stats.receive_queue_bytes,"receive_queue_peak":stats.receive_queue_peak,"receive_budget":stats.receive_budget,
         "send_queue_bytes":stats.send_queue_bytes,"send_queue_peak":stats.send_queue_peak,"send_budget":stats.send_budget,
         "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors});

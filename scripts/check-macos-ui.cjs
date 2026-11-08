@@ -17,6 +17,7 @@ let browser;
   const routing = {running:false,starting:false,platform:'macos',requires_administrator:false,
     supports_system_ssh:true,supports_domains:false,setup_message:'',pid:null,administrator:false,component_available:true,last_error:''};
   let starts = 0, stops = 0;
+  let tunnelPhase = 'running', tunnelStops = 0;
   const errors = [];
   browser = await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_EXECUTABLE ? {executablePath:process.env.PLAYWRIGHT_EXECUTABLE} : {})});
   const page = await browser.newPage({viewport:{width:1120,height:780}});
@@ -24,7 +25,7 @@ let browser;
   await page.exposeFunction('mockInvoke',(command,args) => {
     switch(command) {
       case 'get_config': return cfg;
-      case 'tunnel_status': return {state:'running',state_emoji:'🟢',app_version:'0.2.2',ssh_engine:'system',
+      case 'tunnel_status': return {state:tunnelPhase,state_emoji:'🟢',app_version:'0.2.3',ssh_engine:'system',
         server_name:'Test SSH',proxy_name:'Local',proxy_host:'127.0.0.1',proxy_port:1080,rx_total:0,tx_total:0,
         ip:'',country_code:'',country_name:'',country_flag:'',last_error:''};
       case 'traffic_history': case 'get_logs': return [];
@@ -35,6 +36,7 @@ let browser;
       case 'save_settings': cfg.settings = args.settings; return cfg;
       case 'start_redirect': starts++; routing.starting = true; return 'Waiting for macOS';
       case 'stop_redirect': stops++; routing.running = false; routing.starting = false; return 'Stopped';
+      case 'stop_tunnel': tunnelStops++; tunnelPhase = 'stopped'; return 'Stop requested';
       default: throw Error(command);
     }
   });
@@ -84,7 +86,23 @@ let browser;
   await page.getByRole('button',{name:'Домены',exact:true}).click();
   await page.getByText('Доменные regex-правила применяются только в Windows.',{exact:false}).waitFor();
   assert(await page.getByRole('button',{name:'Включить перехват',exact:true}).isDisabled());
+  await page.getByRole('button',{name:'Подключение',exact:true}).click();
+  const connect = page.getByRole('button',{name:'Запустить',exact:true});
+  const disconnect = page.getByRole('button',{name:'Остановить',exact:true});
+  for (const [phase,label] of [['starting','Подключение'],['reconnecting','Переподключение'],['stopping','Остановка']]) {
+    tunnelPhase = phase;
+    await page.locator('.statusPanel .state').filter({hasText:label}).waitFor();
+    assert(await connect.isDisabled(),`${phase} must prevent a duplicate Start`);
+    assert(await disconnect.isEnabled(),`${phase} must allow Stop`);
+  }
+  tunnelPhase = 'starting';
+  await page.locator('.statusPanel .state').filter({hasText:'Подключение'}).waitFor();
+  await disconnect.click();
+  await connect.waitFor();
+  await page.waitForFunction(() => ![...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Запустить').disabled);
+  assert.equal(tunnelStops,1,'Stop during startup reaches the backend');
+  assert(await disconnect.isDisabled());
   assert.deepEqual(errors,[]);
   await browser.close();
-  console.log('PASS: macOS app/helper selection, .app import, system SSH without admin, pending/cancel/ready/stop, missing component, domains unavailable; Tauri IPC mocked');
+  console.log('PASS: macOS app/helper selection, .app import, routing lifecycle, missing component, domains unavailable, startup/reconnect/stop UI cancellation; Tauri IPC mocked');
 })().catch(async error => {console.error(error); if(browser) await browser.close(); process.exitCode=1;});

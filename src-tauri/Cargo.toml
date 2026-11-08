@@ -21,6 +21,7 @@ required-features = ["embedded-ssh"]
 tauri-build = { version = "2.5.1", features = [] }
 
 [dependencies]
+secret-tunnel-session-control = { path = "../session-control" }
 secret-tunnel-mux = { path = "../stream-mux", optional = true }
 secret-tunnel-routing = { path = "../routing-engine" }
 russh = { version = "0.61", optional = true }

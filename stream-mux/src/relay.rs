@@ -37,6 +37,12 @@ where
         }
         write.shutdown().await.map_err(|e| e.to_string())
     };
-    tokio::try_join!(upload, download)?;
+    // Cancellation must interrupt local socket IO too, not only Flow::recv.
+    // Dropping the joined futures releases a Received packet held by write_all.
+    tokio::select! {
+        biased;
+        _ = sender.closed() => return Err("Flow cancelled".into()),
+        result = async { tokio::try_join!(upload, download) } => { result?; }
+    }
     flow.finish().await
 }

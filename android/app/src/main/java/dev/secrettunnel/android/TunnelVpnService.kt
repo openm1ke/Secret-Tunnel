@@ -29,32 +29,47 @@ class TunnelVpnService : VpnService() {
     private val started = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
     private val main = Handler(Looper.getMainLooper())
-    private var retries = 0
+    private val recovery=RecoveryPolicy()
+    private var engineIpv6:Boolean?=null
+    private var engineCapacity=0
     private var session:TunnelSession?=null
-    private val monitor = object : Runnable {
-        override fun run() {
-            if (stopping.get() || !active) return
+    private val monitor = object:Runnable {
+        override fun run(){
+            if(stopping.get()||!active||worker.isShutdown)return
             worker.execute {
-                if (!stopping.get()) {
-                    try {
-                        val nativeLog = File(filesDir, "tun.log")
-                        if (nativeLog.length() > 1_048_576) java.io.RandomAccessFile(nativeLog, "rw").use { it.setLength(0) }
-                        val status = JSONObject(NativeBridge.status())
-                        traffic.sample(SystemClock.elapsedRealtime(),status.optLong("rx"),status.optLong("tx"))
-                        if (!TProxyIsRunning()) throw IllegalStateException("Обработчик TCP/UDP остановился")
-                        if (!status.optBoolean("running")) {
-                            phase = "Переподключение"
-                            detail = "Трафик остаётся в VPN. ${status.optString("error")}"; notifyState()
+                if(stopping.get())return@execute
+                var recoveryAttempted=false
+                try {
+                    val nativeLog=File(filesDir,"tun.log")
+                    if(nativeLog.length()>1_048_576)java.io.RandomAccessFile(nativeLog,"rw").use{it.setLength(0)}
+                    val status=JSONObject(NativeBridge.status())
+                    traffic.sample(SystemClock.elapsedRealtime(),status.optLong("rx"),status.optLong("tx"))
+                    when(recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running"),TProxyIsRunning())){
+                        RecoveryPolicy.Action.RECONNECT_SSH->{
+                            recoveryAttempted=true
+                            if(!beginRecovery(status.optString("error").ifBlank{"SSH connection stopped"})){main.postDelayed(this,1500);return@execute}
+                            phase="Переподключение";detail="Восстанавливаем SSH. Трафик остаётся в VPN.";notifyState()
                             NativeBridge.stop()
-                            Thread.sleep((1000L shl retries.coerceAtMost(4)).coerceAtMost(15000L))
-                            if (!stopping.get()) { connectSsh(); phase = "Работает"; detail = "TCP и UDP через SSH"; retries = 0; notifyState() }
+                            if(!stopping.get())connectSsh()
+                            if(!stopping.get()){startPacketEngine();markReady()}
                         }
-                    } catch (error: Exception) {
-                        retries++
-                        phase = "Ошибка соединения"; detail = error.message.orEmpty(); notifyState()
+                        RecoveryPolicy.Action.RESTART_ENGINE->{
+                            recoveryAttempted=true
+                            if(!beginRecovery("Обработчик TCP/UDP завершился")){main.postDelayed(this,1500);return@execute}
+                            phase="Восстановление";detail="Перезапускаем обработчик TCP/UDP. VPN остаётся включён.";notifyState()
+                            startPacketEngine();if(!stopping.get())markReady()
+                        }
+                        else->{}
                     }
-                    if (!stopping.get()) main.postDelayed(this, 1500)
+                }catch(error:Exception){
+                    if(!stopping.get()){
+                        recovery.failed(error.message.orEmpty(),SystemClock.elapsedRealtime(),countAttempt=!recoveryAttempted)
+                        phase="Ошибка соединения"
+                        detail=if(recovery.needsUser)"${error.message}. Остановите туннель и проверьте настройки." else "${error.message}. Повторяем восстановление…"
+                        notifyState()
+                    }
                 }
+                if(!stopping.get())main.postDelayed(this,recovery.delay(SystemClock.elapsedRealtime()).coerceAtLeast(500))
             }
         }
     }
@@ -66,6 +81,7 @@ class TunnelVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") { stopAsync(); return START_NOT_STICKY }
         if (!started.compareAndSet(false, true)) return START_NOT_STICKY
+        recovery.reset()
         traffic.clear()
         stopping.set(false); active = true; phase = "Подключение"; detail = "Проверка SSH-сервера"
         val notification = notification()
@@ -82,50 +98,76 @@ class TunnelVpnService : VpnService() {
                 // applies on reconnection while the VPN interface already exists.
                 connectSsh()
                 if (stopping.get()) return@execute
-                val status = JSONObject(NativeBridge.status())
-                val ipv6 = status.optBoolean("ipv6_supported")
-                val capacity = status.optJSONObject("transport")?.optInt("limit",256) ?: 256
-                val builder = Builder().setSession("Secret Tunnel SSH").setMtu(1500)
-                    .addAddress("198.18.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
-                if (ipv6) builder.addAddress("fd00:198:18::1", 126).addRoute("::", 0)
-                // Android 10+ otherwise marks every VPN as metered, including Wi-Fi,
-                // which can make media apps suppress large/background downloads.
-                if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
-                for (pkg in packages) builder.addAllowedApplication(pkg)
-                tun = builder.establish() ?: error("Android не разрешил VPN-интерфейс")
-                val config = File(filesDir, "tun.yml")
-                config.writeText("""
-                    tunnel:
-                      mtu: 1500
-                      ipv4: 198.18.0.1
-                      ${if (ipv6) "ipv6: 'fd00:198:18::1'" else "# IPv6 blocked: server has no verified IPv6 egress"}
-                    socks5:
-                      address: 127.0.0.1
-                      port: ${session!!.socksPort}
-                      udp: 'udp'
-                    misc:
-                      task-stack-size: 65536
-                      tcp-buffer-size: 65536
-                      max-session-count: $capacity
-                      connect-timeout: 10000
-                      tcp-read-write-timeout: 300000
-                      udp-read-write-timeout: 60000
-                      log-file: '${File(filesDir, "tun.log").absolutePath}'
-                      log-level: warn
-                """.trimIndent())
-                File(filesDir, "tun.log").writeText("")
-                check(TProxyStartService(config.absolutePath, tun!!.fd)) { "Не удалось запустить обработчик TCP/UDP" }
-                Thread.sleep(150)
-                check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
-                phase = "Работает"; detail = "TCP и UDP · ${if (ipv6) "IPv4/IPv6" else "IPv4"} · приложений: ${packages.size}"; notifyState()
+                startPacketEngine()
+                if(!stopping.get())markReady()
                 main.postDelayed(monitor, 1500)
             } catch (error: Exception) {
-                phase = "Ошибка"; detail = error.message.orEmpty()
+                if(!stopping.get()){phase = "Ошибка"; detail = error.message.orEmpty()}
                 cleanup(); active = false; started.set(false)
                 main.post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
             }
         }
         return START_NOT_STICKY
+    }
+    private fun beginRecovery(error:String):Boolean {
+        recovery.failed(error,SystemClock.elapsedRealtime())
+        if(!recovery.needsUser)return true
+        phase="Ошибка соединения";detail="$error. Автовосстановление остановлено; проверьте настройки и переподключитесь."
+        notifyState();return false
+    }
+    private fun markReady(){
+        if(stopping.get())return
+        phase="Работает"
+        detail="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"
+        notifyState()
+    }
+    private fun startPacketEngine(){
+        val status = JSONObject(NativeBridge.status())
+        val ipv6 = status.optBoolean("ipv6_supported")
+        val capacity = status.optJSONObject("transport")?.optInt("limit",256) ?: 256
+        check(status.optBoolean("running")){"SSH не готов для обработки пакетов"}
+        val current=session?:error("Нет сеанса VPN")
+        val packages=current.packages
+        TProxyStopService()
+        if(stopping.get())return
+        if(tun==null||engineIpv6!=ipv6||engineCapacity!=capacity){
+        val builder = Builder().setSession("Secret Tunnel SSH").setMtu(1500)
+            .addAddress("198.18.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
+        if (ipv6) builder.addAddress("fd00:198:18::1", 126).addRoute("::", 0)
+        // Android 10+ otherwise marks every VPN as metered, including Wi-Fi,
+        // which can make media apps suppress large/background downloads.
+        if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
+        for (pkg in packages) builder.addAllowedApplication(pkg)
+        val replacement=builder.establish()?:error("Android не разрешил VPN-интерфейс")
+        val previous=tun
+        tun=replacement
+        previous?.close()
+        engineIpv6=ipv6;engineCapacity=capacity
+        }
+        val config = File(filesDir, "tun.yml")
+        config.writeText("""
+            tunnel:
+              mtu: 1500
+              ipv4: 198.18.0.1
+              ${if (ipv6) "ipv6: 'fd00:198:18::1'" else "# IPv6 blocked: server has no verified IPv6 egress"}
+            socks5:
+              address: 127.0.0.1
+              port: ${session!!.socksPort}
+              udp: 'udp'
+            misc:
+              task-stack-size: 65536
+              tcp-buffer-size: 65536
+              max-session-count: $capacity
+              connect-timeout: 10000
+              tcp-read-write-timeout: 300000
+              udp-read-write-timeout: 60000
+              log-file: '${File(filesDir, "tun.log").absolutePath}'
+              log-level: warn
+        """.trimIndent())
+        File(filesDir, "tun.log").writeText("")
+        if(stopping.get())return
+        check(TProxyStartService(config.absolutePath, tun!!.fd)) { "Не удалось запустить обработчик TCP/UDP" }
+        check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
     }
     private fun connectSsh() {
         if (stopping.get()) return
@@ -163,7 +205,7 @@ class TunnelVpnService : VpnService() {
     private fun cleanup() {
         main.removeCallbacks(monitor)
         TProxyStopService() // join native reader BEFORE closing its borrowed fd
-        tun?.close(); tun = null
+        tun?.close(); tun = null;engineIpv6=null;engineCapacity=0
         NativeBridge.stop()
         File(filesDir, "ssh-key.runtime").delete()
     }

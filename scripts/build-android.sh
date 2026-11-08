@@ -25,7 +25,7 @@ llvm="$ndk/toolchains/llvm/prebuilt/$ndk_host/bin"
 [[ -f "$ndk/source.properties" && -f "$llvm/clang-18" ]] || { echo 'Expected Android NDK 27 toolchain directory' >&2; exit 1; }
 # Older SDKs copied to NTFS can retain read-only attributes which drvfs maps
 # to unusable modes. Repair only this user's NDK, only when it is unusable.
-if [[ "$ndk" == /mnt/* && -O "$ndk" ]] && { [[ ! -x "$llvm/aarch64-linux-android26-clang" ]] || [[ ! -r "$ndk/source.properties" ]]; }; then
+if [[ "$ndk" == /mnt/* && -O "$ndk" ]] && { [[ ! -x "$llvm/aarch64-linux-android26-clang" ]] || [[ ! -x "$ndk/ndk-build" ]] || [[ ! -r "$ndk/source.properties" ]]; }; then
     echo 'Restoring read/write/execute access to the owned NDK on the Windows drive'
     chmod -R u+rwX "$ndk"
     chmod u+rwx "$ndk/ndk-build" "$ndk/prebuilt/linux-x86_64/bin/"* "$llvm/"*

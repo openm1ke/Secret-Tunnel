@@ -8,7 +8,9 @@ release="$repo/artifacts/release"
 stage="$(mktemp -d "${TMPDIR:-/tmp}/secret-tunnel-dmg.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "$version"
-lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/secret-tunnel"
+for architecture in arm64 x86_64; do
+    xcrun lipo "$app/Contents/MacOS/secret-tunnel" -verify_arch "$architecture"
+done
 codesign --verify --deep --strict --verbose=2 "$app"
 for file in server/secret-tunnel-agent-linux-x86_64 licenses/aarch64-apple-darwin/rust-dependencies.json licenses/x86_64-apple-darwin/rust-dependencies.json README-macOS.md LICENSE.txt; do
     test -f "$app/Contents/Resources/$file"

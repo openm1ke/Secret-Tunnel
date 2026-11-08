@@ -210,6 +210,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.metadata.outputs.commit }}
+      - name: Check macOS packaging tools before compilation
+        run: python3 scripts/check-macos-packaging.py
       - uses: actions/setup-node@v4
         with:
           node-version: 22

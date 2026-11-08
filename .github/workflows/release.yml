@@ -97,11 +97,20 @@ jobs:
       - name: Fetch verified Gradle distribution with retries
         run: |
           archive="$RUNNER_TEMP/gradle-8.7-bin.zip"
-          curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 180 \
-            https://downloads.gradle.org/distributions/gradle-8.7-bin.zip --output "$archive"
           checksum=$(sed -n 's/^distributionSha256Sum=//p' android/gradle/wrapper/gradle-wrapper.properties | tr -d '\r')
           test -n "$checksum"
-          echo "$checksum  $archive" | sha256sum --check
+          verified=false
+          for source in \
+            https://downloads.gradle.org/distributions/gradle-8.7-bin.zip \
+            https://mirrors.cloud.tencent.com/gradle/gradle-8.7-bin.zip; do
+            if curl --fail --silent --show-error --location --retry 2 --retry-all-errors --retry-delay 5 --connect-timeout 30 --max-time 180 "$source" --output "$archive"; then
+              if echo "$checksum  $archive" | sha256sum --check; then
+                verified=true
+                break
+              fi
+            fi
+          done
+          test "$verified" = true
           unzip -q "$archive" -d "$RUNNER_TEMP/gradle-release"
           echo "GRADLE_CMD=$RUNNER_TEMP/gradle-release/gradle-8.7/bin/gradle" >> "$GITHUB_ENV"
       - name: Build signed release APK

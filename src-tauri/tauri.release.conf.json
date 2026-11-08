@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "useLocalToolsDir": true,
     "targets": ["nsis"],
     "resources": {
       "resources/proxybridge/": "tools/proxybridge/",

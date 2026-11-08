@@ -1,0 +1,15 @@
+{
+  "bundle": {
+    "targets": ["app"],
+    "resources": {
+      "resources/server/": "server/",
+      "resources/licenses/": "licenses/",
+      "../docs/MACOS.md": "README-macOS.md",
+      "../LICENSE": "LICENSE.txt"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    }
+  }
+}

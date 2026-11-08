@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Version tag to publish after successful builds, for example v0.2.0'
+        description: 'Version tag to publish after successful builds, for example v0.2.2'
         required: true
         type: string
 permissions:
@@ -36,9 +36,11 @@ jobs:
           if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
             test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$commit"
           fi
-          echo "commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "commit=$commit"
+            echo "tag=$RELEASE_TAG"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
   agent:
     needs: metadata
     runs-on: ubuntu-latest
@@ -129,7 +131,8 @@ jobs:
           trap 'rm -f "$ANDROID_KEYSTORE_FILE"' EXIT
           export ANDROID_BUILD_TYPE=release
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
-          export ST_VERSION_CODE=$(python3 scripts/android-version-code.py "$ST_VERSION_NAME" --build "$ST_VERSION_CODE")
+          ST_VERSION_CODE=$(python3 scripts/android-version-code.py "$ST_VERSION_NAME" --build "$ST_VERSION_CODE")
+          export ST_VERSION_CODE
           bash scripts/build-android.sh
           mkdir -p artifacts/release
           cp artifacts/android/SecretTunnel-release.apk "artifacts/release/SecretTunnel-$ST_VERSION_NAME-android.apk"
@@ -158,6 +161,10 @@ jobs:
           workspaces: |
             src-tauri -> target
             routing-engine -> target
+      - uses: actions/cache@v4
+        with:
+          path: src-tauri/target/.tauri
+          key: windows-bundler-${{ hashFiles('scripts/prepare-windows-bundler.py', 'package-lock.json') }}
       - uses: actions/download-artifact@v4
         with:
           name: server-agent-runtime
@@ -179,15 +186,65 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'Windows tests failed'}
           python scripts/collect-android-licenses.py src-tauri/resources/licenses --manifest src-tauri/Cargo.toml --platform x86_64-pc-windows-msvc --features embedded-ssh
           if($LASTEXITCODE -ne 0){throw 'License collection failed'}
-          npm run tauri -- build --features embedded-ssh --config src-tauri/tauri.release.conf.json --bundles nsis
-          if($LASTEXITCODE -ne 0){throw 'Windows packaging failed'}
+          python scripts/prepare-windows-bundler.py
+          if($LASTEXITCODE -ne 0){throw 'Verified NSIS preparation failed'}
+          npm run tauri -- build --features embedded-ssh --config src-tauri/tauri.release.conf.json --no-bundle --ci
+          if($LASTEXITCODE -ne 0){throw 'Windows compilation failed'}
+          for($attempt=1;$attempt -le 3;$attempt++){
+            npm run tauri -- bundle --features embedded-ssh --config src-tauri/tauri.release.conf.json --bundles nsis --ci
+            if($LASTEXITCODE -eq 0){break}
+            if($attempt -eq 3){throw 'Windows packaging failed after 3 attempts'}
+            Write-Warning "Packaging attempt $attempt failed; retrying in 10 seconds."
+            Start-Sleep -Seconds 10
+          }
           ./scripts/package-windows.ps1 -Version $env:VERSION
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows
           path: artifacts/release/
+          if-no-files-found: error
+  macos:
+    needs: [metadata, agent]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-agent-runtime
+          path: src-tauri/resources/server
+      - name: Build universal macOS distribution
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          npm ci
+          cargo test --manifest-path src-tauri/Cargo.toml --features embedded-ssh --lib --locked
+          python3 scripts/collect-android-licenses.py src-tauri/resources/licenses/aarch64-apple-darwin --manifest src-tauri/Cargo.toml --platform aarch64-apple-darwin --features embedded-ssh
+          python3 scripts/collect-android-licenses.py src-tauri/resources/licenses/x86_64-apple-darwin --manifest src-tauri/Cargo.toml --platform x86_64-apple-darwin --features embedded-ssh
+          npm run tauri -- build --features embedded-ssh --target universal-apple-darwin --config src-tauri/tauri.macos.release.conf.json --bundles app --ci
+          python3 scripts/check-macos-redirect.py 'src-tauri/target/universal-apple-darwin/release/bundle/macos/Secret Tunnel.app/Contents/MacOS/secret-tunnel'
+          bash scripts/package-macos.sh "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: artifacts/release/
+          if-no-files-found: error
   publish:
-    needs: [metadata, android, windows, agent]
+    needs: [metadata, android, windows, macos, agent]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -207,7 +264,13 @@ jobs:
           COMMIT: ${{ needs.metadata.outputs.commit }}
         run: |
           cd release-assets
-          sha256sum *.apk *.zip *.exe *.tar.gz > SHA256SUMS.txt
+          test -f "SecretTunnel-${TAG#v}-android.apk"
+          test -f "SecretTunnel-${TAG#v}-windows-x64-portable.zip"
+          test -f "SecretTunnel-${TAG#v}-windows-x64-setup.exe"
+          test -f "SecretTunnel-${TAG#v}-macos-universal.zip"
+          test -f "SecretTunnel-${TAG#v}-macos-universal.dmg"
+          test -f "SecretTunnel-${TAG#v}-server-linux-x86_64.tar.gz"
+          sha256sum ./*.apk ./*.zip ./*.exe ./*.tar.gz ./*.dmg > SHA256SUMS.txt
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
           else

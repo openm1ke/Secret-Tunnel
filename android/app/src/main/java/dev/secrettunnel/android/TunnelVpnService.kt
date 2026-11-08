@@ -82,9 +82,13 @@ class TunnelVpnService : VpnService() {
                 // applies on reconnection while the VPN interface already exists.
                 connectSsh()
                 if (stopping.get()) return@execute
+                val ipv6 = JSONObject(NativeBridge.status()).optBoolean("ipv6_supported")
                 val builder = Builder().setSession("Secret Tunnel SSH").setMtu(1500)
-                    .addAddress("198.18.0.1", 30).addAddress("fd00:198:18::1", 126)
-                    .addRoute("0.0.0.0", 0).addRoute("::", 0).addDnsServer("1.1.1.1")
+                    .addAddress("198.18.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
+                if (ipv6) builder.addAddress("fd00:198:18::1", 126).addRoute("::", 0)
+                // Android 10+ otherwise marks every VPN as metered, including Wi-Fi,
+                // which can make media apps suppress large/background downloads.
+                if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
                 for (pkg in packages) builder.addAllowedApplication(pkg)
                 tun = builder.establish() ?: error("Android не разрешил VPN-интерфейс")
                 val config = File(filesDir, "tun.yml")
@@ -92,17 +96,18 @@ class TunnelVpnService : VpnService() {
                     tunnel:
                       mtu: 1500
                       ipv4: 198.18.0.1
-                      ipv6: 'fd00:198:18::1'
+                      ${if (ipv6) "ipv6: 'fd00:198:18::1'" else "# IPv6 blocked: server has no verified IPv6 egress"}
                     socks5:
                       address: 127.0.0.1
                       port: ${session!!.socksPort}
                       udp: 'udp'
                     misc:
                       task-stack-size: 65536
-                      tcp-buffer-size: 32768
+                      tcp-buffer-size: 65536
                       max-session-count: 256
                       connect-timeout: 10000
-                      read-write-timeout: 300000
+                      tcp-read-write-timeout: 300000
+                      udp-read-write-timeout: 60000
                       log-file: '${File(filesDir, "tun.log").absolutePath}'
                       log-level: warn
                 """.trimIndent())
@@ -110,7 +115,7 @@ class TunnelVpnService : VpnService() {
                 check(TProxyStartService(config.absolutePath, tun!!.fd)) { "Не удалось запустить обработчик TCP/UDP" }
                 Thread.sleep(150)
                 check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
-                phase = "Работает"; detail = "TCP и UDP · приложений: ${packages.size}"; notifyState()
+                phase = "Работает"; detail = "TCP и UDP · ${if (ipv6) "IPv4/IPv6" else "IPv4"} · приложений: ${packages.size}"; notifyState()
                 main.postDelayed(monitor, 1500)
             } catch (error: Exception) {
                 phase = "Ошибка"; detail = error.message.orEmpty()

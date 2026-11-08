@@ -8,6 +8,10 @@ on:
         description: 'Version tag to publish after successful builds, for example v0.2.2'
         required: true
         type: string
+      publish:
+        description: 'Publish the release after successful builds (disable to test signed candidates)'
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
@@ -246,6 +250,7 @@ jobs:
           path: artifacts/release/
           if-no-files-found: error
   publish:
+    if: github.event_name == 'push' || inputs.publish
     needs: [metadata, android, windows, macos, agent]
     runs-on: ubuntu-latest
     permissions:

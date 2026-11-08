@@ -108,6 +108,7 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                 host_key_sha256: Some(cfg.host_key_sha256),
                 observed_host_key: Some(observed()),
                 protect_socket: Some(protect),
+                probe_ipv6: true,
             },
         )
     })();
@@ -194,7 +195,7 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         s.totals.0.saturating_add(current.0),
         s.totals.1.saturating_add(current.1),
     );
-    let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
+    let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
 }
 

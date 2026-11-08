@@ -6,7 +6,67 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAGIC: &[u8; 8] = b"STUDP001";
+pub const MUX_MAGIC: &[u8; 8] = b"STUDP002";
 pub const MAX_FRAME: usize = 65507;
+
+/// A four-byte association ID preserves independent UDP source ports even when
+/// different applications contact the same destination. An empty packet closes
+/// every server-side flow belonging to that association.
+pub fn mux_packet(association: u32, packet: &[u8]) -> io::Result<Vec<u8>> {
+    if association == 0 {
+        return Err(invalid());
+    }
+    if !packet.is_empty() {
+        parse_packet(packet)?;
+    }
+    let mut frame = Vec::with_capacity(4 + packet.len());
+    frame.extend_from_slice(&association.to_be_bytes());
+    frame.extend_from_slice(packet);
+    Ok(frame)
+}
+
+pub async fn read_mux_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(u32, Vec<u8>)> {
+    let high = reader.read_u8().await?;
+    let low = reader.read_u8().await.map_err(frame_read_error)?;
+    let length = u16::from_be_bytes([high, low]) as usize;
+    if !(4..=MAX_FRAME + 4).contains(&length) {
+        return Err(invalid());
+    }
+    let mut frame = vec![0; length];
+    reader
+        .read_exact(&mut frame)
+        .await
+        .map_err(frame_read_error)?;
+    let association = u32::from_be_bytes(frame[..4].try_into().map_err(|_| invalid())?);
+    if association == 0 {
+        return Err(invalid());
+    }
+    frame.drain(..4);
+    if !frame.is_empty() {
+        parse_packet(&frame)?;
+    }
+    Ok((association, frame))
+}
+
+#[allow(dead_code)] // Client writer; the agent uses its blocking stdout writer.
+pub async fn write_mux_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    association: u32,
+    packet: &[u8],
+) -> io::Result<()> {
+    if association == 0 {
+        return Err(invalid());
+    }
+    if !packet.is_empty() {
+        parse_packet(packet)?;
+    }
+    let mut frame = Vec::with_capacity(packet.len() + 6);
+    frame.extend_from_slice(&((packet.len() + 4) as u16).to_be_bytes());
+    frame.extend_from_slice(&association.to_be_bytes());
+    frame.extend_from_slice(packet);
+    writer.write_all(&frame).await?;
+    writer.flush().await
+}
 
 fn invalid() -> io::Error {
     io::Error::new(
@@ -140,6 +200,40 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, packet: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiplex_frames_preserve_associations_and_close_messages() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let packet = encode_packet("127.0.0.1:53".parse().unwrap(), b"query").unwrap();
+                let (mut sender, mut reader) = tokio::io::duplex(3);
+                let expected = packet.clone();
+                let writer = tokio::spawn(async move {
+                    write_mux_frame(&mut sender, 7, &packet).await.unwrap();
+                    write_mux_frame(&mut sender, 8, &packet).await.unwrap();
+                    write_mux_frame(&mut sender, 7, &[]).await.unwrap();
+                });
+                assert_eq!(
+                    read_mux_frame(&mut reader).await.unwrap(),
+                    (7, expected.clone())
+                );
+                assert_eq!(read_mux_frame(&mut reader).await.unwrap(), (8, expected));
+                assert_eq!(read_mux_frame(&mut reader).await.unwrap(), (7, vec![]));
+                writer.await.unwrap();
+                assert!(mux_packet(0, &[]).is_err());
+                assert!(read_mux_frame(&mut &[0, 4, 0, 0, 0, 0][..]).await.is_err());
+                assert_eq!(
+                    read_mux_frame(&mut &[0, 5, 0, 0][..])
+                        .await
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidData
+                );
+            });
+    }
 
     #[test]
     fn domain_and_ip_parser_preserve_payload() {

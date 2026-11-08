@@ -19,6 +19,8 @@ Workflow **Publish releases** (`.github/workflows/release.yml`) создаёт:
 
 Через GitHub CLI: `gh workflow run release.yml -f tag=v0.2.0 --ref main`.
 
+Для проверки кандидата до публикации выключите input `publish`: все платформы и подписанный APK соберутся в Actions artifacts, тег и GitHub Release не создаются. Например: `gh workflow run release.yml --ref <branch> -f tag=v0.2.3 -F publish=false`. Проверенные файлы можно затем опубликовать для точного commit кандидата вместе с SHA256SUMS.txt.
+
 ## Windows: инструменты упаковки
 
 Tauri CLI закреплён на 2.11.2. Перед упаковкой `scripts/prepare-windows-bundler.py` получает NSIS 3.11 и `nsis_tauri_utils` 0.5.3 через официальный GitHub Release API с повторными попытками и проверкой закреплённых SHA-256. Проверенный архив заново распаковывается в `src-tauri/target/.tauri/NSIS`; `useLocalToolsDir` направляет Tauri в этот каталог. Контрольные суммы соответствуют также SHA-1, используемым самим Tauri. Это устраняет зависимость упаковки от разовой загрузки NSIS через browser download URL, ранее возвращавший HTTP 504.

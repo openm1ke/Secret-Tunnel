@@ -58,14 +58,30 @@ fn prepare_limits() {
     }
 }
 async fn agent(max_flows: usize) -> (Endpoint, tokio::process::Child) {
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_secret-tunnel-agent"))
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_secret-tunnel-agent"));
+    command
         .arg("--stdio-v3")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .unwrap();
+        .kill_on_drop(true);
+    // Typical macOS GUI soft limit. Recovery must happen in the agent itself,
+    // not merely because the load-test parent already has enough descriptors.
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            let mut limits = std::mem::zeroed::<libc::rlimit>();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            limits.rlim_cur = limits.rlim_max.min(256);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limits) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
     let io = Pipes {
         input: child.stdout.take().unwrap(),
         output: child.stdin.take().unwrap(),

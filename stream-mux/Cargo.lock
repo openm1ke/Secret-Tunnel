@@ -53,6 +53,7 @@ dependencies = [
 name = "secret-tunnel-mux"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "tokio",
 ]
 

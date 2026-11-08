@@ -1,6 +1,8 @@
 //! Bounded, credit-controlled streams over one authenticated byte transport.
 //! Application consumption, rather than receipt from SSH, replenishes credit.
 mod datagrams;
+mod capacity;
+pub use capacity::socket_capacity;
 mod relay;
 pub use datagrams::DatagramBuffers;
 #[cfg(test)]

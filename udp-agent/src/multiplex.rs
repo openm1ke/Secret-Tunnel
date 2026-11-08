@@ -45,25 +45,7 @@ impl AsyncWrite for Stdio {
 }
 
 fn capacity() -> usize {
-    #[cfg(unix)]
-    unsafe {
-        let mut limits = std::mem::zeroed::<libc::rlimit>();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) == 0 {
-            let wanted = limits.rlim_max.min(8192);
-            if limits.rlim_cur < wanted {
-                limits.rlim_cur = wanted;
-                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &limits);
-            }
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) == 0 {
-                return ((limits.rlim_cur as usize).saturating_sub(128) / 2).min(2048);
-            }
-        }
-    }
-    if cfg!(windows) {
-        2048
-    } else {
-        1024
-    }
+    secret_tunnel_mux::socket_capacity(2048)
 }
 
 #[tokio::main(flavor = "current_thread")]

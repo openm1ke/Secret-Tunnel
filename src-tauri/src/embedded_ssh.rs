@@ -392,7 +392,9 @@ async fn run_embedded_tunnel(
 ) -> Result<(), String> {
     let listener = tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
-    let max_connections = if options.max_connections == 0 { 1024 } else { options.max_connections.clamp(64, 4096) };
+    let requested = if options.max_connections == 0 { 1024 } else { options.max_connections.clamp(64, 4096) };
+    let max_connections = secret_tunnel_mux::socket_capacity(requested);
+    if max_connections < 32 { return Err("Not enough file descriptors for the tunnel".into()); }
     let session = tokio::time::timeout(Duration::from_secs(15),
         connect_ssh(&server, (server.host.as_str(), server.port), options))
         .await.map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;

@@ -139,8 +139,8 @@ pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
         udp: local.udp.map(|_| read_window(20)),
     };
     if !(1..=8192).contains(&remote.flows)
-        || !remote.tcp.valid()
-        || remote.udp.is_some_and(|window| !window.valid())
+        || !remote.tcp.valid(FlowKind::Tcp)
+        || remote.udp.is_some_and(|window| !window.valid(FlowKind::Udp))
     {
         return Err(invalid("Invalid peer resource limits"));
     }

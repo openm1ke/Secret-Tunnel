@@ -3,7 +3,9 @@ mod multiplex;
 #[path = "../../src-tauri/src/udp_protocol.rs"]
 mod udp_protocol;
 
-const USAGE: &str = "Usage: secret-tunnel-agent --stdio-v3 | --stdio-v3-diagnostics | --stdio-v3-flow-control | --capabilities | --version";
+use multiplex::Mode;
+
+const USAGE: &str = "Usage: secret-tunnel-agent --stdio-v3 | --stdio-v3-diagnostics | --stdio-v3-flow-control | --stdio-v3-udp-config | --capabilities | --version";
 
 fn main() -> std::io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -15,6 +17,7 @@ fn main() -> std::io::Result<()> {
             );
             caps.diagnostics = true;
             caps.flow_control = true;
+            caps.udp_config = true;
             println!("{}", serde_json::to_string(&caps)?);
             Ok(())
         }
@@ -22,9 +25,10 @@ fn main() -> std::io::Result<()> {
             println!("secret-tunnel-agent {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        [arg] if arg == "--stdio-v3" => multiplex::run(false, false),
-        [arg] if arg == "--stdio-v3-diagnostics" => multiplex::run(true, false),
-        [arg] if arg == "--stdio-v3-flow-control" => multiplex::run(true, true),
+        [arg] if arg == "--stdio-v3" => multiplex::run(Mode::Basic),
+        [arg] if arg == "--stdio-v3-diagnostics" => multiplex::run(Mode::Diagnostics),
+        [arg] if arg == "--stdio-v3-flow-control" => multiplex::run(Mode::FlowControl),
+        [arg] if arg == "--stdio-v3-udp-config" => multiplex::run(Mode::UdpConfig),
         [arg] if arg == "--help" => {
             println!("{USAGE}");
             Ok(())

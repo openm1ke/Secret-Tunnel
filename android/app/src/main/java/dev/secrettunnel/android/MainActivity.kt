@@ -31,6 +31,8 @@ class MainActivity:Activity() {
     private var portField:EditText?=null
     private var userField:EditText?=null
     private var serverSpinner:Spinner?=null
+    private var proxyUdpReceive: UdpWindow? = null
+    private var proxyUdpAgentReceive: UdpWindow? = null
     private var formSnapshot=""
     private var formDraft:Bundle?=null
     private var heroTitle:TextView?=null
@@ -70,7 +72,7 @@ class MainActivity:Activity() {
                 val state=when{checking->"Проверка";pendingTrust->"Подтверждение";phase=="Работает"->"Подключено";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Ошибка";else->"Остановлен"}
                 update(badge,state);badge.setTextColor(when{state=="Подключено"->Palette.accent;state=="Ошибка"->Palette.error;TunnelVpnService.active||checking->Palette.warning;else->Palette.muted})
                 update(heroTitle,when{checking->"Проверяем сервер";pendingTrust->"Подтвердите ключ сервера";phase=="Работает"->"Туннель работает";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Не удалось подключиться";store.activeProxy==null->"Добавьте подключение";else->if(readinessAction()=="Подключить")"Готов к подключению" else "Настройте подключение"})
-                update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->"TCP и UDP выбранных приложений идут через туннель";phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);TunnelVpnService.active->TunnelVpnService.detail;else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
+                update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->activeTunnelDetails();phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);TunnelVpnService.active->TunnelVpnService.detail;else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
                 listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=!checking&&!pendingTrust&&!TunnelVpnService.active}
                 connectButton?.apply{val value=if(TunnelVpnService.active)"Остановить" else readinessAction();if(text.toString()!=value)text=value;isEnabled=!checking&&!pendingTrust&&phase!="Остановка";alpha=if(isEnabled)1f else .45f}
                 update(downSpeed,TrafficMeter.bytes(rate.down)+"/с");update(upSpeed,TrafficMeter.bytes(rate.up)+"/с")
@@ -98,7 +100,13 @@ class MainActivity:Activity() {
     override fun onSaveInstanceState(out:Bundle){
         out.putString("page",page);out.putString("editingId",editingId);out.putString("importId",importId);out.putString("pendingProxy",pendingProxy);out.putString("search",searchQuery)
         out.putString("chartRange",chartRange.name)
-        if(page.endsWith("Editor"))out.putBundle("draft",Bundle().apply{putString("name",nameField?.text.toString());putString("host",hostField?.text.toString());putString("port",portField?.text.toString());putString("user",userField?.text.toString());putInt("serverPosition",serverSpinner?.selectedItemPosition?:0)})
+        if(page.endsWith("Editor"))out.putBundle("draft",Bundle().apply{
+            putString("name",nameField?.text.toString());putString("host",hostField?.text.toString())
+            putString("port",portField?.text.toString());putString("user",userField?.text.toString())
+            putInt("serverPosition",serverSpinner?.selectedItemPosition?:0)
+            putString("udpReceive", proxyUdpReceive?.toJson()?.toString())
+            putString("udpAgentReceive", proxyUdpAgentReceive?.toJson()?.toString())
+        })
         super.onSaveInstanceState(out)
     }
     @Deprecated("Platform back callback")
@@ -115,6 +123,7 @@ class MainActivity:Activity() {
         heroTitle=null;heroDetail=null;connectButton=null;downSpeed=null;upSpeed=null;downTotal=null;upTotal=null;chart=null;logView=null
         chartPeaks=null;appTrafficList=null;appTrafficEmpty=null;appTrafficTitle=null;appTrafficRows.clear()
         nameField=null;hostField=null;portField=null;userField=null;serverSpinner=null
+        proxyUdpReceive=null;proxyUdpAgentReceive=null
         val root=column().apply{setBackgroundColor(Palette.background);isFocusableInTouchMode=true}
         val header=row().apply{setPadding(dp(20),dp(15),dp(20),dp(12));gravity=Gravity.CENTER_VERTICAL}
         header.addView(label("Secret Tunnel",21,true),LinearLayout.LayoutParams(0,-2,1f))
@@ -291,8 +300,13 @@ class MainActivity:Activity() {
             }.apply{setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)}
             tag=servers.map{it.id};setSelection(servers.indexOfFirst{it.id==proxy?.serverId}.coerceAtLeast(0));backgroundTintList=ColorStateList.valueOf(Palette.accent)
         }.also{body.addView(it,LinearLayout.LayoutParams(-1,dp(56)))}
-        portField=field("Локальный порт",(proxy?.port?:1080).toString(),"1024–65535",1003,true);val originalSignature=formSignature();restoreDraft()
+        portField=field("Локальный порт",(proxy?.port?:1080).toString(),"1024–65535",1003,true)
+        proxyUdpReceive = proxy?.udpReceive
+        proxyUdpAgentReceive = proxy?.udpAgentReceive
+        val originalSignature=formSignature()
+        restoreDraft()
         body.addView(label("Адрес: 127.0.0.1. Порт используется локальным SOCKS5-прокси и VPN выбранных приложений.",13,false,Palette.muted),spaced(14))
+        body.addView(udpSettingsCard(), spaced(16))
         body.addView(button("Сохранить прокси",true){unlocked();saveProxyForm();navigate("proxies")},spaced(20))
         if(proxy!=null)body.addView(button("Удалить прокси",danger=true){unlocked();confirmDelete("Удалить прокси ${proxy.name}?"){store.deleteProxy(proxy.id);navigate("proxies")}},spaced(8))
         formSnapshot=originalSignature
@@ -306,10 +320,95 @@ class MainActivity:Activity() {
         val index=serverSpinner?.selectedItemPosition?:-1
         val serverId=ids.getOrNull(index) as? String ?: error("Выберите сервер")
         require(store.server(serverId)!=null){"Этот сервер удалён. Откройте форму заново и выберите другой."}
-        store.saveProxy(ProxyProfile(editingId,nameField?.text.toString().trim(),serverId,portField?.text.toString().toIntOrNull()?:0));formSnapshot=formSignature()
+        store.saveProxy(ProxyProfile(editingId,nameField?.text.toString().trim(),serverId,
+            portField?.text.toString().toIntOrNull()?:0,proxyUdpReceive,proxyUdpAgentReceive))
+        formSnapshot=formSignature()
     }
-    private fun formSignature()=listOf(nameField?.text,hostField?.text,portField?.text,userField?.text,serverSpinner?.selectedItemPosition).joinToString("\u0000")
-    private fun restoreDraft(){formDraft?.let{d->nameField?.setText(d.getString("name"));hostField?.setText(d.getString("host"));portField?.setText(d.getString("port"));userField?.setText(d.getString("user"));serverSpinner?.setSelection(d.getInt("serverPosition"))};formDraft=null}
+    private fun formSignature()=listOf(nameField?.text,hostField?.text,portField?.text,userField?.text,
+        serverSpinner?.selectedItemPosition,proxyUdpReceive,proxyUdpAgentReceive).joinToString("\u0000")
+    private fun restoreDraft(){
+        formDraft?.let{d->
+            nameField?.setText(d.getString("name"));hostField?.setText(d.getString("host"))
+            portField?.setText(d.getString("port"));userField?.setText(d.getString("user"))
+            serverSpinner?.setSelection(d.getInt("serverPosition"))
+            proxyUdpReceive = d.getString("udpReceive")?.let { UdpWindow.fromJson(JSONObject(it)) }
+            proxyUdpAgentReceive = d.getString("udpAgentReceive")?.let { UdpWindow.fromJson(JSONObject(it)) }
+        }
+        formDraft=null
+    }
+
+    private fun udpSettingsCard(): LinearLayout = card().apply {
+        addView(label("Расширенные · UDP", 16, true))
+        addView(label("Параметры применяются при следующем подключении.", 12, false, Palette.muted), spaced(8))
+        fun windowButton(title: String, current: UdpWindow?, save: (UdpWindow?) -> Unit) {
+            fun caption(value: UdpWindow?) = "$title · ${udpWindowLabel(value)}"
+            var selected = current
+            lateinit var choice: Button
+            choice = button(caption(current)) {
+                unlocked()
+                chooseUdpWindow(title, selected) { value ->
+                    selected = value
+                    save(value)
+                    choice.text = caption(value)
+                }
+            }
+            addView(choice, spaced(8))
+        }
+        windowButton("Загрузка", proxyUdpReceive) { proxyUdpReceive = it }
+        windowButton("Отправка", proxyUdpAgentReceive) { proxyUdpAgentReceive = it }
+        addView(label("Для изменения окна отправки нужен агент с поддержкой этой настройки.",
+            12, false, Palette.muted), spaced(8))
+    }
+
+    private fun udpWindowLabel(window: UdpWindow?): String =
+        window?.let { "${it.kib} КиБ / ${it.slots} сл." } ?: "По умолчанию"
+
+    private fun chooseUdpWindow(title: String, current: UdpWindow?, save: (UdpWindow?) -> Unit) {
+        val presets = listOf(null, UdpWindow(192, 192), UdpWindow(256, 192))
+        val options = (presets.map(::udpWindowLabel) + "Вручную").toTypedArray()
+        val selected = presets.indexOf(current).let { if (it < 0) presets.size else it }
+        AlertDialog.Builder(this).setTitle("UDP · $title")
+            .setSingleChoiceItems(options, selected) { dialog, index ->
+                dialog.dismiss()
+                if (index == presets.size) editUdpWindow(title, current, save)
+                else save(presets[index])
+            }
+            .setNegativeButton("Отмена", null).show()
+    }
+
+    private fun editUdpWindow(title: String, current: UdpWindow?, save: (UdpWindow?) -> Unit) {
+        val form = column().apply { setPadding(dp(24), dp(8), dp(24), dp(8)) }
+        fun number(caption: String, value: Int): EditText {
+            form.addView(label(caption, 14, true), spaced(10))
+            return EditText(this).apply {
+                setSingleLine(true)
+                inputType = InputType.TYPE_CLASS_NUMBER
+                contentDescription = caption
+                setText(value.toString())
+                form.addView(this, LinearLayout.LayoutParams(-1, -2))
+            }
+        }
+        val kib = number("Окно, КиБ (64–1024)", current?.kib ?: 192)
+        val slots = number("Слоты (4–192)", current?.slots ?: 192)
+        val dialog = AlertDialog.Builder(this).setTitle("UDP · $title")
+            .setView(form).setNegativeButton("Отмена", null)
+            .setPositiveButton("Применить", null).create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val bytesValue = kib.text.toString().toIntOrNull()
+                val slotsValue = slots.text.toString().toIntOrNull()
+                when {
+                    bytesValue == null || bytesValue !in 64..1024 -> kib.error = "Введите от 64 до 1024 КиБ"
+                    slotsValue == null || slotsValue !in 4..192 -> slots.error = "Введите от 4 до 192 слотов"
+                    else -> {
+                        save(UdpWindow(bytesValue, slotsValue))
+                        dialog.dismiss()
+                    }
+                }
+            }
+        }
+        dialog.show()
+    }
     private fun appsPage(){
         val layout=column().apply{setPadding(dp(20),dp(8),dp(20),0)};content.addView(layout)
         layout.addView(label("Приложения",26,true));layout.addView(label("Включите туннель только для нужных приложений.",13,false,Palette.muted),spaced(8))
@@ -364,11 +463,17 @@ class MainActivity:Activity() {
         body.addView(button("Копировать журнал"){(getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(ClipData.newPlainText("Secret Tunnel",diagnostics()));toast("Журнал скопирован")},spaced(16))
         logView=label(diagnostics(),11,false,Palette.muted).apply{typeface=Typeface.MONOSPACE;setTextIsSelectable(true)}.also{body.addView(it,spaced(16))}
     }
+    private fun activeTunnelDetails(): String {
+        val status = "TCP и UDP выбранных приложений идут через туннель"
+        val windows = lastStatus.optJSONObject("transport")?.let(TransportDiagnostics::windows)
+        return if (windows == null) status else "$status\n$windows"
+    }
     private fun diagnostics():String=buildString{
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
         lastStatus.optString("agent").takeIf{it.isNotBlank()&&it!="null"}?.let{append(it+"\n\n")}
         lastStatus.optJSONObject("transport")?.let { t->
             append("Транспорт v3 · SSH-каналов: ${t.optInt("ssh_channels")}\n")
+            TransportDiagnostics.windows(t)?.let { append("$it\n") }
             append("Соединения: ${t.optInt("active")} / ${t.optInt("limit")} · пик: ${t.optInt("peak")}\n")
             append("Очереди: приём ${t.optLong("receive_queue_bytes")} / ${t.optLong("receive_budget")} B; отправка ${t.optLong("send_queue_bytes")} / ${t.optLong("send_budget")} B\n")
             append("UDP отброшено: ${t.optLong("udp_drops")} · отказов по лимиту: ${t.optLong("rejected")} · ошибок протокола: ${t.optLong("protocol_errors")}\n\n")

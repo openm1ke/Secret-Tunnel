@@ -108,6 +108,9 @@ async fn udp_overload_is_counted_and_does_not_retain_unbounded_packets() {
     }
     assert!(sender.try_send_datagram(vec![3]).unwrap());
     assert!(client.snapshot().diagnostics.udp_credit_return.samples > 0);
+    let diagnostics = server.snapshot().diagnostics;
+    assert_eq!(diagnostics.udp_receive_hold.samples, 1);
+    assert_eq!(diagnostics.udp_credit_queue.samples, 1);
 }
 
 #[tokio::test]
@@ -175,6 +178,88 @@ async fn larger_udp_windows_share_the_original_session_budget() {
         flow
     });
     assert!(opened.is_ok());
+}
+
+#[tokio::test]
+async fn asymmetric_udp_windows_limit_each_direction_and_keep_the_session_budget() {
+    let client_config = Config {
+        max_flows: 4,
+        udp_window: Some(FlowWindow {
+            bytes: 192 * 1024,
+            ..UDP_WINDOW
+        }),
+        ..Default::default()
+    };
+    let server_config = Config {
+        udp_window: Some(UDP_WINDOW),
+        ..client_config.clone()
+    };
+    let (a, b) = tokio::io::duplex(4096);
+    let (client, server) = tokio::join!(
+        Endpoint::start(a, Role::Client, client_config),
+        Endpoint::start(b, Role::Server, server_config)
+    );
+    let (client, server) = (client.unwrap(), server.unwrap());
+    let (client_udp, server_udp) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    let client_udp = client_udp.unwrap();
+    for (flow, packets) in [(&client_udp, 4), (&server_udp, 6)] {
+        let sender = flow.sender();
+        for _ in 0..packets {
+            assert!(sender.try_send_datagram(vec![7; 32768]).unwrap());
+        }
+        assert!(!sender.try_send_datagram(vec![7; 32768]).unwrap());
+    }
+    let (client_tcp, server_tcp) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    let _tcp = (client_tcp.unwrap(), server_tcp);
+    assert_eq!(client.snapshot().receive_budget, 256 * 1024);
+    assert_eq!(
+        client.open(FlowKind::Tcp, vec![]).await.err().unwrap(),
+        "Receive buffer budget reached"
+    );
+    assert_eq!(client.snapshot().protocol_errors, 0);
+    assert_eq!(server.snapshot().protocol_errors, 0);
+}
+
+#[tokio::test]
+async fn extended_udp_slot_windows_share_the_session_packet_budget() {
+    let (client, server) = pair(Config {
+        max_flows: 2,
+        udp_window: Some(FlowWindow {
+            bytes: 64 * 1024,
+            slots: UDP_FLOW_SLOT_LIMIT,
+        }),
+        ..Default::default()
+    })
+    .await;
+    let (udp, receiver) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    let udp = udp.unwrap();
+    assert_eq!(
+        client.open(FlowKind::Udp, vec![]).await.err().unwrap(),
+        "Receive packet budget reached"
+    );
+    assert_eq!(client.snapshot().diagnostics.receive_slot_rejections, 1);
+    assert_eq!(client.inner.receive_bytes.available_permits(), 64 * 1024);
+    let (tcp, peer) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    let tcp = tcp.unwrap();
+    assert_eq!(client.inner.receive_slots.available_permits(), 0);
+    drop((udp, receiver, tcp, peer));
+    assert_eq!(client.inner.receive_slots.available_permits(), 256);
 }
 
 #[tokio::test]

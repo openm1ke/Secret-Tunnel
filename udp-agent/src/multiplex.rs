@@ -53,23 +53,52 @@ fn capacity() -> usize {
     secret_tunnel_mux::socket_capacity(2048)
 }
 
-#[tokio::main(flavor = "current_thread")]
-pub async fn run(detailed: bool, flow_control: bool) -> io::Result<()> {
+pub enum Mode {
+    Basic,
+    Diagnostics,
+    FlowControl,
+    UdpConfig,
+}
+
+pub fn run(mode: Mode) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let result = runtime.block_on(serve(mode));
+    // Stdin reads run on a blocking worker. An expired handshake can leave one
+    // waiting for input, so this short-lived agent exits without joining it.
+    runtime.shutdown_background();
+    result
+}
+
+async fn serve(mode: Mode) -> io::Result<()> {
     let limit = capacity();
     if limit < 32 {
         return Err(io::Error::other(
             "Not enough file descriptors for the agent",
         ));
     }
+    let detailed = !matches!(mode, Mode::Basic);
+    let mut stream = Stdio {
+        input: tokio::io::stdin(),
+        output: tokio::io::stdout(),
+    };
+    let udp_window = match mode {
+        Mode::Basic | Mode::Diagnostics => None,
+        Mode::FlowControl => Some(secret_tunnel_mux::UDP_WINDOW),
+        Mode::UdpConfig => Some(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                secret_tunnel_mux::agent::read_udp_window_request(&mut stream),
+            )
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "UDP configuration timed out"))??,
+        ),
+    };
     let endpoint = Endpoint::start(
-        Stdio {
-            input: tokio::io::stdin(),
-            output: tokio::io::stdout(),
-        },
+        stream,
         Role::Server,
         Config {
             max_flows: limit,
-            udp_window: flow_control.then_some(secret_tunnel_mux::UDP_WINDOW),
+            udp_window,
             ..Default::default()
         },
     )

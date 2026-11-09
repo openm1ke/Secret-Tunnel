@@ -1,11 +1,16 @@
 //! Bounded, versioned agent discovery before opening the data channel.
+use crate::{FlowKind, FlowWindow};
 use serde::{Deserialize, Serialize};
+use std::io;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const OUTPUT_LIMIT: usize = 8192;
 pub const QUERY_COMMAND: &str = r#"if [ ! -f "$HOME/.local/bin/secret-tunnel-agent" ]; then exit 200; fi; if [ ! -x "$HOME/.local/bin/secret-tunnel-agent" ]; then exit 201; fi; exec "$HOME/.local/bin/secret-tunnel-agent" --capabilities"#;
 pub const START_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3"#;
 pub const DIAGNOSTICS_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-diagnostics"#;
 pub const FLOW_CONTROL_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-flow-control"#;
+pub const UDP_CONFIG_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-udp-config"#;
+const UDP_CONFIG_MAGIC: &[u8; 8] = b"STUDPC01";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Capabilities {
@@ -21,7 +26,16 @@ pub struct Capabilities {
     pub diagnostics: bool,
     #[serde(default)]
     pub flow_control: bool,
+    #[serde(default = "legacy_udp_slot_limit")]
+    pub max_udp_slots: usize,
+    #[serde(default)]
+    pub udp_config: bool,
 }
+
+fn legacy_udp_slot_limit() -> usize {
+    crate::UDP_WINDOW.slots
+}
+
 impl Capabilities {
     pub fn current(version: &str, max_flows: usize) -> Self {
         Self {
@@ -35,6 +49,8 @@ impl Capabilities {
             max_flows,
             diagnostics: false,
             flow_control: false,
+            max_udp_slots: crate::UDP_FLOW_SLOT_LIMIT,
+            udp_config: false,
         }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -57,6 +73,36 @@ impl Capabilities {
         }
         Ok(())
     }
+}
+
+pub async fn write_udp_window_request<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    window: FlowWindow,
+) -> io::Result<()> {
+    if !window.valid(FlowKind::Udp) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid UDP window"));
+    }
+    let mut request = [0u8; 16];
+    request[..8].copy_from_slice(UDP_CONFIG_MAGIC);
+    request[8..12].copy_from_slice(&(window.bytes as u32).to_be_bytes());
+    request[12..].copy_from_slice(&(window.slots as u32).to_be_bytes());
+    writer.write_all(&request).await?;
+    writer.flush().await
+}
+
+pub async fn read_udp_window_request<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> io::Result<FlowWindow> {
+    let mut request = [0u8; 16];
+    reader.read_exact(&mut request).await?;
+    let window = FlowWindow {
+        bytes: u32::from_be_bytes(request[8..12].try_into().unwrap()) as usize,
+        slots: u32::from_be_bytes(request[12..].try_into().unwrap()) as usize,
+    };
+    if &request[..8] != UDP_CONFIG_MAGIC || !window.valid(FlowKind::Udp) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid UDP window request"));
+    }
+    Ok(window)
 }
 
 impl Capabilities {
@@ -96,6 +142,21 @@ pub fn parse(exit: Option<u32>, stdout: &[u8], stderr: &[u8]) -> Result<Capabili
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn udp_window_request_rejects_invalid_limits_and_magic() {
+        let mut frame = Vec::new();
+        let window = FlowWindow { bytes: 256 * 1024, slots: 192 };
+        write_udp_window_request(&mut frame, window).await.unwrap();
+        assert_eq!(read_udp_window_request(&mut frame.as_slice()).await.unwrap(), window);
+        assert!(read_udp_window_request(&mut &frame[..15]).await.is_err());
+        let mut bad_magic = frame.clone();
+        bad_magic[0] = b'X';
+        assert!(read_udp_window_request(&mut bad_magic.as_slice()).await.is_err());
+        frame[12..].copy_from_slice(&193u32.to_be_bytes());
+        assert!(read_udp_window_request(&mut frame.as_slice()).await.is_err());
+    }
+
     #[test]
     fn validates_capabilities_and_preserves_compatible_future_fields() {
         let caps = Capabilities::current("0.1.0", 256);

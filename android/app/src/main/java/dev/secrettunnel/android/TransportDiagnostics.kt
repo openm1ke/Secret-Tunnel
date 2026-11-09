@@ -20,6 +20,15 @@ internal object TransportDiagnostics {
         return line.replaceRange(match.range, "[${timestamp(match.groupValues[1].toLong())}] ")
     }
 
+    fun windows(transport: JSONObject): String? {
+        val client = transport.optJSONObject("diagnostics") ?: return null
+        val agent = transport.optJSONObject("peer_udp_window") ?: return null
+        val down = client.optLong("udp_window_bytes") / 1024
+        val up = agent.optLong("bytes") / 1024
+        if (down <= 0 || up <= 0) return null
+        return "UDP · ↓ $down КиБ / ${client.optInt("udp_window_slots")} сл. · ↑ $up КиБ / ${agent.optInt("slots")} сл."
+    }
+
     fun describe(metrics: JSONObject): String = buildString {
         append("Снимок ${timestamp(metrics.optLong("at_ms"))} · ↓ ${metrics.optLong("bytes_rx")} Б · ↑ ${metrics.optLong("bytes_tx")} Б\n")
         append("UDP: окно потока ${metrics.optLong("udp_flow_credit")} · бюджет байтов ${metrics.optLong("udp_byte_budget")} · слоты ${metrics.optLong("udp_slots")}\n")

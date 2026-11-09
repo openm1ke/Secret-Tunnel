@@ -4,7 +4,7 @@ use jni::{
     JNIEnv,
 };
 use secret_tunnel_core::embedded_ssh::{
-    self, EmbeddedOptions, EmbeddedProxy, EmbeddedServer, EmbeddedTunnelHandle,
+    self, EmbeddedOptions, EmbeddedProxy, EmbeddedServer, EmbeddedTunnelHandle, FlowWindow,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +27,10 @@ struct Config {
     new_session: bool,
     #[serde(default)]
     max_connections: usize,
+    #[serde(default)]
+    udp_receive_window: Option<FlowWindow>,
+    #[serde(default)]
+    agent_udp_receive_window: Option<FlowWindow>,
 }
 #[derive(Default)]
 struct State {
@@ -64,6 +68,17 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
     {
         return Err("Укажите сервер, пользователя и порты 1–65535".into());
     }
+    // Build-time setting for comparisons using otherwise identical APKs.
+    let udp_receive_kib = option_env!("ST_ANDROID_UDP_RECEIVE_KIB")
+        .unwrap_or("192")
+        .parse::<usize>()
+        .ok()
+        .filter(|kib| (64..=1024).contains(kib))
+        .ok_or("Некорректный размер окна UDP в сборке")?;
+    let udp_receive_slots = option_env!("ST_ANDROID_UDP_RECEIVE_SLOTS")
+        .unwrap_or("128")
+        .parse()
+        .map_err(|_| "Некорректный лимит UDP-слотов в сборке")?;
     {
         let mut s = state().lock().map_err(|e| e.to_string())?;
         if s.starting || s.tunnel.is_some() {
@@ -113,6 +128,11 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                 observed_host_key: Some(observed()),
                 protect_socket: Some(protect),
                 probe_ipv6: true,
+                udp_receive_window: Some(cfg.udp_receive_window.unwrap_or(FlowWindow {
+                    bytes: udp_receive_kib * 1024,
+                    slots: udp_receive_slots,
+                })),
+                agent_udp_receive_window: cfg.agent_udp_receive_window,
                 max_connections: if cfg.max_connections == 0 {
                     512
                 } else {
@@ -214,7 +234,7 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         .unwrap_or_default();
     let peer=stats.peer.as_ref().map(|p|json!({"active":p.active,"peak":p.peak,"limit":p.limit,"rejected":p.rejected,"udp_drops":p.udp_drops,"last_udp_error":p.last_udp_error,"protocol_errors":p.protocol_errors,"diagnostics":p.diagnostics,
         "receive_queue_bytes":p.receive_queue_bytes,"receive_queue_peak":p.receive_queue_peak,"receive_budget":p.receive_budget,"send_queue_bytes":p.send_queue_bytes,"send_queue_peak":p.send_queue_peak,"send_budget":p.send_budget}));
-    let transport = json!({"version":3,"ssh_channels":if s.tunnel.is_some()&&s.error.is_empty(){1}else{0},"active":stats.active,"peak":stats.peak,"limit":stats.limit,"rejected":stats.rejected,"server":peer,
+    let transport = json!({"version":3,"ssh_channels":if s.tunnel.is_some()&&s.error.is_empty(){1}else{0},"active":stats.active,"peak":stats.peak,"limit":stats.limit,"rejected":stats.rejected,"server":peer,"peer_udp_window":stats.peer_udp_window,
         "receive_queue_bytes":stats.receive_queue_bytes,"receive_queue_peak":stats.receive_queue_peak,"receive_budget":stats.receive_budget,
         "send_queue_bytes":stats.send_queue_bytes,"send_queue_peak":stats.send_queue_peak,"send_budget":stats.send_budget,
         "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors,"diagnostics":stats.diagnostics});

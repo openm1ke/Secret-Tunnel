@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -11,9 +12,27 @@ import javax.crypto.spec.GCMParameterSpec
 import java.security.KeyStore
 
 data class ServerProfile(val id:String, val name:String, val host:String, val port:Int, val user:String)
-data class ProxyProfile(val id:String, val name:String, val serverId:String, val port:Int)
+data class UdpWindow(val kib: Int, val slots: Int) {
+    init {
+        require(kib in 64..1024) { "Размер окна UDP должен быть от 64 до 1024 КиБ" }
+        require(slots in 4..192) { "Число слотов UDP должно быть от 4 до 192" }
+    }
+
+    fun toJson(): JSONObject = JSONObject().put("bytes", kib * 1024).put("slots", slots)
+
+    companion object {
+        fun fromJson(value: JSONObject): UdpWindow {
+            val bytes = value.getInt("bytes")
+            require(bytes % 1024 == 0) { "Размер окна UDP должен быть кратен 1 КиБ" }
+            return UdpWindow(bytes / 1024, value.getInt("slots"))
+        }
+    }
+}
+data class ProxyProfile(val id:String, val name:String, val serverId:String, val port:Int,
+    val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null)
 data class TunnelSession(val serverId:String, val host:String, val port:Int, val user:String,
-    val fingerprint:String, val socksPort:Int, val packages:Set<String>)
+    val fingerprint:String, val socksPort:Int, val packages:Set<String>,
+    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?)
 
 class SettingsStore(private val context:Context, private val profileId:String?=null) {
     val prefs = context.getSharedPreferences("tunnel", Context.MODE_PRIVATE)
@@ -55,7 +74,12 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     fun server(id:String)=servers().firstOrNull{it.id==id}
     fun proxies():List<ProxyProfile> {
         val a=org.json.JSONArray(prefs.getString("proxy_profiles","[]"))
-        return (0 until a.length()).map {val o=a.getJSONObject(it);ProxyProfile(o.getString("id"),o.getString("name"),o.getString("serverId"),o.getInt("port"))}
+        return (0 until a.length()).map {
+            val o = a.getJSONObject(it)
+            ProxyProfile(o.getString("id"), o.getString("name"), o.getString("serverId"), o.getInt("port"),
+                o.optJSONObject("udpReceive")?.let { UdpWindow.fromJson(it) },
+                o.optJSONObject("udpAgentReceive")?.let { UdpWindow.fromJson(it) })
+        }
     }
     fun saveServer(profile:ServerProfile) {
         require(profile.name.isNotBlank()&&profile.name.length<=64){"Укажите название до 64 символов"}
@@ -70,7 +94,12 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
         check(editor.commit()) {"Не удалось сохранить сервер"}
     }
     private fun writeProxies(items:List<ProxyProfile>) {
-        val a=org.json.JSONArray();items.forEach {a.put(org.json.JSONObject().put("id",it.id).put("name",it.name).put("serverId",it.serverId).put("port",it.port))}
+        val a=org.json.JSONArray()
+        items.forEach {
+            a.put(JSONObject().put("id", it.id).put("name", it.name).put("serverId", it.serverId)
+                .put("port", it.port).put("udpReceive", it.udpReceive?.toJson())
+                .put("udpAgentReceive", it.udpAgentReceive?.toJson()))
+        }
         check(prefs.edit().putString("proxy_profiles",a.toString()).commit()) {"Не удалось сохранить прокси"}
     }
     fun saveProxy(profile:ProxyProfile) {
@@ -97,7 +126,8 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
         val scoped=SettingsStore(context,server.id)
         require(scoped.hasKey()) {"Добавьте SSH-ключ для сервера ${server.name}"}
         require(packages.isNotEmpty()) {"Выберите приложения"}
-        return TunnelSession(server.id,server.host,server.port,server.user,scoped.fingerprint,proxy.port,packages)
+        return TunnelSession(server.id,server.host,server.port,server.user,scoped.fingerprint,proxy.port,packages,
+            proxy.udpReceive,proxy.udpAgentReceive)
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {

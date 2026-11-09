@@ -80,6 +80,7 @@ impl server::Handler for Handler {
                     let mut caps = agent::Capabilities::current("0.1.0", 64);
                     caps.udp = !matches!(self.mode, Mode::NoUdp);
                     caps.flow_control = matches!(self.mode, Mode::Current);
+                    caps.udp_config = matches!(self.mode, Mode::Current);
                     (0, serde_json::to_vec(&caps).unwrap(), vec![])
                 }
             };
@@ -94,9 +95,16 @@ impl server::Handler for Handler {
             session.close(id)?;
         } else {
             let flow_control = matches!(self.mode, Mode::Current);
+            let configured = flow_control && command == agent::UDP_CONFIG_COMMAND;
             assert_eq!(
                 command,
-                if flow_control { agent::FLOW_CONTROL_COMMAND } else { agent::START_COMMAND },
+                if configured {
+                    agent::UDP_CONFIG_COMMAND
+                } else if flow_control {
+                    agent::FLOW_CONTROL_COMMAND
+                } else {
+                    agent::START_COMMAND
+                },
                 "No arbitrary remote commands"
             );
             if matches!(self.mode, Mode::NetworkDrop) {
@@ -105,12 +113,18 @@ impl server::Handler for Handler {
             } else {
                 let channel = self.channels.remove(&id).unwrap();
                 tokio::spawn(async move {
+                    let mut stream = channel.into_stream();
+                    let udp_window = if configured {
+                        Some(agent::read_udp_window_request(&mut stream).await.unwrap())
+                    } else {
+                        flow_control.then_some(secret_tunnel_mux::UDP_WINDOW)
+                    };
                     let endpoint = Endpoint::start(
-                        channel.into_stream(),
+                        stream,
                         Role::Server,
                         MuxConfig {
                             max_flows: 64,
-                            udp_window: flow_control.then_some(secret_tunnel_mux::UDP_WINDOW),
+                            udp_window,
                             ..Default::default()
                         },
                     )
@@ -230,7 +244,20 @@ async fn fixture(mode: Mode) -> Fixture {
 #[tokio::test]
 async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        {
+        for (udp_receive_window, agent_udp_receive_window) in [
+            (None, None),
+            (Some(FlowWindow {
+                bytes: 192 * 1024,
+                slots: 192,
+            }), None),
+            (Some(FlowWindow {
+                bytes: 256 * 1024,
+                slots: 192,
+            }), Some(FlowWindow {
+                bytes: 192 * 1024,
+                slots: 160,
+            })),
+        ] {
             let mode = Mode::Current;
             let fixture = fixture(mode).await;
             let session = connect_ssh(
@@ -240,10 +267,22 @@ async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
             )
             .await
             .unwrap();
-            let (transport, report) = start_agent_transport(&session, 64).await.unwrap();
+            let (transport, report) = start_agent_transport(
+                &session,
+                64,
+                udp_receive_window,
+                agent_udp_receive_window,
+            ).await.unwrap();
             assert_eq!(report.protocols, vec![3]);
             assert!(report.flow_control);
-            assert_eq!(transport.snapshot().diagnostics.udp_window_bytes, 131072);
+            let window = udp_receive_window.unwrap_or(secret_tunnel_mux::UDP_WINDOW);
+            let diagnostics = transport.snapshot().diagnostics;
+            assert_eq!(diagnostics.udp_window_bytes, window.bytes);
+            assert_eq!(diagnostics.udp_window_slots, window.slots);
+            assert_eq!(
+                transport.snapshot().peer_udp_window,
+                Some(agent_udp_receive_window.unwrap_or(secret_tunnel_mux::UDP_WINDOW))
+            );
             for kind in [FlowKind::Tcp, FlowKind::Udp] {
                 let mut flow = transport.open(kind, vec![]).await.unwrap();
                 flow.sender()
@@ -269,7 +308,11 @@ async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
                 .await;
             assert_eq!(
                 *fixture.commands.lock().unwrap(),
-                [agent::QUERY_COMMAND, agent::FLOW_CONTROL_COMMAND]
+                [agent::QUERY_COMMAND, if agent_udp_receive_window.is_some() {
+                    agent::UDP_CONFIG_COMMAND
+                } else {
+                    agent::FLOW_CONTROL_COMMAND
+                }]
             );
         }
     })
@@ -295,7 +338,7 @@ async fn agent_failures_are_distinct_and_do_not_start_the_data_channel() {
             )
             .await
             .unwrap();
-            let result = start_agent_transport(&session, 64).await;
+            let result = start_agent_transport(&session, 64, None, None).await;
             let error = result.err().expect("Incompatible agent accepted");
             assert!(error.starts_with(code), "{error}");
             assert_eq!(fixture.commands.lock().unwrap().len(), 1);
@@ -351,7 +394,7 @@ async fn network_failure_during_handshake_is_not_an_agent_upgrade_error() {
     )
     .await
     .unwrap();
-    let error = start_agent_transport(&session, 64)
+    let error = start_agent_transport(&session, 64, None, None)
         .await
         .err()
         .expect("Closed channel accepted");

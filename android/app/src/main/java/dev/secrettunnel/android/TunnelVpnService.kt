@@ -206,6 +206,8 @@ class TunnelVpnService : VpnService() {
                 .put("key_path", key.absolutePath).put("host_key_sha256", current.fingerprint).put("socks_port", current.socksPort)
                 .put("new_session", tun == null)
                 .put("max_connections", connectionBudget())
+                .put("udp_receive_window", current.udpReceive?.toJson())
+                .put("agent_udp_receive_window", current.udpAgentReceive?.toJson())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
         } finally { key.delete() }

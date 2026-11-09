@@ -31,22 +31,28 @@ pub type Result<T> = std::result::Result<T, String>;
 pub const TCP_DESTINATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub const FLOW_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RECEIVE_BUDGET: usize = 256 * 1024 * 1024;
+const BASE_FLOW_SLOT_LIMIT: usize = 128;
+pub const UDP_FLOW_SLOT_LIMIT: usize = 192;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FlowWindow {
     pub bytes: usize,
     pub slots: usize,
 }
 
 impl FlowWindow {
-    fn valid(self) -> bool {
-        (65536..=1048576).contains(&self.bytes) && (4..=128).contains(&self.slots)
+    fn valid(self, kind: FlowKind) -> bool {
+        let max_slots = match kind {
+            FlowKind::Tcp => BASE_FLOW_SLOT_LIMIT,
+            FlowKind::Udp => UDP_FLOW_SLOT_LIMIT,
+        };
+        (65536..=1048576).contains(&self.bytes) && (4..=max_slots).contains(&self.slots)
     }
 }
 
 pub const UDP_WINDOW: FlowWindow = FlowWindow {
     bytes: 131072,
-    slots: 128,
+    slots: BASE_FLOW_SLOT_LIMIT,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowKind {
@@ -80,8 +86,8 @@ impl Default for Config {
 impl Config {
     fn validate(&self) -> Result<()> {
         if !(1..=8192).contains(&self.max_flows)
-            || !self.receive_for(FlowKind::Tcp).valid()
-            || !self.receive_for(FlowKind::Udp).valid()
+            || !self.receive_for(FlowKind::Tcp).valid(FlowKind::Tcp)
+            || !self.receive_for(FlowKind::Udp).valid(FlowKind::Udp)
             || self.max_flows > MAX_RECEIVE_BUDGET / self.receive_window
             || self.max_receive_window() > self.max_flows * self.receive_window
             || !(65536..=64 * 1024 * 1024).contains(&self.outbound_bytes)
@@ -146,6 +152,7 @@ pub struct Snapshot {
     pub udp_drops: u64,
     pub protocol_errors: u64,
     pub diagnostics: Diagnostics,
+    pub peer_udp_window: Option<FlowWindow>,
     pub peer: Option<PeerSnapshot>,
 }
 #[derive(Debug, Clone, Default)]
@@ -262,6 +269,7 @@ struct Queued {
     frame: Frame,
     queued_at: Instant,
     priority: bool,
+    udp_credit: bool,
     cancelled: Option<Arc<AtomicBool>>,
     bytes: Option<OwnedSemaphorePermit>,
     _slot: Option<OwnedSemaphorePermit>,
@@ -281,6 +289,7 @@ struct Inner {
     limit: usize,
     receive_budget: usize,
     receive_bytes: Arc<Semaphore>,
+    receive_slots: Arc<Semaphore>,
     peer_limits: wire::Limits,
     remote_odd: bool,
     next: AtomicU64,
@@ -310,6 +319,10 @@ impl Inner {
         }
     }
     fn control(&self, frame: Frame) -> Result<()> {
+        self.queue_control(frame, false)
+    }
+
+    fn queue_control(&self, frame: Frame, udp_credit: bool) -> Result<()> {
         let slot = self
             .control_slots
             .clone()
@@ -327,6 +340,7 @@ impl Inner {
                 frame,
                 queued_at: Instant::now(),
                 priority: !ordered,
+                udp_credit,
                 cancelled: None,
                 bytes: None,
                 _slot: Some(slot),
@@ -360,6 +374,18 @@ impl Inner {
                 self.counters.rejected.fetch_add(1, Ordering::Relaxed);
                 "Receive buffer budget reached".to_owned()
             })?;
+        let receive_slot_reservation = self
+            .receive_slots
+            .clone()
+            .try_acquire_many_owned(receive_window.slots as u32)
+            .map_err(|_| {
+                self.counters.rejected.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .diagnostics
+                    .receive_slot_rejections
+                    .fetch_add(1, Ordering::Relaxed);
+                "Receive packet budget reached".to_owned()
+            })?;
         let (packets, receiver) = mpsc::channel(receive_window.slots + 2);
         let (closed, _) = watch::channel(false);
         let state = Arc::new(State {
@@ -368,6 +394,7 @@ impl Inner {
             probe,
             receive_window,
             _receive_reservation: receive_reservation,
+            _receive_slot_reservation: receive_slot_reservation,
             inner: Arc::downgrade(self),
             window: Window::new(self.peer_limits.window(kind)),
             packets,
@@ -442,6 +469,10 @@ impl Endpoint {
         // A large UDP window borrows from the same session-wide budget as TCP.
         // The configured budget can fit at least one window of either kind.
         let receive_budget = (limit * config.receive_window).max(config.max_receive_window());
+        let largest_window_slots = config.receive_slots.max(config.receive_for(FlowKind::Udp).slots);
+        // Enlarging a flow's UDP window shares the original session packet budget.
+        let receive_slot_budget =
+            (limit * largest_window_slots.min(BASE_FLOW_SLOT_LIMIT)).max(largest_window_slots);
         let (incoming_tx, incoming) = mpsc::channel(limit);
         let (data_tx, data_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -450,6 +481,7 @@ impl Endpoint {
             limit,
             receive_budget,
             receive_bytes: Arc::new(Semaphore::new(receive_budget)),
+            receive_slots: Arc::new(Semaphore::new(receive_slot_budget)),
             peer_limits: peer,
             remote_odd: matches!(role, Role::Server),
             next: AtomicU64::new(if matches!(role, Role::Client) { 1 } else { 2 }),
@@ -461,14 +493,7 @@ impl Endpoint {
             control: control_tx,
             bytes: Arc::new(Semaphore::new(config.outbound_bytes)),
             slots: Arc::new(Semaphore::new(4096)),
-            control_slots: Arc::new(Semaphore::new(
-                limit
-                    * (config
-                        .receive_slots
-                        .max(config.receive_for(FlowKind::Udp).slots)
-                        + 4)
-                    + 64,
-            )),
+            control_slots: Arc::new(Semaphore::new(receive_slot_budget + limit * 4 + 64)),
             config,
             closed,
             error: Default::default(),
@@ -533,6 +558,7 @@ impl Endpoint {
             udp_drops: c.udp_drops.load(Ordering::Relaxed),
             protocol_errors: c.protocol_errors.load(Ordering::Relaxed),
             diagnostics,
+            peer_udp_window: Some(self.inner.peer_limits.window(FlowKind::Udp)),
             peer: self.inner.peer_stats.lock().unwrap().clone(),
         }
     }
@@ -594,6 +620,7 @@ impl Endpoint {
                 },
                 queued_at: Instant::now(),
                 priority: true,
+                udp_credit: false,
                 cancelled: None,
                 bytes: None,
                 _slot: Some(slot),
@@ -673,6 +700,7 @@ struct State {
     probe: bool,
     receive_window: FlowWindow,
     _receive_reservation: OwnedSemaphorePermit,
+    _receive_slot_reservation: OwnedSemaphorePermit,
     inner: Weak<Inner>,
     window: Arc<Window>,
     packets: mpsc::Sender<Event>,
@@ -717,11 +745,13 @@ impl Drop for Received {
             .fetch_sub(self.data.len(), Ordering::Relaxed);
         self.state.received_slots.fetch_sub(1, Ordering::Relaxed);
         if let Some(inner) = self.state.inner.upgrade() {
-            inner
-                .counters
-                .diagnostics
-                .rx_hold
-                .observe(self.arrived_at.elapsed());
+            let metrics = &inner.counters.diagnostics;
+            let held = self.arrived_at.elapsed();
+            let udp = self.state.kind == FlowKind::Udp;
+            metrics.rx_hold.observe(held);
+            if udp {
+                metrics.udp_receive_hold.observe(held);
+            }
             inner
                 .counters
                 .rx_queue
@@ -730,11 +760,14 @@ impl Drop for Received {
                 let mut data = Vec::with_capacity(8);
                 data.extend_from_slice(&(self.data.len() as u32).to_be_bytes());
                 data.extend_from_slice(&1u32.to_be_bytes());
-                let _ = inner.control(Frame {
-                    id: self.state.id,
-                    kind: Kind::Credit,
-                    data,
-                });
+                let _ = inner.queue_control(
+                    Frame {
+                        id: self.state.id,
+                        kind: Kind::Credit,
+                        data,
+                    },
+                    udp,
+                );
             }
         }
     }
@@ -931,6 +964,7 @@ impl Sender {
                 },
                 queued_at: Instant::now(),
                 priority: false,
+                udp_credit: false,
                 cancelled: Some(self.state.cancelled.clone()),
                 bytes: Some(bytes),
                 _slot: Some(slot),
@@ -1043,6 +1077,7 @@ impl Sender {
                 },
                 queued_at: Instant::now(),
                 priority: false,
+                udp_credit: false,
                 cancelled: if kind == Kind::Close {
                     None
                 } else {
@@ -1363,6 +1398,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
         }
         let started = Instant::now();
         let mut has_data = false;
+        let mut has_udp_credit = false;
         for frame in &batch {
             if frame.frame.kind == Kind::Data {
                 has_data = true;
@@ -1370,6 +1406,14 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                     .counters
                     .diagnostics
                     .tx_queue
+                    .observe(started.duration_since(frame.queued_at));
+            }
+            if frame.udp_credit {
+                has_udp_credit = true;
+                inner
+                    .counters
+                    .diagnostics
+                    .udp_credit_queue
                     .observe(started.duration_since(frame.queued_at));
             }
         }
@@ -1383,6 +1427,13 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                 .counters
                 .diagnostics
                 .write_batch
+                .observe(started.elapsed());
+        }
+        if has_udp_credit {
+            inner
+                .counters
+                .diagnostics
+                .udp_credit_write
                 .observe(started.elapsed());
         }
         if !matches!(result, Ok(Ok(()))) {

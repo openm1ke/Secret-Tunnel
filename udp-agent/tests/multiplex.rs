@@ -1,4 +1,4 @@
-use secret_tunnel_mux::{Config, Endpoint, FlowKind, Role};
+use secret_tunnel_mux::{agent as agent_protocol, Config, Endpoint, FlowKind, FlowWindow, Role};
 use std::{
     io,
     pin::Pin,
@@ -97,6 +97,49 @@ async fn agent(max_flows: usize) -> (Endpoint, tokio::process::Child) {
     .await
     .unwrap();
     (endpoint, child)
+}
+
+#[tokio::test]
+async fn configured_agent_advertises_its_session_window_and_relays_udp() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_secret-tunnel-agent"))
+            .arg("--stdio-v3-udp-config")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut io = Pipes {
+            input: child.stdout.take().unwrap(),
+            output: child.stdin.take().unwrap(),
+        };
+        let upload = FlowWindow { bytes: 256 * 1024, slots: 160 };
+        agent_protocol::write_udp_window_request(&mut io, upload).await.unwrap();
+        let endpoint = Endpoint::start(io, Role::Client, Config {
+            udp_window: Some(secret_tunnel_mux::UDP_WINDOW),
+            ..Default::default()
+        }).await.unwrap();
+        assert_eq!(endpoint.snapshot().peer_udp_window, Some(upload));
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut packet = target(socket.local_addr().unwrap().port());
+        packet.extend_from_slice(b"configured UDP");
+        let echo = tokio::spawn(async move {
+            let mut data = [0; 32];
+            let (len, source) = socket.recv_from(&mut data).await.unwrap();
+            socket.send_to(&data[..len], source).await.unwrap();
+        });
+        let mut flow = endpoint.open(FlowKind::Udp, vec![]).await.unwrap();
+        assert!(flow.sender().try_send_datagram(packet.clone()).unwrap());
+        let response = flow.recv().await.unwrap().unwrap();
+        assert_eq!(&*response, packet.as_slice());
+        echo.await.unwrap();
+        drop(response);
+        flow.finish().await.unwrap();
+        endpoint.shutdown();
+        drop(endpoint);
+        assert!(child.wait().await.unwrap().success());
+    }).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

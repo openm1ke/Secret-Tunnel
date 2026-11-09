@@ -3,7 +3,7 @@ use russh::client;
 use russh::keys::known_hosts::{check_known_hosts_path, known_host_keys_path, learn_known_hosts};
 use russh::keys::{load_secret_key, ssh_key, PrivateKeyWithHashAlg};
 use secret_tunnel_mux::agent::{self, Capabilities as AgentCapabilities};
-pub use secret_tunnel_mux::Snapshot as TransportSnapshot;
+pub use secret_tunnel_mux::{FlowWindow, Snapshot as TransportSnapshot};
 use secret_tunnel_mux::{Config as MuxConfig, DatagramBuffers, Endpoint, FlowKind, Role};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +45,9 @@ pub struct EmbeddedOptions {
     pub protect_socket: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,
     pub probe_ipv6: bool,
     pub max_connections: usize,
+    /// Override the local UDP receive window without changing the peer's window.
+    pub udp_receive_window: Option<FlowWindow>,
+    pub agent_udp_receive_window: Option<FlowWindow>,
 }
 
 #[derive(Debug)]
@@ -517,6 +520,8 @@ async fn run_embedded_tunnel(
     let listener =
         tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
+    let udp_receive_window = options.udp_receive_window;
+    let agent_udp_receive_window = options.agent_udp_receive_window;
     let requested = if options.max_connections == 0 {
         1024
     } else {
@@ -534,7 +539,13 @@ async fn run_embedded_tunnel(
     .map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
     let session = Arc::new(session);
     super::log_line(&logs, "SSH и ключ проверены; проверяем серверный агент");
-    let (transport, agent) = start_agent_transport(&session, max_connections).await?;
+    let (transport, agent) = start_agent_transport(
+        &session,
+        max_connections,
+        udp_receive_window,
+        agent_udp_receive_window,
+    )
+    .await?;
     super::log_line(&logs, agent.summary());
     super::log_line(
         &logs,
@@ -659,11 +670,28 @@ async fn discover_agent(session: &client::Handle<SshClient>) -> Result<AgentCapa
 async fn start_agent_transport(
     session: &client::Handle<SshClient>,
     max_connections: usize,
+    udp_receive_window: Option<FlowWindow>,
+    agent_udp_receive_window: Option<FlowWindow>,
 ) -> Result<(Endpoint, AgentCapabilities), String> {
     let discovery = discover_agent(session).await?;
+    if agent_udp_receive_window.is_some() && (!discovery.flow_control || !discovery.udp_config) {
+        return Err("AGENT_INCOMPATIBLE: Для настройки окна отправки UDP обновите серверный агент или выберите окно сервера по умолчанию.".into());
+    }
+    if [udp_receive_window, agent_udp_receive_window]
+        .into_iter()
+        .flatten()
+        .any(|window| !discovery.flow_control || window.slots > discovery.max_udp_slots)
+    {
+        return Err(format!(
+            "AGENT_INCOMPATIBLE: Серверный агент не поддерживает выбранное окно UDP. Лимит агента — {} слотов.",
+            discovery.max_udp_slots
+        ));
+    }
     let transport = tokio::time::timeout(Duration::from_secs(10), async {
         let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-        let command = if discovery.flow_control {
+        let command = if agent_udp_receive_window.is_some() {
+            agent::UDP_CONFIG_COMMAND
+        } else if discovery.flow_control {
             agent::FLOW_CONTROL_COMMAND
         } else if discovery.diagnostics {
             agent::DIAGNOSTICS_COMMAND
@@ -671,11 +699,23 @@ async fn start_agent_transport(
             agent::START_COMMAND
         };
         channel.exec(true, command).await.map_err(|e| e.to_string())?;
-        Endpoint::start(channel.into_stream(), Role::Client, MuxConfig {
+        let mut stream = channel.into_stream();
+        if let Some(window) = agent_udp_receive_window {
+            agent::write_udp_window_request(&mut stream, window)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let transport = Endpoint::start(stream, Role::Client, MuxConfig {
             max_flows: max_connections,
-            udp_window: discovery.flow_control.then_some(secret_tunnel_mux::UDP_WINDOW),
+            udp_window: discovery
+                .flow_control
+                .then_some(udp_receive_window.unwrap_or(secret_tunnel_mux::UDP_WINDOW)),
             ..Default::default()
-        }).await
+        }).await?;
+        if agent_udp_receive_window.is_some_and(|window| transport.snapshot().peer_udp_window != Some(window)) {
+            return Err("Серверный агент вернул другое окно отправки UDP".into());
+        }
+        Ok::<_, String>(transport)
     }).await.map_err(|_| {
         "AGENT_START_TIMEOUT: SSH и ключ проверены; агент не начал STMUX003 за 10 секунд".to_string()
     })?.map_err(|error| {
@@ -706,7 +746,7 @@ pub fn diagnose_server(server: EmbeddedServer, pin: Option<String>) -> Result<St
                 },
             )
             .await?;
-            let result = start_agent_transport(&session, 64).await;
+            let result = start_agent_transport(&session, 64, None, None).await;
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "", "English")
                 .await;

@@ -1,8 +1,7 @@
-Secret Tunnel v0.3.2 adds a larger UDP flow window, more detailed transport diagnostics, and Android traffic breakdowns.
+Secret Tunnel v0.3.3 adds per-proxy UDP settings on Android.
 
-- Update both the embedded client and the Linux agent to use the 128 KiB, 128-slot UDP window. TCP and UDP share the existing session receive budget.
-- The journal distinguishes UDP byte and slot shortages, reports credit return timing, and separates IPv6 probes and cancellations from TCP failures.
-- The Android dashboard shows rates and session totals by app on Android 10 and later. The chart offers 1, 5, and 30 seconds, 1 minute, and the full session with peak timestamps.
-- A signed APK upgrade on a realme RMX3630 retained the SSH profile and nine selected apps. Larger UDP bursts still exhausted the byte window during the Instagram trial. See the [phone and controlled benchmark results](PERFORMANCE-0.3.2.md).
+- Open a proxy profile's advanced UDP settings to choose preset or custom receive windows for download and upload. Saved settings take effect on the next connection. The dashboard and journal show the applied values.
+- Update the Linux agent to v0.3.3 to customize the upload window. The agent validates the requested size and slot count when it starts an SSH session. Each connection has its own windows and receive budget.
+- A signed test APK was verified on a realme RMX3630. A controlled run over SSH transferred 8 MiB of TCP data and delivered all 528 UDP datagrams with different windows in the two directions. [Earlier profile benchmarks](PERFORMANCE-0.3.2.md).
 
 Packages include a signed Android APK, Windows setup and portable ZIP, macOS universal DMG and ZIP, and the Linux x86_64 agent archive. macOS per-app routing uses the separately installed ProxyBridge component.

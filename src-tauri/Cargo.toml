@@ -1,6 +1,6 @@
 [package]
 name = "secret-tunnel"
-version = "0.2.3"
+version = "0.3.0"
 description = "Desktop SSH SOCKS tunnel manager"
 authors = ["Secret Tunnel contributors"]
 edition = "2021"
@@ -11,7 +11,8 @@ embedded-ssh = ["dep:russh", "dep:tokio", "dep:secret-tunnel-mux"]
 
 [lib]
 name = "secret_tunnel_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop is linked into a Rust executable. Android JNI has its own crate.
+crate-type = ["rlib"]
 
 [[example]]
 name = "check_embedded"

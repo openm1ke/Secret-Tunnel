@@ -39,7 +39,9 @@ class RecoveryPolicy(private val maxFailures: Int = 8) {
             "authentication failed", "public key authentication", "permission denied",
             "unknown server key", "rejected the server host key", "host key verification failed",
             "stmux003 server agent required", "cannot load ssh key", "encrypted private key",
-            "not permitted", "не разрешил vpn"
+            "not permitted", "не разрешил vpn",
+            "agent_missing:", "agent_not_executable:", "agent_incompatible:",
+            "agent_invalid_response:", "agent_resource_limit:", "agent_check_failed:"
         ).any { it in message }
         nextAttemptAt = now + (1000L shl (failures - 1).coerceIn(0, 4)).coerceAtMost(15_000L)
     }

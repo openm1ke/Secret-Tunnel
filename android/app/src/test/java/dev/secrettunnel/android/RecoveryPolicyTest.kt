@@ -41,4 +41,10 @@ class RecoveryPolicyTest {
         assertTrue(policy.needsUser)
         assertEquals(RecoveryPolicy.Action.NEEDS_USER,policy.action(30000,false,false))
     }
+    @Test fun agentInstallationErrorsWaitForUserButTimeoutsCanRecover(){
+        for(code in listOf("AGENT_MISSING:","AGENT_NOT_EXECUTABLE:","AGENT_INCOMPATIBLE:","AGENT_INVALID_RESPONSE:","AGENT_RESOURCE_LIMIT:","AGENT_CHECK_FAILED:")){
+            val policy=RecoveryPolicy();policy.failed(code,0);assertTrue(code,policy.needsUser)
+        }
+        val policy=RecoveryPolicy();policy.failed("AGENT_CHECK_TIMEOUT:",0);assertFalse(policy.needsUser)
+    }
 }

@@ -218,7 +218,7 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         "receive_queue_bytes":stats.receive_queue_bytes,"receive_queue_peak":stats.receive_queue_peak,"receive_budget":stats.receive_budget,
         "send_queue_bytes":stats.send_queue_bytes,"send_queue_peak":stats.send_queue_peak,"send_budget":stats.send_budget,
         "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors});
-    let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
+    let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.agent_summary()),"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
 }
 
@@ -241,6 +241,43 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_probe(
         match result {
             Ok(pin) => json!({"fingerprint":pin}).to_string(),
             Err(e) => json!({"error":e}).to_string(),
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_checkServer(
+    mut env: JNIEnv,
+    _: JObject,
+    config: JString,
+) -> jstring {
+    let result = (|| -> Result<String, String> {
+        let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();
+        let cfg: Config = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        if cfg.host.trim().is_empty()
+            || cfg.user.trim().is_empty()
+            || cfg.port == 0
+            || cfg.host_key_sha256.is_empty()
+        {
+            return Err("Укажите сервер, ключ и подтверждённый отпечаток".into());
+        }
+        embedded_ssh::diagnose_server(
+            EmbeddedServer {
+                name: "Android".into(),
+                host: cfg.host,
+                port: cfg.port,
+                user: cfg.user,
+                key_path: cfg.key_path,
+                strict_host_key_checking: "yes".into(),
+            },
+            Some(cfg.host_key_sha256),
+        )
+    })();
+    output(
+        &mut env,
+        match result {
+            Ok(summary) => json!({"ok":true,"summary":summary}).to_string(),
+            Err(error) => json!({"ok":false,"error":error}).to_string(),
         },
     )
 }

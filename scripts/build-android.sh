@@ -32,7 +32,7 @@ if [[ "$ndk" == /mnt/* && -O "$ndk" ]] && { [[ ! -x "$llvm/aarch64-linux-android
 fi
 # Gradle also reads NDK metadata and launches objcopy when assembling release APKs.
 if [[ "$ndk" == /mnt/* && -O "$ndk" ]]; then
-    chmod u+r "$ndk/source.properties"
+    chmod u+rw "$ndk/source.properties"
     chmod u+rx "$llvm/llvm-objcopy" "$llvm/llvm-readelf"
 fi
 "$llvm/clang" --version >/dev/null
@@ -89,6 +89,7 @@ elif [[ -x "$work/gradle-local/bin/gradle" ]]; then gradle=("$work/gradle-local/
 else gradle=(bash "$repo/android/gradlew"); fi
 variant=${ANDROID_BUILD_TYPE:-debug}
 case "$variant" in debug) tasks=(:app:testDebugUnitTest :app:assembleDebug :app:lintDebug);; release) tasks=(:app:testReleaseUnitTest :app:assembleRelease :app:lintRelease);; *) echo 'ANDROID_BUILD_TYPE must be debug or release' >&2; exit 1;; esac
+if [[ ${ST_BUILD_TRAFFIC_PROBE:-0} == 1 ]]; then tasks+=(:traffic-probe:assembleDebug); fi
 "${gradle[@]}" -p "$repo/android" --no-daemon "${tasks[@]}"
 mkdir -p "$repo/artifacts/android"
 apk="$repo/artifacts/android/SecretTunnel-$variant.apk"

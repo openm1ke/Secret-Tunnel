@@ -68,6 +68,8 @@ jobs:
           mkdir -p artifacts/server artifacts/release
           cp udp-agent/target/x86_64-unknown-linux-musl/release/secret-tunnel-agent artifacts/server/secret-tunnel-agent-linux-x86_64
           cp scripts/install-server-agent.sh artifacts/server/install-server-agent.sh
+          cp udp-agent/test_echo.py artifacts/server/test_echo.py
+          sha256sum artifacts/server/secret-tunnel-agent-linux-x86_64 | cut -d ' ' -f 1 > artifacts/server/secret-tunnel-agent.sha256
           cp LICENSE artifacts/server/LICENSE.txt
           cp docs/SERVER-UDP-SETUP.md artifacts/server/README.md
           tar -czf "artifacts/release/SecretTunnel-$VERSION-server-linux-x86_64.tar.gz" -C artifacts/server .

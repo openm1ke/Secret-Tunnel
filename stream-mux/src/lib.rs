@@ -1,5 +1,6 @@
 //! Bounded, credit-controlled streams over one authenticated byte transport.
 //! Application consumption, rather than receipt from SSH, replenishes credit.
+pub mod agent;
 mod capacity;
 mod datagrams;
 pub use capacity::socket_capacity;

@@ -921,7 +921,7 @@ function App() {
                   </button>
                   <button disabled={busy !== null || !serverDraft.id} onClick={() => runAction("test", () => invoke<string>("test_server", { server: serverDraft }))}>
                     <Terminal size={16} />
-                    Проверить
+                    {config.settings.ssh_engine === "embedded" ? "Проверить SSH и агент" : "Проверить SSH"}
                   </button>
                   <button disabled={busy !== null || !serverDraft.id || sessionActive} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_server", { id: serverDraft.id });

@@ -1039,6 +1039,33 @@ fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 #[tauri::command(async)]
 fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<String, String> {
     validate_server(&server)?;
+    if load_config()?.settings.ssh_engine == "embedded" {
+        #[cfg(feature = "embedded-ssh")]
+        {
+            log_line(
+                &state.logs,
+                "Проверяем SSH, ключ и совместимость агента встроенным движком…",
+            );
+            let result = embedded_ssh::diagnose_server(
+                embedded_ssh::EmbeddedServer {
+                    name: server.name,
+                    host: server.host,
+                    port: server.port,
+                    user: server.user,
+                    key_path: expand_home(&server.key_path),
+                    strict_host_key_checking: server.strict_host_key_checking,
+                },
+                None,
+            );
+            match &result {
+                Ok(message) => log_line(&state.logs, message),
+                Err(error) => log_line(&state.logs, error),
+            }
+            return result;
+        }
+        #[cfg(not(feature = "embedded-ssh"))]
+        return Err("Встроенный SSH недоступен в этой сборке".into());
+    }
     log_line(
         &state.logs,
         format!(

@@ -2,6 +2,7 @@ use crate::udp_protocol;
 use russh::client;
 use russh::keys::known_hosts::{check_known_hosts_path, known_host_keys_path, learn_known_hosts};
 use russh::keys::{load_secret_key, ssh_key, PrivateKeyWithHashAlg};
+use secret_tunnel_mux::agent::{self, Capabilities as AgentCapabilities};
 pub use secret_tunnel_mux::Snapshot as TransportSnapshot;
 use secret_tunnel_mux::{Config as MuxConfig, DatagramBuffers, Endpoint, FlowKind, Role};
 use std::net::TcpListener;
@@ -13,6 +14,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
+#[cfg(test)]
+#[path = "agent_preflight_tests.rs"]
+mod agent_preflight_tests;
 #[path = "tls_target.rs"]
 mod tls_target;
 
@@ -51,9 +55,13 @@ pub struct EmbeddedTunnelHandle {
     outcome: Receiver<Result<(), String>>,
     ipv6_supported: Option<bool>,
     transport: Endpoint,
+    agent: AgentCapabilities,
 }
 
 impl EmbeddedTunnelHandle {
+    pub fn agent_summary(&self) -> String {
+        self.agent.summary()
+    }
     pub fn transport_stats(&self) -> TransportSnapshot {
         self.transport.snapshot()
     }
@@ -457,7 +465,7 @@ pub fn start_with_options_cancellable(
         let _ = outcome_tx.send(result);
     });
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(35);
+    let deadline = std::time::Instant::now() + Duration::from_secs(45);
     let readiness = loop {
         if cancelled() {
             break Err(mpsc::RecvTimeoutError::Disconnected);
@@ -475,6 +483,9 @@ pub fn start_with_options_cancellable(
         if cancelled() {
             return Err("Tunnel startup cancelled".into());
         }
+        if matches!(readiness, Err(mpsc::RecvTimeoutError::Timeout)) {
+            return Err("Embedded SSH/agent startup timed out after 45 seconds".into());
+        }
         return Err(outcome
             .try_recv()
             .ok()
@@ -482,7 +493,7 @@ pub fn start_with_options_cancellable(
             .unwrap_or_else(|| "Embedded SSH startup failed".into()));
     }
 
-    let (ipv6_supported, transport) = readiness.unwrap();
+    let (ipv6_supported, transport, agent) = readiness.unwrap();
     Ok(EmbeddedTunnelHandle {
         stop_tx,
         join: Some(join),
@@ -490,6 +501,7 @@ pub fn start_with_options_cancellable(
         outcome,
         ipv6_supported,
         transport,
+        agent,
     })
 }
 
@@ -498,7 +510,7 @@ async fn run_embedded_tunnel(
     server: EmbeddedServer,
     mut stop: tokio::sync::watch::Receiver<bool>,
     counters: Arc<TrafficCounters>,
-    ready: Sender<(Option<bool>, Endpoint)>,
+    ready: Sender<(Option<bool>, Endpoint, AgentCapabilities)>,
     logs: Arc<std::sync::Mutex<Vec<String>>>,
     options: EmbeddedOptions,
 ) -> Result<(), String> {
@@ -521,31 +533,9 @@ async fn run_embedded_tunnel(
     .await
     .map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
     let session = Arc::new(session);
-    let transport = tokio::time::timeout(Duration::from_secs(10), async {
-        let channel = session
-            .channel_open_session()
-            .await
-            .map_err(|e| e.to_string())?;
-        channel
-            .exec(
-                true,
-                "exec \"$HOME/.local/bin/secret-tunnel-agent\" --stdio-v3",
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        Endpoint::start(
-            channel.into_stream(),
-            Role::Client,
-            MuxConfig {
-                max_flows: max_connections,
-                ..Default::default()
-            },
-        )
-        .await
-    })
-    .await
-    .map_err(|_| "Server agent startup timed out".to_owned())?
-    .map_err(|error| format!("STMUX003 server agent required: {error}"))?;
+    super::log_line(&logs, "SSH и ключ проверены; проверяем серверный агент");
+    let (transport, agent) = start_agent_transport(&session, max_connections).await?;
+    super::log_line(&logs, agent.summary());
     super::log_line(
         &logs,
         format!(
@@ -586,7 +576,7 @@ async fn run_embedded_tunnel(
     };
     let buffers = DatagramBuffers::default();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
-    let _ = ready.send((ipv6_supported, transport.clone()));
+    let _ = ready.send((ipv6_supported, transport.clone(), agent));
     loop {
         if *stop.borrow() {
             transport.shutdown();
@@ -613,6 +603,113 @@ async fn run_embedded_tunnel(
             _ = transport.closed() => return Err(transport.error().unwrap_or_else(|| "Transport stopped".into())),
         }
     }
+}
+
+async fn discover_agent(session: &client::Handle<SshClient>) -> Result<AgentCapabilities, String> {
+    let mut channel = tokio::time::timeout(Duration::from_secs(4), session.channel_open_session())
+        .await
+        .map_err(|_| {
+            "AGENT_CHECK_TIMEOUT: SSH и ключ проверены; канал диагностики не ответил".to_string()
+        })?
+        .map_err(|e| format!("SSH agent channel: {e}"))?;
+    let result = tokio::time::timeout(Duration::from_secs(4), async {
+        channel
+            .exec(true, agent::QUERY_COMMAND)
+            .await
+            .map_err(|e| e.to_string())?;
+        // Noninteractive even with pre-metadata agents; no stdin is required.
+        channel.eof().await.map_err(|e| e.to_string())?;
+        let (mut stdout, mut stderr, mut exit) = (Vec::new(), Vec::new(), None);
+        while let Some(message) = channel.wait().await {
+            match message {
+                russh::ChannelMsg::Data { data } => {
+                    if stdout.len() + stderr.len() + data.len() > agent::OUTPUT_LIMIT {
+                        return Err(agent::invalid_response());
+                    }
+                    stdout.extend_from_slice(&data);
+                }
+                russh::ChannelMsg::ExtendedData { data, .. } => {
+                    if stdout.len() + stderr.len() + data.len() > agent::OUTPUT_LIMIT {
+                        return Err(agent::invalid_response());
+                    }
+                    stderr.extend_from_slice(&data);
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
+                russh::ChannelMsg::Close => break,
+                russh::ChannelMsg::Failure => {
+                    return Err(
+                        "AGENT_CHECK_FAILED: Сервер запретил запуск диагностики агента".into(),
+                    )
+                }
+                _ => {}
+            }
+        }
+        agent::parse(exit, &stdout, &stderr)
+    })
+    .await
+    .map_err(|_| {
+        "AGENT_CHECK_TIMEOUT: SSH и ключ проверены; агент не ответил за 4 секунды".to_string()
+    });
+    let _ = channel.close().await;
+    result?
+}
+
+async fn start_agent_transport(
+    session: &client::Handle<SshClient>,
+    max_connections: usize,
+) -> Result<(Endpoint, AgentCapabilities), String> {
+    let discovery = discover_agent(session).await?;
+    let transport = tokio::time::timeout(Duration::from_secs(10), async {
+        let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+        channel.exec(true, agent::START_COMMAND).await.map_err(|e| e.to_string())?;
+        Endpoint::start(channel.into_stream(), Role::Client, MuxConfig {
+            max_flows: max_connections, ..Default::default()
+        }).await
+    }).await.map_err(|_| {
+        "AGENT_START_TIMEOUT: SSH и ключ проверены; агент не начал STMUX003 за 10 секунд".to_string()
+    })?.map_err(|error| {
+        let incompatible = error.contains("STMUX003") || error.contains("Invalid peer resource");
+        if incompatible {
+            format!("AGENT_INCOMPATIBLE: SSH и ключ проверены. Требуется агент STMUX003 с TCP/UDP; обновите ~/.local/bin/secret-tunnel-agent. {error}")
+        } else {
+            format!("AGENT_START_FAILED: SSH и ключ проверены; соединение с агентом прервалось. {error}")
+        }
+    })?;
+    Ok((transport, discovery))
+}
+
+/// Authenticate and verify the data handshake without binding SOCKS or routes.
+pub fn diagnose_server(server: EmbeddedServer, pin: Option<String>) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let session = connect_ssh(
+                &server,
+                (server.host.as_str(), server.port),
+                EmbeddedOptions {
+                    host_key_sha256: pin,
+                    ..Default::default()
+                },
+            )
+            .await?;
+            let result = start_agent_transport(&session, 64).await;
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "", "English")
+                .await;
+            result.map(|(transport, discovery)| {
+                transport.shutdown();
+                format!(
+                    "SSH и ключ: OK. {}. Проверка STMUX003: OK; перехват не включался.",
+                    discovery.summary()
+                )
+            })
+        })
+        .await
+        .map_err(|_| "Проверка SSH/агента не завершилась за 30 секунд".to_string())?
+    })
 }
 
 async fn handshake<A: ToSocketAddrs>(

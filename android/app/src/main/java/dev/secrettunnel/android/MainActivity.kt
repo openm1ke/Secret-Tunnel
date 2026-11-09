@@ -24,6 +24,7 @@ class MainActivity:Activity() {
     private var importId=""
     private var pendingProxy=""
     private var checking=false
+    private var checkingDetail="Проверяем доступ к серверу…"
     private var pendingTrust=false
     private var nameField:EditText?=null
     private var hostField:EditText?=null
@@ -63,7 +64,7 @@ class MainActivity:Activity() {
                 val state=when{checking->"Проверка";pendingTrust->"Подтверждение";phase=="Работает"->"Подключено";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Ошибка";else->"Остановлен"}
                 update(badge,state);badge.setTextColor(when{state=="Подключено"->Palette.accent;state=="Ошибка"->Palette.error;TunnelVpnService.active||checking->Palette.warning;else->Palette.muted})
                 update(heroTitle,when{checking->"Проверяем сервер";pendingTrust->"Подтвердите ключ сервера";phase=="Работает"->"Туннель работает";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Не удалось подключиться";store.activeProxy==null->"Добавьте подключение";else->if(readinessAction()=="Подключить")"Готов к подключению" else "Настройте подключение"})
-                update(heroDetail,when{checking->"Получаем ключ SSH-сервера…";pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->"TCP и UDP выбранных приложений идут через туннель";phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);TunnelVpnService.active->TunnelVpnService.detail;else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
+                update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->"TCP и UDP выбранных приложений идут через туннель";phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);TunnelVpnService.active->TunnelVpnService.detail;else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
                 listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=!checking&&!pendingTrust&&!TunnelVpnService.active}
                 connectButton?.apply{val value=if(TunnelVpnService.active)"Остановить" else readinessAction();if(text.toString()!=value)text=value;isEnabled=!checking&&!pendingTrust&&phase!="Остановка";alpha=if(isEnabled)1f else .45f}
                 update(downSpeed,TrafficMeter.bytes(rate.down)+"/с");update(upSpeed,TrafficMeter.bytes(rate.up)+"/с")
@@ -191,7 +192,12 @@ class MainActivity:Activity() {
         },spaced(8));body.addView(keyCard,spaced(20))
         val trust=card();trust.addView(label("Подлинность сервера",17,true))
         trust.addView(label(if(validPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,Palette.muted).apply{setTextIsSelectable(true)},spaced(10))
-        trust.addView(button("Проверить сервер"){unlocked();saveServerForm();verifyServer(editingId){toast("Сервер доступен, ключ сохранён");render()}},spaced(14));body.addView(trust,spaced(12))
+        trust.addView(button("Проверить отпечаток"){unlocked();saveServerForm();verifyServer(editingId){toast("Сервер доступен, ключ сохранён");render()}},spaced(14))
+        trust.addView(button("Проверить SSH и агент"){
+            unlocked();saveServerForm();val id=editingId
+            require(SettingsStore(this,id).hasKey()){"Сначала импортируйте SSH-ключ"}
+            verifyServer(id){checkServerAgent(id)}
+        },spaced(8));body.addView(trust,spaced(12))
         body.addView(button("Сохранить сервер",true){unlocked();saveServerForm();navigate("servers")},spaced(20))
         if(server!=null)body.addView(button("Удалить сервер",danger=true){unlocked();confirmDelete("Удалить сервер ${server.name}?"){store.deleteServer(server.id);navigate("servers")}},spaced(8))
         formSnapshot=originalSignature
@@ -282,6 +288,7 @@ class MainActivity:Activity() {
     }
     private fun diagnostics():String=buildString{
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
+        lastStatus.optString("agent").takeIf{it.isNotBlank()&&it!="null"}?.let{append(it+"\n\n")}
         lastStatus.optJSONObject("transport")?.let { t->
             append("Транспорт v3 · SSH-каналов: ${t.optInt("ssh_channels")}\n")
             append("Соединения: ${t.optInt("active")} / ${t.optInt("limit")} · пик: ${t.optInt("peak")}\n")
@@ -299,16 +306,7 @@ class MainActivity:Activity() {
         if(file.isFile)java.io.RandomAccessFile(file,"r").use{f->val length=f.length();val size=length.coerceAtMost(8192).toInt();f.seek(length-size);val bytes=ByteArray(size);f.readFully(bytes);append(bytes.toString(Charsets.UTF_8))}
         if(logs==null||logs.length()==0)append("Событий пока нет")
     }
-    private fun friendlyError(raw:String):String {
-        val text=raw.lowercase()
-        return when {
-            "authentication failed" in text->"Сервер не принял SSH-ключ. Проверьте пользователя и ключ на экране «Серверы»."
-            "address already in use" in text||"os error 98" in text->"Локальный порт занят. Выберите другой на экране «Прокси»."
-            "unknown server key" in text||"rejected the server host key" in text->"Проверьте и подтвердите ключ сервера в его настройках."
-            "timed out" in text||"timeout" in text->"Сервер не ответил. Проверьте адрес, порт и подключение к интернету."
-            else->raw.take(240)
-        }
-    }
+    private fun friendlyError(raw:String)=ConnectionMessages.describe(raw)
     private fun readinessAction():String {
         val proxy=store.activeProxy?:return "Добавить прокси"
         val server=store.server(proxy.serverId)?:return "Добавить сервер"
@@ -335,7 +333,7 @@ class MainActivity:Activity() {
     private fun verifyServer(id:String,after:()->Unit){
         unlocked();require(!pendingTrust){"Проверка уже выполняется"}
         val server=store.server(id)?:error("Сервер не найден");require(server.host.isNotBlank()){"Укажите адрес сервера"}
-        val scoped=SettingsStore(this,id);val saved=scoped.fingerprint;checking=true
+        val scoped=SettingsStore(this,id);val saved=scoped.fingerprint;checkingDetail="Получаем ключ SSH-сервера…";checking=true
         Thread{
             val result=try{JSONObject(NativeBridge.probe(server.host,server.port))}catch(e:Exception){JSONObject().put("error",e.message)}
             runOnUiThread{
@@ -351,6 +349,25 @@ class MainActivity:Activity() {
                         .setNegativeButton("Отмена",null).setPositiveButton("Доверять"){_,_->proceed()}.setOnDismissListener{pendingTrust=false}.show()
                 }
             }
+        }.start()
+    }
+    private fun checkServerAgent(id:String){
+        val server=store.server(id)?:error("Сервер не найден")
+        val scoped=SettingsStore(this,id);val pin=scoped.fingerprint
+        require(validPin(pin)){"Сначала подтвердите отпечаток сервера"}
+        checkingDetail="Проверяем SSH, ключ и серверный агент…";checking=true
+        Thread{
+            var runtime:java.io.File?=null
+            val result=try{
+                runtime=java.io.File.createTempFile("agent-check-",".runtime",filesDir)
+                val bytes=scoped.decryptKey()
+                try{openFileOutput(runtime.name,MODE_PRIVATE).use{it.write(bytes)}}finally{bytes.fill(0)}
+                val config=JSONObject().put("host",server.host).put("port",server.port).put("user",server.user)
+                    .put("key_path",runtime.absolutePath).put("host_key_sha256",pin).put("socks_port",1080)
+                val response=JSONObject(NativeBridge.checkServer(config.toString()))
+                if(response.optBoolean("ok"))response.getString("summary") else friendlyError(response.optString("error","Не удалось проверить агент"))
+            }catch(error:Exception){error.message?:"Не удалось проверить SSH и агент"}finally{runtime?.delete()}
+            runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed)message(result)}
         }.start()
     }
     private fun enrollDevice(id:String){

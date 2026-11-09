@@ -1,12 +1,12 @@
 # TCP и UDP через один SSH-канал: транспорт v3
 
-Windows, macOS и Android используют общий `tunnel-core` и crate `stream-mux`. Встроенный SSH-движок открывает одно аутентифицированное SSH TCP-соединение и один exec-канал:
+Windows, macOS и Android используют общий `tunnel-core` и crate `stream-mux`. Встроенный движок открывает одно аутентифицированное SSH TCP-соединение. Он завершает короткий запрос возможностей агента и затем открывает один exec-канал данных.
 
 ```text
 Приложения → локальный SOCKS / Android TUN → STMUX003 → SSH → агент → адресаты
 ```
 
-Команда агента: `exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3`. TCP и UDP передаются внутри одного канала с отдельными идентификаторами. Ограничение OpenSSH MaxSessions больше не ограничивает число соединений приложений. Агент необходим для TCP и UDP; новый клиент отклоняет старый/отсутствующий агент до запуска Android VPN. Обновлять нужно обе стороны. System OpenSSH `ssh -D` остаётся отдельным TCP-only движком.
+Агент запускается командой `exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3`. TCP и UDP передаются внутри одного канала с отдельными идентификаторами. Клиент 0.3.0 требует capabilities schema 1 и STMUX003. System OpenSSH `ssh -D` остаётся отдельным TCP-only движком. [Диагностика агента](AGENT-PREFLIGHT-2026-11-09.md).
 
 ## Потоки, очереди и память
 

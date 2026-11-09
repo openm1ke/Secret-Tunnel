@@ -155,6 +155,12 @@ pub fn retryable(error: &str) -> bool {
         "invalid",
         "already occupied",
         "cannot bind",
+        "agent_missing:",
+        "agent_not_executable:",
+        "agent_incompatible:",
+        "agent_invalid_response:",
+        "agent_resource_limit:",
+        "agent_check_failed:",
     ]
     .iter()
     .any(|word| error.contains(word))
@@ -235,5 +241,8 @@ mod tests {
         assert!(!retryable("STMUX003 server agent required: old agent"));
         assert!(!retryable("Host key verification failed."));
         assert!(retryable("Connection reset by peer"));
+        assert!(!retryable("AGENT_MISSING: install agent"));
+        assert!(!retryable("AGENT_INCOMPATIBLE: STMUX003 required"));
+        assert!(retryable("AGENT_CHECK_TIMEOUT: check timed out"));
     }
 }

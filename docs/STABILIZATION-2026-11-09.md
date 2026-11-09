@@ -41,6 +41,8 @@ Desktop UI различает подключение, повторное под�
 
 ## Локальные сборки
 
+Эти результаты и SHA256 относятся к первой сборке стабилизации (`db6986f`). Рабочие пути APK/EXE пересобираются; актуальная следующая итерация описана в [отчёте preflight](AGENT-PREFLIGHT-2026-11-09.md).
+
 - `artifacts/android/SecretTunnel-debug.apk` — тестовый APK с debug-подписью, ARM64/x86_64. SHA256: `086c9bd502f9a51e171b1423cbaf17563f819aa74e754404e1546f3500e6bf74`.
 - `src-tauri/target/debug/secret-tunnel.exe` — Windows debug-клиент со встроенными web-ресурсами (`tauri/custom-protocol`), без зависимости от запущенного Vite. Проверена сборка; окно и реальный перехват в этой итерации не запускались. Это не новый подписанный установщик.
 - Логи финальных Windows проверок: `artifacts/stabilization-2026-11-09/`. Android unit/lint: `android/app/build/test-results/testDebugUnitTest/`, `android/app/build/reports/lint-results-debug.html`.

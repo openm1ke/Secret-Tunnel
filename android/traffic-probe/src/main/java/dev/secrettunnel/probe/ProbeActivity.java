@@ -119,6 +119,7 @@ public class ProbeActivity extends Activity {
                     stress(result,Math.max(1,Math.min(1024,getIntent().getIntExtra("udp_count",24))));
                     result.put("passed",result.getBoolean("passed")&&result.optBoolean("stress_passed"));
                 }
+                if(getIntent().getBooleanExtra("benchmark",false)) NetworkBenchmark.run(result);
             } catch (Exception error) {
                 try { result.put("passed", false); result.put("error", error.toString()); } catch (Exception ignored) { }
             }

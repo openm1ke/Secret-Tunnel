@@ -370,6 +370,31 @@ async fn late_close_subscriber_observes_cancel_without_another_event() {
 }
 
 #[tokio::test]
+async fn truncated_v3_frames_and_retired_protocols_are_rejected() {
+    use tokio::io::AsyncWriteExt;
+    for bytes in [
+        vec![0],
+        vec![0, 6, 5],
+        vec![0, 6, 5, 0, 0, 0, 1],
+        vec![0, 4, 5, 0, 0, 0, 1],
+    ] {
+        assert_eq!(
+            wire::read(&mut bytes.as_slice()).await.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+    for magic in [b"STUDP001", b"STUDP002"] {
+        let (mut peer, mut client) = tokio::io::duplex(64);
+        peer.write_all(magic).await.unwrap();
+        assert!(wire::handshake(&mut client, false, 64, 65536, 32)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("STMUX003"));
+    }
+}
+
+#[tokio::test]
 async fn abort_reclaims_blocked_relays_and_admission_in_both_directions() {
     use tokio::io::AsyncReadExt;
     for abort in [true, false] {

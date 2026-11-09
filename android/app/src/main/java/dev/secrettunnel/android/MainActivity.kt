@@ -41,6 +41,12 @@ class MainActivity:Activity() {
     private var downTotal:TextView?=null
     private var upTotal:TextView?=null
     private var chart:NetworkChart?=null
+    private var chartRange=ChartRange.MINUTE
+    private var chartPeaks:TextView?=null
+    private var appTrafficList:LinearLayout?=null
+    private var appTrafficEmpty:TextView?=null
+    private var appTrafficTitle:TextView?=null
+    private var appTrafficRows=linkedMapOf<Int, TextView>()
     private var logView:TextView?=null
     private var appCount:TextView?=null
     private var appEmpty:TextView?=null
@@ -69,7 +75,8 @@ class MainActivity:Activity() {
                 connectButton?.apply{val value=if(TunnelVpnService.active)"Остановить" else readinessAction();if(text.toString()!=value)text=value;isEnabled=!checking&&!pendingTrust&&phase!="Остановка";alpha=if(isEnabled)1f else .45f}
                 update(downSpeed,TrafficMeter.bytes(rate.down)+"/с");update(upSpeed,TrafficMeter.bytes(rate.up)+"/с")
                 update(downTotal,"Всего: "+TrafficMeter.bytes(rx.toDouble()));update(upTotal,"Всего: "+TrafficMeter.bytes(tx.toDouble()))
-                chart?.show(TunnelVpnService.traffic.snapshot(SystemClock.elapsedRealtime()));if(page=="logs")update(logView,diagnostics())
+                if(page=="home")refreshTraffic()
+                if(page=="logs")update(logView,diagnostics())
             }catch(e:Exception){update(heroDetail,e.message.orEmpty())}
             main.postDelayed(this,1000)
         }
@@ -78,6 +85,7 @@ class MainActivity:Activity() {
         super.onCreate(savedInstanceState);window.statusBarColor=Palette.background;window.navigationBarColor=Palette.background
         store=SettingsStore(this);selected.addAll(store.packages)
         page=savedInstanceState?.getString("page")?:"home";editingId=savedInstanceState?.getString("editingId").orEmpty()
+        chartRange=ChartRange.entries.firstOrNull{it.name==savedInstanceState?.getString("chartRange")}?:ChartRange.MINUTE
         importId=savedInstanceState?.getString("importId").orEmpty();pendingProxy=savedInstanceState?.getString("pendingProxy").orEmpty()
         searchQuery=savedInstanceState?.getString("search").orEmpty();formDraft=savedInstanceState?.getBundle("draft")
         listOf("enrollment-key.runtime","device-key.runtime").forEach{java.io.File(filesDir,it).delete()}
@@ -89,6 +97,7 @@ class MainActivity:Activity() {
     override fun onPause(){main.removeCallbacks(poll);super.onPause()}
     override fun onSaveInstanceState(out:Bundle){
         out.putString("page",page);out.putString("editingId",editingId);out.putString("importId",importId);out.putString("pendingProxy",pendingProxy);out.putString("search",searchQuery)
+        out.putString("chartRange",chartRange.name)
         if(page.endsWith("Editor"))out.putBundle("draft",Bundle().apply{putString("name",nameField?.text.toString());putString("host",hostField?.text.toString());putString("port",portField?.text.toString());putString("user",userField?.text.toString());putInt("serverPosition",serverSpinner?.selectedItemPosition?:0)})
         super.onSaveInstanceState(out)
     }
@@ -104,6 +113,7 @@ class MainActivity:Activity() {
     private fun navigate(destination:String){page=destination;formDraft=null;render()}
     private fun render(){
         heroTitle=null;heroDetail=null;connectButton=null;downSpeed=null;upSpeed=null;downTotal=null;upTotal=null;chart=null;logView=null
+        chartPeaks=null;appTrafficList=null;appTrafficEmpty=null;appTrafficTitle=null;appTrafficRows.clear()
         nameField=null;hostField=null;portField=null;userField=null;serverSpinner=null
         val root=column().apply{setBackgroundColor(Palette.background);isFocusableInTouchMode=true}
         val header=row().apply{setPadding(dp(20),dp(15),dp(20),dp(12));gravity=Gravity.CENTER_VERTICAL}
@@ -144,8 +154,76 @@ class MainActivity:Activity() {
         }
         metrics.addView(metric("↓  Загрузка",Palette.accent,true),LinearLayout.LayoutParams(0,-1,1f).apply{marginEnd=dp(6)})
         metrics.addView(metric("↑  Отправка",Palette.upload,false),LinearLayout.LayoutParams(0,-1,1f).apply{marginStart=dp(6)});body.addView(metrics,spaced(12))
-        val graph=card();graph.addView(label("Скорость за последнюю минуту",14,true));chart=NetworkChart(this).also{graph.addView(it,LinearLayout.LayoutParams(-1,dp(110)).apply{topMargin=dp(10)})};body.addView(graph,spaced(12))
+        val graph=card()
+        graph.addView(label("График скорости",14,true))
+        val period=Spinner(this).apply {
+            contentDescription="Период графика скорости"
+            minimumHeight=dp(48)
+            adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,ChartRange.entries.map{it.label})
+            setSelection(chartRange.ordinal)
+            onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
+                override fun onNothingSelected(parent:AdapterView<*>?){}
+                override fun onItemSelected(parent:AdapterView<*>?,view:View?,position:Int,id:Long){
+                    chartRange=ChartRange.entries[position]
+                    refreshTraffic()
+                }
+            }
+        }
+        graph.addView(period,LinearLayout.LayoutParams(-1,dp(48)))
+        chart=NetworkChart(this).also{graph.addView(it,LinearLayout.LayoutParams(-1,dp(126)))}
+        chartPeaks=label("",12,false,Palette.muted).also{graph.addView(it,spaced(8))}
+        body.addView(graph,spaced(12))
+        val apps=card()
+        appTrafficTitle=label("Трафик приложений",14,true).also{apps.addView(it)}
+        apps.addView(label("Скорость сейчас и объём за сеанс VPN",12,false,Palette.muted),spaced(5))
+        appTrafficEmpty=label("",12,false,Palette.muted).also{apps.addView(it,spaced(8))}
+        appTrafficList=column().also{apps.addView(it)}
+        body.addView(apps,spaced(12))
+        refreshTraffic()
         body.addView(button(if(store.packages.isEmpty())"Выбрать приложения" else "Выбрать приложения · ${store.packages.size}"){go("apps")},spaced(12))
+    }
+
+    private fun refreshTraffic() {
+        val window=TunnelVpnService.traffic.snapshot(chartRange)
+        chart?.show(window)
+        val wallOffset=System.currentTimeMillis()-SystemClock.elapsedRealtime()
+        fun peak(down:Boolean):String {
+            val point=window.points.maxByOrNull{if(down)it.rate.down else it.rate.up}?:return "—"
+            val rate=if(down)point.rate.down else point.rate.up
+            val time=TransportDiagnostics.timestamp(point.timeMillis+wallOffset)
+            return if(rate<=0) "—" else TrafficMeter.bytes(rate)+"/с · "+
+                if(chartRange==ChartRange.SECOND||chartRange==ChartRange.FIVE_SECONDS)time else time.substringBefore('.')
+        }
+        update(chartPeaks,"Пик ↓ ${peak(true)}\nПик ↑ ${peak(false)}")
+
+        val list=appTrafficList?:return
+        val entries=TunnelVpnService.appTraffic?.entries.orEmpty()
+        val active=if(TunnelVpnService.active)entries.count{it.uid>=0&&(it.rate.down>0||it.rate.up>0)} else 0
+        update(appTrafficTitle,if(active>0)"Трафик приложений · $active сейчас" else "Трафик приложений")
+        update(appTrafficEmpty,when {
+            Build.VERSION.SDK_INT<29 -> "Разбивка по приложениям доступна с Android 10."
+            entries.isNotEmpty() -> ""
+            TunnelVpnService.active -> "Ожидаем трафик выбранных приложений…"
+            else -> "Подключите туннель, чтобы увидеть трафик приложений."
+        })
+        appTrafficEmpty?.visibility=if(entries.isEmpty())View.VISIBLE else View.GONE
+        if(appTrafficRows.keys.toList()!=entries.map{it.uid}) {
+            list.removeAllViews()
+            appTrafficRows.clear()
+            for(entry in entries) {
+                val details=label("",12,false,Palette.muted)
+                list.addView(column().apply{
+                    addView(label(entry.name,14,true))
+                    addView(details,spaced(4))
+                },spaced(12))
+                appTrafficRows[entry.uid]=details
+            }
+        }
+        for(entry in entries) {
+            val rate=if(TunnelVpnService.active)entry.rate else TrafficMeter.Rate(0.0,0.0)
+            update(appTrafficRows[entry.uid],"↓ ${TrafficMeter.bytes(rate.down)}/с · ↑ ${TrafficMeter.bytes(rate.up)}/с\nЗа сеанс ↓ ${TrafficMeter.bytes(entry.down.toDouble())} · ↑ ${TrafficMeter.bytes(entry.up.toDouble())}")
+            appTrafficRows[entry.uid]?.setTextColor(if(rate.down>0||rate.up>0)Palette.text else Palette.muted)
+        }
     }
 
     private fun serversPage(){
@@ -294,14 +372,16 @@ class MainActivity:Activity() {
             append("Соединения: ${t.optInt("active")} / ${t.optInt("limit")} · пик: ${t.optInt("peak")}\n")
             append("Очереди: приём ${t.optLong("receive_queue_bytes")} / ${t.optLong("receive_budget")} B; отправка ${t.optLong("send_queue_bytes")} / ${t.optLong("send_budget")} B\n")
             append("UDP отброшено: ${t.optLong("udp_drops")} · отказов по лимиту: ${t.optLong("rejected")} · ошибок протокола: ${t.optLong("protocol_errors")}\n\n")
+            t.optJSONObject("diagnostics")?.let { append("Клиент\n" + TransportDiagnostics.describe(it) + "\n") }
             t.optJSONObject("server")?.let { server->
                 append("Отчёт сервера: соединений ${server.optInt("active")} / ${server.optInt("limit")} · пик ${server.optInt("peak")}\n")
                 append("Сервер: UDP отброшено ${server.optLong("udp_drops")} · отказов по лимиту ${server.optLong("rejected")}\n")
                 if(server.optString("last_udp_error").isNotBlank())append("UDP сервера: ${server.optString("last_udp_error")}\n")
+                server.optJSONObject("diagnostics")?.let { append(TransportDiagnostics.describe(it)) }
                 append("\n")
             }
         }
-        val logs=lastStatus.optJSONArray("logs");if(logs!=null)for(i in 0 until logs.length())append(logs.optString(i)+"\n")
+        val logs=lastStatus.optJSONArray("logs");if(logs!=null)for(i in 0 until logs.length())append(TransportDiagnostics.formatLog(logs.optString(i))+"\n")
         val file=java.io.File(filesDir,"tun.log")
         if(file.isFile)java.io.RandomAccessFile(file,"r").use{f->val length=f.length();val size=length.coerceAtMost(8192).toInt();f.seek(length-size);val bytes=ByteArray(size);f.readFully(bytes);append(bytes.toString(Charsets.UTF_8))}
         if(logs==null||logs.length()==0)append("Событий пока нет")

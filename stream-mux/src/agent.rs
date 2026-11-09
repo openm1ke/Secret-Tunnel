@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub const OUTPUT_LIMIT: usize = 8192;
 pub const QUERY_COMMAND: &str = r#"if [ ! -f "$HOME/.local/bin/secret-tunnel-agent" ]; then exit 200; fi; if [ ! -x "$HOME/.local/bin/secret-tunnel-agent" ]; then exit 201; fi; exec "$HOME/.local/bin/secret-tunnel-agent" --capabilities"#;
 pub const START_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3"#;
+pub const DIAGNOSTICS_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-diagnostics"#;
+pub const FLOW_CONTROL_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-flow-control"#;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Capabilities {
@@ -15,6 +17,10 @@ pub struct Capabilities {
     pub tcp: bool,
     pub udp: bool,
     pub max_flows: usize,
+    #[serde(default)]
+    pub diagnostics: bool,
+    #[serde(default)]
+    pub flow_control: bool,
 }
 impl Capabilities {
     pub fn current(version: &str, max_flows: usize) -> Self {
@@ -27,6 +33,8 @@ impl Capabilities {
             tcp: true,
             udp: true,
             max_flows,
+            diagnostics: false,
+            flow_control: false,
         }
     }
     pub fn validate(&self) -> Result<(), String> {

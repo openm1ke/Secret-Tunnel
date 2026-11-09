@@ -45,35 +45,30 @@ class TrafficMeter {
     }
 }
 
-data class TrafficPoint(val timeMillis:Long,val rate:TrafficMeter.Rate)
-class TrafficHistory {
-    private var meter=TrafficMeter()
-    private val points=ArrayDeque<TrafficPoint>()
-    @Synchronized fun clear(){meter=TrafficMeter();points.clear()}
-    @Synchronized fun sample(now:Long,rx:Long,tx:Long){points.addLast(TrafficPoint(now,meter.sample(now,rx,tx)));trim(now)}
-    private fun trim(now:Long){while(points.isNotEmpty()&&(now-points.first().timeMillis>60000||points.size>60))points.removeFirst()}
-    @Synchronized fun snapshot(now:Long):List<TrafficPoint>{trim(now);return points.toList()}
-}
-
 class NetworkChart(context:Context):View(context) {
-    private var points=listOf<TrafficPoint>()
+    private var window=TrafficWindow(0,0,emptyList())
     private val paint=Paint(Paint.ANTI_ALIAS_FLAG)
-    fun show(history:List<TrafficPoint>){points=history;invalidate()}
+    fun show(history:TrafficWindow) {
+        if(window==history)return
+        window=history
+        invalidate()
+    }
     override fun onDraw(canvas:Canvas) {
         super.onDraw(canvas)
+        val points=window.points
         val density=resources.displayMetrics.density
-        val left=4*density;val top=24*density;val bottom=height-22*density
+        val left=4*density;val right=width-4*density;val top=24*density;val bottom=height-22*density
         val peak=points.maxOfOrNull{max(it.rate.down,it.rate.up)}?.coerceAtLeast(1024.0)?:1024.0
         paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=Palette.muted
         canvas.drawText(TrafficMeter.bytes(peak)+"/с",left,13*density,paint)
         paint.color=Palette.border;paint.strokeWidth=density
-        for(i in 0..2){val y=top+(bottom-top)*i/2;canvas.drawLine(left,y,width.toFloat(),y,paint)}
+        for(i in 0..2){val y=top+(bottom-top)*i/2;canvas.drawLine(left,y,right,y,paint)}
         fun line(down:Boolean,color:Int) {
             if(points.size<2)return
             val path=Path()
-            val now=android.os.SystemClock.elapsedRealtime()
+            val span=(window.end-window.start).coerceAtLeast(1)
             points.forEachIndexed{i,p->
-                val x=left+((p.timeMillis-(now-60000))/60000f).coerceIn(0f,1f)*(width-left)
+                val x=left+((p.timeMillis-window.start).toFloat()/span).coerceIn(0f,1f)*(right-left)
                 val y=(bottom-(if(down)p.rate.down else p.rate.up)/peak*(bottom-top)).toFloat()
                 if(i==0)path.moveTo(x,y)else path.lineTo(x,y)
             }
@@ -82,8 +77,12 @@ class NetworkChart(context:Context):View(context) {
         }
         line(true,Palette.accent);line(false,Palette.upload)
         paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=Palette.muted
-        canvas.drawText("−60 с",left,height-3*density,paint)
-        canvas.drawText("Сейчас",width-paint.measureText("Сейчас"),height-3*density,paint)
+        if(points.isNotEmpty()) {
+            val elapsed=(window.end-window.start)/1000
+            val label=if(elapsed>=60) "−${elapsed/60} мин ${elapsed%60} с" else "−$elapsed с"
+            canvas.drawText(label,left,height-3*density,paint)
+            canvas.drawText("Последний замер",right-paint.measureText("Последний замер"),height-3*density,paint)
+        }
     }
 }
 

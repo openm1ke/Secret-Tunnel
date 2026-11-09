@@ -8,6 +8,7 @@ import android.os.*
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TunnelVpnService : VpnService() {
@@ -17,6 +18,8 @@ class TunnelVpnService : VpnService() {
         @Volatile var detail = ""
         @Volatile var active = false
         val traffic=TrafficHistory()
+        @Volatile internal var appTraffic: AppTrafficAccounting? = null
+            private set
         private const val CHANNEL = "ssh-tunnel"
         private const val NOTICE = 1080
     }
@@ -24,12 +27,16 @@ class TunnelVpnService : VpnService() {
     external fun TProxyStopService(): Boolean
     external fun TProxyIsRunning(): Boolean
     external fun TProxyGetStats(): LongArray
+    external fun TProxySetAccounting(enabled: Boolean)
+    external fun TProxyDrainTraffic(): ByteArray?
     private val worker = Executors.newSingleThreadExecutor()
+    private val sampling = Executors.newSingleThreadScheduledExecutor()
     private val stopping = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private var tun: ParcelFileDescriptor? = null
     private val main = Handler(Looper.getMainLooper())
     private val recovery=RecoveryPolicy()
+    private val diagnostics = TransportDiagnostics.Sampler()
     private var engineIpv6:Boolean?=null
     private var engineCapacity=0
     private var session:TunnelSession?=null
@@ -43,7 +50,9 @@ class TunnelVpnService : VpnService() {
                     val nativeLog=File(filesDir,"tun.log")
                     if(nativeLog.length()>1_048_576)java.io.RandomAccessFile(nativeLog,"rw").use{it.setLength(0)}
                     val status=JSONObject(NativeBridge.status())
-                    traffic.sample(SystemClock.elapsedRealtime(),status.optLong("rx"),status.optLong("tx"))
+                    if (status.optBoolean("running")) {
+                        status.optJSONObject("transport")?.let { diagnostics.sample(SystemClock.elapsedRealtime(), it) }
+                    }
                     when(recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running"),TProxyIsRunning())){
                         RecoveryPolicy.Action.RECONNECT_SSH->{
                             recoveryAttempted=true
@@ -83,6 +92,7 @@ class TunnelVpnService : VpnService() {
         if (!started.compareAndSet(false, true)) return START_NOT_STICKY
         recovery.reset()
         traffic.clear()
+        appTraffic = null
         stopping.set(false); active = true; phase = "Подключение"; detail = "Проверка SSH-сервера"
         val notification = notification()
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -99,7 +109,20 @@ class TunnelVpnService : VpnService() {
                 connectSsh()
                 if (stopping.get()) return@execute
                 startPacketEngine()
-                if(!stopping.get())markReady()
+                if(!stopping.get()){
+                    val accounting = if (Build.VERSION.SDK_INT >= 29) AppTrafficAccounting(this, packages) else null
+                    appTraffic = accounting
+                    TProxySetAccounting(accounting != null)
+                    sampling.scheduleWithFixedDelay({
+                        if (!stopping.get()) {
+                            val now = SystemClock.elapsedRealtime()
+                            val (rx, tx) = NativeBridge.trafficTotals()
+                            traffic.sample(now, rx, tx)
+                            if (accounting != null) accounting.sample(now, TProxyDrainTraffic() ?: ByteArray(0))
+                        }
+                    }, 0, 250, TimeUnit.MILLISECONDS)
+                    markReady()
+                }
                 main.postDelayed(monitor, 1500)
             } catch (error: Exception) {
                 if(!stopping.get()){phase = "Ошибка"; detail = error.message.orEmpty()}
@@ -158,7 +181,7 @@ class TunnelVpnService : VpnService() {
               task-stack-size: 65536
               tcp-buffer-size: 65536
               max-session-count: $capacity
-              connect-timeout: 10000
+              connect-timeout: 14000
               tcp-read-write-timeout: 300000
               udp-read-write-timeout: 60000
               log-file: '${File(filesDir, "tun.log").absolutePath}'
@@ -204,7 +227,9 @@ class TunnelVpnService : VpnService() {
     private fun notifyState() { if (active) getSystemService(NotificationManager::class.java).notify(NOTICE, notification()) }
     private fun cleanup() {
         main.removeCallbacks(monitor)
+        sampling.shutdownNow()
         TProxyStopService() // join native reader BEFORE closing its borrowed fd
+        TProxySetAccounting(false)
         tun?.close(); tun = null;engineIpv6=null;engineCapacity=0
         NativeBridge.stop()
         File(filesDir, "ssh-key.runtime").delete()
@@ -221,6 +246,7 @@ class TunnelVpnService : VpnService() {
     override fun onDestroy() {
         if (active && !stopping.get()) stopAsync()
         worker.shutdown()
+        sampling.shutdownNow()
         super.onDestroy()
     }
 }

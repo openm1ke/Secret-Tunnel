@@ -25,7 +25,7 @@ async fn server_banner_waits_for_acceptance_even_with_a_busy_control_queue() {
     };
     let incoming = server.accept().await.unwrap().flow;
     for _ in 0..128 {
-        assert!(server.publish_stats());
+        assert!(server.publish_stats(false));
     }
     incoming.accept().unwrap();
     incoming
@@ -97,20 +97,123 @@ async fn udp_overload_is_counted_and_does_not_retain_unbounded_packets() {
     }
     assert!(!sender.try_send_datagram(vec![1]).unwrap());
     assert_eq!(client.snapshot().udp_drops, 1);
+    assert_eq!(client.snapshot().diagnostics.udp_flow_credit, 1);
+    assert_eq!(client.snapshot().diagnostics.udp_credit_slots, 1);
     drop(incoming.recv().await.unwrap().unwrap());
     for _ in 0..100 {
-        if sender.state.window.counts.lock().unwrap().1 > 0 {
+        if sender.state.window.counts.lock().unwrap().slots > 0 {
             break;
         }
         tokio::task::yield_now().await;
     }
     assert!(sender.try_send_datagram(vec![3]).unwrap());
+    assert!(client.snapshot().diagnostics.udp_credit_return.samples > 0);
+}
+
+#[tokio::test]
+async fn udp_window_is_separate_and_byte_credit_exhaustion_is_reported() {
+    let config = Config {
+        max_flows: 4,
+        udp_window: Some(FlowWindow {
+            bytes: 131072,
+            slots: 64,
+        }),
+        ..Default::default()
+    };
+    let (client, server) = pair(config).await;
+    assert_eq!(client.inner.peer_limits.window(FlowKind::Tcp).bytes, 65536);
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Udp, vec![]).await.unwrap() })
+    };
+    let mut receiver = server.accept().await.unwrap().flow;
+    receiver.accept().unwrap();
+    let flow = opening.await.unwrap();
+    let sender = flow.sender();
+    for _ in 0..4 {
+        assert!(sender.try_send_datagram(vec![7; 32768]).unwrap());
+    }
+    assert!(!sender.try_send_datagram(vec![7]).unwrap());
+    let report = client.snapshot().diagnostics;
+    assert_eq!(report.udp_tx_attempts, 5);
+    assert_eq!(report.udp_credit_bytes, 1);
+    assert_eq!(report.udp_credit_slots, 0);
+    let received = receiver.recv().await.unwrap().unwrap();
+    assert_eq!(received.len(), 32768);
+    assert!(server.snapshot().diagnostics.udp_received > 0);
+    assert_eq!(server.snapshot().protocol_errors, 0);
+}
+
+#[tokio::test]
+async fn larger_udp_windows_share_the_original_session_budget() {
+    let (client, server) = pair(Config {
+        max_flows: 4,
+        udp_window: Some(UDP_WINDOW),
+        ..Default::default()
+    })
+    .await;
+    let mut flows = Vec::new();
+    for kind in [FlowKind::Udp, FlowKind::Tcp, FlowKind::Tcp] {
+        let (opened, accepted) = tokio::join!(client.open(kind, vec![]), async {
+            let flow = server.accept().await.unwrap().flow;
+            flow.accept().unwrap();
+            flow
+        });
+        flows.push((opened.unwrap(), accepted));
+    }
+    assert_eq!(server.snapshot().receive_budget, 4 * 65536);
+    assert_eq!(client.inner.receive_bytes.available_permits(), 0);
+    assert_eq!(
+        client.open(FlowKind::Tcp, vec![]).await.err().unwrap(),
+        "Receive buffer budget reached"
+    );
+    drop(flows.pop());
+    assert_eq!(client.inner.receive_bytes.available_permits(), 65536);
+    let (opened, _) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    assert!(opened.is_ok());
+}
+
+#[tokio::test]
+async fn tagged_probe_and_cancelled_setup_do_not_increment_tcp_errors() {
+    let (client, server) = pair(Config {
+        udp_window: Some(UDP_WINDOW),
+        ..Default::default()
+    })
+    .await;
+    let probe = {
+        let client = client.clone();
+        tokio::spawn(async move { client.probe_tcp(vec![1]).await })
+    };
+    let incoming = server.accept().await.unwrap().flow;
+    incoming.record_tcp(TcpStage::Connect, Duration::ZERO, Err("unreachable"));
+    incoming.reject("unreachable");
+    assert!(probe.await.unwrap().is_err());
+    for endpoint in [&client, &server] {
+        let report = endpoint.snapshot().diagnostics;
+        assert_eq!(report.tcp_errors, 0);
+        assert_eq!(report.tcp_probes, 1);
+        assert_eq!(report.tcp_probe_errors, 1);
+        assert!(report.last_tcp.is_none());
+    }
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Tcp, vec![1]).await })
+    };
+    drop(server.accept().await.unwrap().flow);
+    assert!(opening.await.unwrap().is_err());
+    let report = client.snapshot().diagnostics;
+    assert_eq!(report.tcp_cancelled, 1);
+    assert_eq!(report.tcp_errors, 0);
 }
 
 #[tokio::test]
 async fn session_statistics_do_not_need_an_application_flow() {
     let (client, server) = pair(Config::default()).await;
-    assert!(server.publish_stats());
+    assert!(server.publish_stats(false));
     for _ in 0..100 {
         if client.snapshot().peer.is_some() {
             break;
@@ -121,6 +224,7 @@ async fn session_statistics_do_not_need_an_application_flow() {
     assert_eq!(peer.active, 0);
     assert_eq!(peer.limit, 1024);
     assert_eq!(peer.receive_budget, 64 * 1024 * 1024);
+    assert!(peer.diagnostics.is_none());
     assert!(Frame {
         kind: Kind::Data,
         id: 0,
@@ -128,6 +232,48 @@ async fn session_statistics_do_not_need_an_application_flow() {
     }
     .encode(&mut Vec::new())
     .is_err());
+}
+
+#[tokio::test]
+async fn diagnostic_report_preserves_remote_error_and_drop_causes() {
+    let (client, server) = pair(Config::default()).await;
+    let opening = {
+        let client = client.clone();
+        tokio::spawn(async move { client.open(FlowKind::Tcp, vec![1]).await })
+    };
+    let incoming = server.accept().await.unwrap().flow;
+    let id = incoming.id();
+    incoming.record_tcp(
+        TcpStage::Connect,
+        Duration::from_millis(240),
+        Err("refused"),
+    );
+    incoming
+        .sender()
+        .note_udp_failure(UdpFailure::Dns, "DNS timeout");
+    incoming.reject("refused");
+    assert_eq!(opening.await.unwrap().err().unwrap(), "refused");
+    assert!(server.publish_stats(true));
+    let peer = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(peer) = client.snapshot().peer {
+                break peer;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(peer.udp_drops, 1);
+    assert_eq!(peer.last_udp_error, "DNS timeout");
+    let report = peer.diagnostics.unwrap();
+    assert_eq!(report.udp_dns, 1);
+    assert_eq!(report.tcp_errors, 1);
+    let event = report.last_tcp.unwrap();
+    assert_eq!(event.flow, id);
+    assert_eq!(event.elapsed_ms, 240);
+    assert_eq!(event.outcome, "refused");
+    assert_eq!(client.snapshot().diagnostics.last_tcp.unwrap().flow, id);
 }
 
 async fn pair(config: Config) -> (Endpoint, Endpoint) {
@@ -304,9 +450,20 @@ async fn excessive_peer_data_is_rejected_before_exceeding_receive_budget() {
     use tokio::io::AsyncWriteExt;
     let (mut attacker, server_io) = tokio::io::duplex(131072);
     let server = tokio::spawn(Endpoint::start(server_io, Role::Server, Config::default()));
-    wire::handshake(&mut attacker, false, 1024, 65536, 32)
-        .await
-        .unwrap();
+    wire::handshake(
+        &mut attacker,
+        false,
+        wire::Limits {
+            flows: 1024,
+            tcp: FlowWindow {
+                bytes: 65536,
+                slots: 32,
+            },
+            udp: None,
+        },
+    )
+    .await
+    .unwrap();
     let server = server.await.unwrap().unwrap();
     let mut bytes = Vec::new();
     Frame {
@@ -386,11 +543,22 @@ async fn truncated_v3_frames_and_retired_protocols_are_rejected() {
     for magic in [b"STUDP001", b"STUDP002"] {
         let (mut peer, mut client) = tokio::io::duplex(64);
         peer.write_all(magic).await.unwrap();
-        assert!(wire::handshake(&mut client, false, 64, 65536, 32)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("STMUX003"));
+        assert!(wire::handshake(
+            &mut client,
+            false,
+            wire::Limits {
+                flows: 64,
+                tcp: FlowWindow {
+                    bytes: 65536,
+                    slots: 32
+                },
+                udp: None,
+            }
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("STMUX003"));
     }
 }
 

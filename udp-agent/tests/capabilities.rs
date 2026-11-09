@@ -20,6 +20,8 @@ async fn capabilities_exit_without_stdin_eof_and_match_the_shared_contract() {
     assert!(output.stderr.is_empty());
     let caps = agent::parse(Some(0), &output.stdout, &output.stderr).unwrap();
     assert_eq!(caps.protocols, vec![3]);
+    assert!(caps.diagnostics);
+    assert!(caps.flow_control);
     assert_eq!(caps.agent_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(caps.arch, std::env::consts::ARCH);
     assert!(caps.max_flows >= 32);

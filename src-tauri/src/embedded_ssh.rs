@@ -551,7 +551,7 @@ async fn run_embedded_tunnel(
             matches!(
                 tokio::time::timeout(
                     Duration::from_secs(3),
-                    transport.open(FlowKind::Tcp, target)
+                transport.probe_tcp(target)
                 )
                 .await,
                 Ok(Ok(_))
@@ -595,7 +595,9 @@ async fn run_embedded_tunnel(
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers).await {
-                        super::log_line(&logs, format!("SOCKS connection: {error}"));
+                        if !secret_tunnel_mux::is_flow_cancellation(&error) {
+                            super::log_line(&logs, format!("SOCKS connection: {error}"));
+                        }
                     }
                 });
             }
@@ -661,9 +663,18 @@ async fn start_agent_transport(
     let discovery = discover_agent(session).await?;
     let transport = tokio::time::timeout(Duration::from_secs(10), async {
         let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-        channel.exec(true, agent::START_COMMAND).await.map_err(|e| e.to_string())?;
+        let command = if discovery.flow_control {
+            agent::FLOW_CONTROL_COMMAND
+        } else if discovery.diagnostics {
+            agent::DIAGNOSTICS_COMMAND
+        } else {
+            agent::START_COMMAND
+        };
+        channel.exec(true, command).await.map_err(|e| e.to_string())?;
         Endpoint::start(channel.into_stream(), Role::Client, MuxConfig {
-            max_flows: max_connections, ..Default::default()
+            max_flows: max_connections,
+            udp_window: discovery.flow_control.then_some(secret_tunnel_mux::UDP_WINDOW),
+            ..Default::default()
         }).await
     }).await.map_err(|_| {
         "AGENT_START_TIMEOUT: SSH и ключ проверены; агент не начал STMUX003 за 10 секунд".to_string()
@@ -986,12 +997,16 @@ async fn handle_socks_client(
         }
         counters.add_tx(preface.len() as u64);
     }
-    secret_tunnel_mux::relay(&mut flow, &mut stream, |direction, count| match direction {
+    let relay_started = std::time::Instant::now();
+    let result = secret_tunnel_mux::relay(&mut flow, &mut stream, |direction, count| match direction {
         secret_tunnel_mux::Direction::Upload => counters.add_tx(count as u64),
         secret_tunnel_mux::Direction::Download => counters.add_rx(count as u64),
     })
-    .await?;
-    Ok(())
+    .await;
+    if let Err(error) = &result {
+        flow.record_tcp(secret_tunnel_mux::TcpStage::Relay, relay_started.elapsed(), Err(error));
+    }
+    result
 }
 
 #[derive(Clone, Debug)]

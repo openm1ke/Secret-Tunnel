@@ -1,3 +1,4 @@
+use crate::{FlowKind, FlowWindow};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -19,6 +20,7 @@ pub enum Kind {
     Credit = 8,
     Abort = 9,
     Stats = 10,
+    ProbeTcp = 11,
 }
 impl TryFrom<u8> for Kind {
     type Error = io::Error;
@@ -34,6 +36,7 @@ impl TryFrom<u8> for Kind {
             8 => Self::Credit,
             9 => Self::Abort,
             10 => Self::Stats,
+            11 => Self::ProbeTcp,
             _ => return Err(invalid("Unknown frame type")),
         })
     }
@@ -87,39 +90,63 @@ pub async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Frame> {
     Ok(Frame { kind, id, data })
 }
 
-pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+#[derive(Debug)]
+pub(crate) struct Limits {
+    pub(crate) flows: usize,
+    pub(crate) tcp: FlowWindow,
+    pub(crate) udp: Option<FlowWindow>,
+}
+
+impl Limits {
+    pub(crate) fn window(&self, kind: FlowKind) -> FlowWindow {
+        match kind {
+            FlowKind::Tcp => self.tcp,
+            FlowKind::Udp => self.udp.unwrap_or(self.tcp),
+        }
+    }
+}
+
+pub(crate) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     server: bool,
-    flows: u32,
-    bytes: u32,
-    slots: u32,
-) -> io::Result<(u32, u32, u32)> {
-    let mut hello = Vec::with_capacity(20);
+    local: Limits,
+) -> io::Result<Limits> {
+    let mut hello = Vec::with_capacity(28);
     hello.extend_from_slice(MAGIC);
-    for value in [flows, bytes, slots] {
-        hello.extend_from_slice(&value.to_be_bytes());
+    hello.extend_from_slice(&(local.flows as u32).to_be_bytes());
+    for window in std::iter::once(local.tcp).chain(local.udp) {
+        hello.extend_from_slice(&(window.bytes as u32).to_be_bytes());
+        hello.extend_from_slice(&(window.slots as u32).to_be_bytes());
     }
     if server {
         stream.write_all(&hello).await?;
         stream.flush().await?;
     }
-    let mut peer = [0; 20];
+    let mut peer = [0; 28];
     stream.read_exact(&mut peer[..8]).await?;
     if &peer[..8] != MAGIC {
         return Err(invalid("Server agent needs STMUX003; update the agent"));
     }
-    stream.read_exact(&mut peer[8..]).await?;
+    stream.read_exact(&mut peer[8..hello.len()]).await?;
+    let read = |offset| u32::from_be_bytes(peer[offset..offset + 4].try_into().unwrap()) as usize;
+    let read_window = |offset| FlowWindow {
+        bytes: read(offset),
+        slots: read(offset + 4),
+    };
+    let remote = Limits {
+        flows: read(8),
+        tcp: read_window(12),
+        udp: local.udp.map(|_| read_window(20)),
+    };
+    if !(1..=8192).contains(&remote.flows)
+        || !remote.tcp.valid()
+        || remote.udp.is_some_and(|window| !window.valid())
+    {
+        return Err(invalid("Invalid peer resource limits"));
+    }
     if !server {
         stream.write_all(&hello).await?;
         stream.flush().await?;
     }
-    let read = |offset| u32::from_be_bytes(peer[offset..offset + 4].try_into().unwrap());
-    let (flows, bytes, slots) = (read(8), read(12), read(16));
-    if !(1..=8192).contains(&flows)
-        || !(65536..=1048576).contains(&bytes)
-        || !(4..=128).contains(&slots)
-    {
-        return Err(invalid("Invalid peer resource limits"));
-    }
-    Ok((flows, bytes, slots))
+    Ok(remote)
 }

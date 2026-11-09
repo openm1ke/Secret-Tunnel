@@ -212,14 +212,31 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         .map(|t| t.transport_stats())
         .or_else(|| s.transport.clone())
         .unwrap_or_default();
-    let peer=stats.peer.as_ref().map(|p|json!({"active":p.active,"peak":p.peak,"limit":p.limit,"rejected":p.rejected,"udp_drops":p.udp_drops,"last_udp_error":p.last_udp_error,"protocol_errors":p.protocol_errors,
+    let peer=stats.peer.as_ref().map(|p|json!({"active":p.active,"peak":p.peak,"limit":p.limit,"rejected":p.rejected,"udp_drops":p.udp_drops,"last_udp_error":p.last_udp_error,"protocol_errors":p.protocol_errors,"diagnostics":p.diagnostics,
         "receive_queue_bytes":p.receive_queue_bytes,"receive_queue_peak":p.receive_queue_peak,"receive_budget":p.receive_budget,"send_queue_bytes":p.send_queue_bytes,"send_queue_peak":p.send_queue_peak,"send_budget":p.send_budget}));
     let transport = json!({"version":3,"ssh_channels":if s.tunnel.is_some()&&s.error.is_empty(){1}else{0},"active":stats.active,"peak":stats.peak,"limit":stats.limit,"rejected":stats.rejected,"server":peer,
         "receive_queue_bytes":stats.receive_queue_bytes,"receive_queue_peak":stats.receive_queue_peak,"receive_budget":stats.receive_budget,
         "send_queue_bytes":stats.send_queue_bytes,"send_queue_peak":stats.send_queue_peak,"send_budget":stats.send_budget,
-        "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors});
+        "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors,"diagnostics":stats.diagnostics});
     let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.agent_summary()),"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_trafficTotals(
+    env: JNIEnv,
+    _: JObject,
+) -> jni::sys::jlongArray {
+    let totals = {
+        let s = state().lock().unwrap();
+        let current = s.tunnel.as_ref().map(|t| t.traffic_totals()).unwrap_or_default();
+        [s.totals.0.saturating_add(current.0) as i64, s.totals.1.saturating_add(current.1) as i64]
+    };
+    let Ok(array) = env.new_long_array(2) else { return std::ptr::null_mut() };
+    if env.set_long_array_region(&array, 0, &totals).is_err() {
+        return std::ptr::null_mut();
+    }
+    array.into_raw()
 }
 
 #[no_mangle]

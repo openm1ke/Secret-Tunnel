@@ -9,6 +9,6 @@ pub fn log_line(logs: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: impl
         if logs.len() >= 300 {
             logs.remove(0);
         }
-        logs.push(line.into());
+        logs.push(format!("[{}] {}", secret_tunnel_mux::unix_millis(), line.into()));
     }
 }

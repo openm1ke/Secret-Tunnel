@@ -19,7 +19,7 @@ where
     let upload = async {
         let mut buffer = vec![0; TCP_CHUNK];
         loop {
-            let count = read.read(&mut buffer).await.map_err(|e| e.to_string())?;
+            let count = read.read(&mut buffer).await.map_err(|e| format!("socket read: {e}"))?;
             if count == 0 {
                 sender.eof().await?;
                 return Ok::<_, String>(());
@@ -30,12 +30,12 @@ where
     };
     let download = async {
         while let Some(packet) = flow.recv().await? {
-            write.write_all(&packet).await.map_err(|e| e.to_string())?;
+            write.write_all(&packet).await.map_err(|e| format!("socket write: {e}"))?;
             counted(Direction::Download, packet.len());
             // Drop/credit happens after write_all, never upon wire receipt.
             drop(packet);
         }
-        write.shutdown().await.map_err(|e| e.to_string())
+        write.shutdown().await.map_err(|e| format!("socket shutdown: {e}"))
     };
     // Cancellation must interrupt local socket IO too, not only Flow::recv.
     // Dropping the joined futures releases a Received packet held by write_all.

@@ -1,0 +1,19 @@
+--- a/src/hev-socks5-tunnel.c
++++ b/src/hev-socks5-tunnel.c
+@@ -48,0 +49 @@
++#include "st-traffic.h"
+@@ -107,0 +109,3 @@
++#ifdef ANDROID
++    st_traffic_packet (p, s, 1);
++#endif
+@@ -441,0 +446,3 @@
++#ifdef ANDROID
++        st_traffic_packet (buf, buf->tot_len, 0);
++#endif
+--- a/src/hev-jni.c
++++ b/src/hev-jni.c
+@@ -23,0 +24 @@
++#include "st-traffic.h"
+@@ -64,0 +66,2 @@
++    { "TProxySetAccounting", "(Z)V", (void *)st_traffic_enable },
++    { "TProxyDrainTraffic", "()[B", (void *)st_traffic_drain },

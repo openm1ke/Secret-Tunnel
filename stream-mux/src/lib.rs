@@ -3,7 +3,9 @@
 pub mod agent;
 mod capacity;
 mod datagrams;
+mod diagnostics;
 pub use capacity::socket_capacity;
+pub use diagnostics::{is_flow_cancellation, unix_millis, Diagnostics, TcpStage};
 mod relay;
 pub use datagrams::DatagramBuffers;
 #[cfg(test)]
@@ -16,7 +18,7 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, Weak,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -26,6 +28,26 @@ use wire::Frame;
 pub use wire::{Kind, MAX_PAYLOAD, TCP_CHUNK};
 
 pub type Result<T> = std::result::Result<T, String>;
+pub const TCP_DESTINATION_TIMEOUT: Duration = Duration::from_secs(10);
+pub const FLOW_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
+const MAX_RECEIVE_BUDGET: usize = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlowWindow {
+    pub bytes: usize,
+    pub slots: usize,
+}
+
+impl FlowWindow {
+    fn valid(self) -> bool {
+        (65536..=1048576).contains(&self.bytes) && (4..=128).contains(&self.slots)
+    }
+}
+
+pub const UDP_WINDOW: FlowWindow = FlowWindow {
+    bytes: 131072,
+    slots: 128,
+};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowKind {
     Tcp,
@@ -42,6 +64,7 @@ pub struct Config {
     pub receive_window: usize,
     pub receive_slots: usize,
     pub outbound_bytes: usize,
+    pub udp_window: Option<FlowWindow>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -50,20 +73,38 @@ impl Default for Config {
             receive_window: 65536,
             receive_slots: 64,
             outbound_bytes: 8 * 1024 * 1024,
+            udp_window: None,
         }
     }
 }
 impl Config {
     fn validate(&self) -> Result<()> {
         if !(1..=8192).contains(&self.max_flows)
-            || !(65536..=1048576).contains(&self.receive_window)
-            || !(4..=128).contains(&self.receive_slots)
-            || self.max_flows * self.receive_window > 256 * 1024 * 1024
+            || !self.receive_for(FlowKind::Tcp).valid()
+            || !self.receive_for(FlowKind::Udp).valid()
+            || self.max_flows > MAX_RECEIVE_BUDGET / self.receive_window
+            || self.max_receive_window() > self.max_flows * self.receive_window
             || !(65536..=64 * 1024 * 1024).contains(&self.outbound_bytes)
         {
             return Err("Invalid multiplex transport resource budget".into());
         }
         Ok(())
+    }
+
+    fn receive_for(&self, kind: FlowKind) -> FlowWindow {
+        let tcp = FlowWindow {
+            bytes: self.receive_window,
+            slots: self.receive_slots,
+        };
+        match kind {
+            FlowKind::Tcp => tcp,
+            FlowKind::Udp => self.udp_window.unwrap_or(tcp),
+        }
+    }
+
+    fn max_receive_window(&self) -> usize {
+        self.receive_window
+            .max(self.receive_for(FlowKind::Udp).bytes)
     }
 }
 
@@ -83,6 +124,7 @@ struct Counters {
     bytes_rx: AtomicU64,
     udp_drops: AtomicU64,
     protocol_errors: AtomicU64,
+    diagnostics: diagnostics::Metrics,
 }
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
@@ -103,6 +145,7 @@ pub struct Snapshot {
     pub bytes_rx: u64,
     pub udp_drops: u64,
     pub protocol_errors: u64,
+    pub diagnostics: Diagnostics,
     pub peer: Option<PeerSnapshot>,
 }
 #[derive(Debug, Clone, Default)]
@@ -120,6 +163,7 @@ pub struct PeerSnapshot {
     pub udp_drops: u64,
     pub protocol_errors: u64,
     pub last_udp_error: String,
+    pub diagnostics: Option<Diagnostics>,
 }
 fn peak(current: &AtomicUsize, highest: &AtomicUsize, amount: usize) {
     highest.fetch_max(
@@ -129,44 +173,76 @@ fn peak(current: &AtomicUsize, highest: &AtomicUsize, amount: usize) {
 }
 
 struct Window {
-    counts: Mutex<(usize, usize)>,
+    counts: Mutex<WindowCredit>,
     max: (usize, usize),
     ready: Notify,
 }
+struct WindowCredit {
+    bytes: usize,
+    slots: usize,
+    udp_sample: Option<Instant>,
+}
+
+enum CreditShortage {
+    Bytes,
+    Slots,
+    Both,
+}
+
 impl Window {
-    fn new(bytes: usize, slots: usize) -> Arc<Self> {
+    fn new(window: FlowWindow) -> Arc<Self> {
+        let FlowWindow { bytes, slots } = window;
         Arc::new(Self {
-            counts: Mutex::new((bytes, slots)),
+            counts: Mutex::new(WindowCredit {
+                bytes,
+                slots,
+                udp_sample: None,
+            }),
             max: (bytes, slots),
             ready: Notify::new(),
         })
     }
-    fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Reservation> {
+    fn reserve(self: &Arc<Self>, bytes: usize) -> std::result::Result<Reservation, CreditShortage> {
         let mut counts = self.counts.lock().unwrap();
-        if counts.0 < bytes || counts.1 == 0 {
-            return None;
+        match (counts.bytes < bytes, counts.slots == 0) {
+            (true, true) => return Err(CreditShortage::Both),
+            (true, false) => return Err(CreditShortage::Bytes),
+            (false, true) => return Err(CreditShortage::Slots),
+            (false, false) => {}
         }
-        counts.0 -= bytes;
-        counts.1 -= 1;
-        Some(Reservation {
+        counts.bytes -= bytes;
+        counts.slots -= 1;
+        Ok(Reservation {
             window: self.clone(),
             bytes,
             committed: false,
         })
     }
-    fn grant(&self, bytes: usize, slots: usize) -> Result<()> {
+    fn sample_udp_credit(&self) {
+        self.counts
+            .lock()
+            .unwrap()
+            .udp_sample
+            .get_or_insert_with(Instant::now);
+    }
+
+    fn grant(&self, bytes: usize, slots: usize, from_peer: bool) -> Result<Option<Duration>> {
         let mut counts = self.counts.lock().unwrap();
         if bytes == 0
             || slots == 0
-            || bytes > self.max.0 - counts.0
-            || slots > self.max.1 - counts.1
+            || bytes > self.max.0 - counts.bytes
+            || slots > self.max.1 - counts.slots
         {
             return Err("Invalid flow credit".into());
         }
-        counts.0 += bytes;
-        counts.1 += slots;
+        counts.bytes += bytes;
+        counts.slots += slots;
         self.ready.notify_waiters();
-        Ok(())
+        Ok(if from_peer {
+            counts.udp_sample.take().map(|t| t.elapsed())
+        } else {
+            None
+        })
     }
 }
 struct Reservation {
@@ -177,13 +253,14 @@ struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.window.grant(self.bytes, 1);
+            let _ = self.window.grant(self.bytes, 1, false);
         }
     }
 }
 
 struct Queued {
     frame: Frame,
+    queued_at: Instant,
     priority: bool,
     cancelled: Option<Arc<AtomicBool>>,
     bytes: Option<OwnedSemaphorePermit>,
@@ -202,7 +279,9 @@ impl Drop for Queued {
 struct Inner {
     config: Config,
     limit: usize,
-    peer_window: (usize, usize),
+    receive_budget: usize,
+    receive_bytes: Arc<Semaphore>,
+    peer_limits: wire::Limits,
     remote_odd: bool,
     next: AtomicU64,
     last_remote: AtomicU32,
@@ -246,6 +325,7 @@ impl Inner {
         queue
             .send(Queued {
                 frame,
+                queued_at: Instant::now(),
                 priority: !ordered,
                 cancelled: None,
                 bytes: None,
@@ -263,6 +343,7 @@ impl Inner {
         self: &Arc<Self>,
         id: u32,
         kind: FlowKind,
+        probe: bool,
         opening: Option<oneshot::Sender<Result<()>>>,
     ) -> Result<(Arc<State>, mpsc::Receiver<Event>)> {
         let mut flows = self.flows.lock().unwrap();
@@ -270,13 +351,25 @@ impl Inner {
             self.counters.rejected.fetch_add(1, Ordering::Relaxed);
             return Err("Connection capacity reached".into());
         }
-        let (packets, receiver) = mpsc::channel(self.config.receive_slots + 2);
+        let receive_window = self.config.receive_for(kind);
+        let receive_reservation = self
+            .receive_bytes
+            .clone()
+            .try_acquire_many_owned(receive_window.bytes as u32)
+            .map_err(|_| {
+                self.counters.rejected.fetch_add(1, Ordering::Relaxed);
+                "Receive buffer budget reached".to_owned()
+            })?;
+        let (packets, receiver) = mpsc::channel(receive_window.slots + 2);
         let (closed, _) = watch::channel(false);
         let state = Arc::new(State {
             id,
             kind,
+            probe,
+            receive_window,
+            _receive_reservation: receive_reservation,
             inner: Arc::downgrade(self),
-            window: Window::new(self.peer_window.0, self.peer_window.1),
+            window: Window::new(self.peer_limits.window(kind)),
             packets,
             opening: Mutex::new(opening),
             ready: AtomicBool::new(false),
@@ -335,22 +428,29 @@ impl Endpoint {
             wire::handshake(
                 &mut stream,
                 matches!(role, Role::Server),
-                config.max_flows as u32,
-                config.receive_window as u32,
-                config.receive_slots as u32,
+                wire::Limits {
+                    flows: config.max_flows,
+                    tcp: config.receive_for(FlowKind::Tcp),
+                    udp: config.udp_window,
+                },
             ),
         )
         .await
         .map_err(|_| "Multiplex negotiation timed out".to_owned())?
         .map_err(|e| e.to_string())?;
-        let limit = config.max_flows.min(peer.0 as usize);
+        let limit = config.max_flows.min(peer.flows);
+        // A large UDP window borrows from the same session-wide budget as TCP.
+        // The configured budget can fit at least one window of either kind.
+        let receive_budget = (limit * config.receive_window).max(config.max_receive_window());
         let (incoming_tx, incoming) = mpsc::channel(limit);
         let (data_tx, data_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let (closed, _) = watch::channel(false);
         let inner = Arc::new(Inner {
             limit,
-            peer_window: (peer.1 as usize, peer.2 as usize),
+            receive_budget,
+            receive_bytes: Arc::new(Semaphore::new(receive_budget)),
+            peer_limits: peer,
             remote_odd: matches!(role, Role::Server),
             next: AtomicU64::new(if matches!(role, Role::Client) { 1 } else { 2 }),
             last_remote: AtomicU32::new(0),
@@ -361,7 +461,14 @@ impl Endpoint {
             control: control_tx,
             bytes: Arc::new(Semaphore::new(config.outbound_bytes)),
             slots: Arc::new(Semaphore::new(4096)),
-            control_slots: Arc::new(Semaphore::new(limit * (config.receive_slots + 4) + 64)),
+            control_slots: Arc::new(Semaphore::new(
+                limit
+                    * (config
+                        .receive_slots
+                        .max(config.receive_for(FlowKind::Udp).slots)
+                        + 4)
+                    + 64,
+            )),
             config,
             closed,
             error: Default::default(),
@@ -400,6 +507,13 @@ impl Endpoint {
     }
     pub fn snapshot(&self) -> Snapshot {
         let c = &self.inner.counters;
+        let udp_window = self.inner.config.receive_for(FlowKind::Udp);
+        let mut diagnostics = c.diagnostics.snapshot(
+            c.bytes_tx.load(Ordering::Relaxed),
+            c.bytes_rx.load(Ordering::Relaxed),
+        );
+        diagnostics.udp_window_bytes = udp_window.bytes;
+        diagnostics.udp_window_slots = udp_window.slots;
         Snapshot {
             active: c.active.load(Ordering::Relaxed),
             peak: c.peak.load(Ordering::Relaxed),
@@ -409,7 +523,7 @@ impl Endpoint {
             receive_queue_peak: c.rx_peak.load(Ordering::Relaxed),
             send_queue_bytes: c.tx_queue.load(Ordering::Relaxed),
             send_queue_peak: c.tx_peak.load(Ordering::Relaxed),
-            receive_budget: self.inner.limit * self.inner.config.receive_window,
+            receive_budget: self.inner.receive_budget,
             send_budget: self.inner.config.outbound_bytes,
             frames_tx: c.frames_tx.load(Ordering::Relaxed),
             frames_rx: c.frames_rx.load(Ordering::Relaxed),
@@ -418,6 +532,7 @@ impl Endpoint {
             bytes_rx: c.bytes_rx.load(Ordering::Relaxed),
             udp_drops: c.udp_drops.load(Ordering::Relaxed),
             protocol_errors: c.protocol_errors.load(Ordering::Relaxed),
+            diagnostics,
             peer: self.inner.peer_stats.lock().unwrap().clone(),
         }
     }
@@ -428,7 +543,7 @@ impl Endpoint {
         }
         tokio::select! { value = async { self.incoming.lock().await.recv().await } => value, _ = closed.changed() => None }
     }
-    pub fn publish_stats(&self) -> bool {
+    pub fn publish_stats(&self, detailed: bool) -> bool {
         let s = self.snapshot();
         let fields = [
             s.active as u64,
@@ -449,7 +564,22 @@ impl Endpoint {
             data.extend_from_slice(&value.to_be_bytes());
         }
         let error = self.inner.udp_error.lock().unwrap();
-        data.extend_from_slice(&error.as_bytes()[..error.len().min(256)]);
+        if detailed {
+            let report = diagnostics::PeerReport {
+                metrics: s.diagnostics,
+                last_udp_error: error.clone(),
+            };
+            let Ok(encoded) = serde_json::to_vec(&report) else {
+                return false;
+            };
+            if encoded.len() > diagnostics::MAX_BYTES {
+                return false;
+            }
+            data.extend_from_slice(diagnostics::MARKER);
+            data.extend_from_slice(&encoded);
+        } else {
+            data.extend_from_slice(&error.as_bytes()[..error.len().min(256)]);
+        }
         drop(error);
         let Ok(slot) = self.inner.control_slots.clone().try_acquire_owned() else {
             return false;
@@ -462,6 +592,7 @@ impl Endpoint {
                     id: 0,
                     data,
                 },
+                queued_at: Instant::now(),
                 priority: true,
                 cancelled: None,
                 bytes: None,
@@ -471,6 +602,14 @@ impl Endpoint {
             .is_ok()
     }
     pub async fn open(&self, kind: FlowKind, target: Vec<u8>) -> Result<Flow> {
+        self.open_flow(kind, target, false).await
+    }
+
+    pub async fn probe_tcp(&self, target: Vec<u8>) -> Result<Flow> {
+        self.open_flow(FlowKind::Tcp, target, true).await
+    }
+
+    async fn open_flow(&self, kind: FlowKind, target: Vec<u8>, probe: bool) -> Result<Flow> {
         if let Some(error) = self.error() {
             return Err(error);
         }
@@ -485,7 +624,7 @@ impl Endpoint {
             }
             let id = id as u32;
             let (ack, ready) = oneshot::channel();
-            let (state, receiver) = self.inner.state(id, kind, Some(ack))?;
+            let (state, receiver) = self.inner.state(id, kind, probe, Some(ack))?;
             let flow = Flow {
                 state,
                 receiver,
@@ -494,10 +633,12 @@ impl Endpoint {
             };
             self.inner.control(Frame {
                 id,
-                kind: if kind == FlowKind::Tcp {
-                    Kind::OpenTcp
-                } else {
-                    Kind::OpenUdp
+                kind: match kind {
+                    FlowKind::Tcp if probe && self.inner.config.udp_window.is_some() => {
+                        Kind::ProbeTcp
+                    }
+                    FlowKind::Tcp => Kind::OpenTcp,
+                    FlowKind::Udp => Kind::OpenUdp,
                 },
                 data: target,
             })?;
@@ -505,10 +646,23 @@ impl Endpoint {
         };
         let (flow, ready) = flow;
         let mut closed = self.inner.closed.subscribe();
-        tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(12), ready) => result.map_err(|_| "Destination setup timed out".to_owned())?.map_err(|_| "Destination setup cancelled".to_owned())??,
-            _ = closed.changed() => return Err("Multiplex transport closed".into()),
+        let started = Instant::now();
+        let result = tokio::select! {
+            result = tokio::time::timeout(FLOW_OPEN_TIMEOUT, ready) => match result {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err("Destination setup cancelled".to_owned()),
+                Err(_) => Err("Destination setup timed out".to_owned()),
+            },
+            _ = closed.changed() => Err("Multiplex transport closed".into()),
+        };
+        if kind == FlowKind::Tcp {
+            flow.record_tcp(
+                TcpStage::Open,
+                started.elapsed(),
+                result.as_ref().map(|_| ()).map_err(String::as_str),
+            );
         }
+        result?;
         Ok(flow)
     }
 }
@@ -516,6 +670,9 @@ impl Endpoint {
 struct State {
     id: u32,
     kind: FlowKind,
+    probe: bool,
+    receive_window: FlowWindow,
+    _receive_reservation: OwnedSemaphorePermit,
     inner: Weak<Inner>,
     window: Arc<Window>,
     packets: mpsc::Sender<Event>,
@@ -545,6 +702,7 @@ enum Event {
 pub struct Received {
     data: Vec<u8>,
     state: Arc<State>,
+    arrived_at: Instant,
 }
 impl std::ops::Deref for Received {
     type Target = [u8];
@@ -559,6 +717,11 @@ impl Drop for Received {
             .fetch_sub(self.data.len(), Ordering::Relaxed);
         self.state.received_slots.fetch_sub(1, Ordering::Relaxed);
         if let Some(inner) = self.state.inner.upgrade() {
+            inner
+                .counters
+                .diagnostics
+                .rx_hold
+                .observe(self.arrived_at.elapsed());
             inner
                 .counters
                 .rx_queue
@@ -592,6 +755,23 @@ pub struct Incoming {
     pub flow: Flow,
 }
 impl Flow {
+    pub fn record_tcp(
+        &self,
+        stage: TcpStage,
+        elapsed: Duration,
+        result: std::result::Result<(), &str>,
+    ) {
+        if let Some(inner) = self.state.inner.upgrade() {
+            inner.counters.diagnostics.record_tcp(
+                self.id(),
+                stage,
+                elapsed,
+                result,
+                self.state.probe,
+            );
+        }
+    }
+
     pub fn sender(&self) -> Sender {
         Sender {
             state: self.state.clone(),
@@ -708,20 +888,31 @@ impl Sender {
         if self.is_closed() {
             return Err("Flow closed".into());
         }
-        let Some(mut credit) = self.state.window.reserve(data.len()) else {
-            self.note_udp_drop();
-            return Ok(false);
+        let metrics = &inner.counters.diagnostics;
+        metrics.udp_tx_attempts.fetch_add(1, Ordering::Relaxed);
+        let mut credit = match self.state.window.reserve(data.len()) {
+            Ok(credit) => credit,
+            Err(shortage) => {
+                let cause = match shortage {
+                    CreditShortage::Bytes => &metrics.udp_credit_bytes,
+                    CreditShortage::Slots => &metrics.udp_credit_slots,
+                    CreditShortage::Both => &metrics.udp_credit_both,
+                };
+                cause.fetch_add(1, Ordering::Relaxed);
+                Self::note_udp_drop(&inner, &metrics.udp_flow_credit);
+                return Ok(false);
+            }
         };
         let Ok(bytes) = inner
             .bytes
             .clone()
             .try_acquire_many_owned(data.len() as u32)
         else {
-            self.note_udp_drop();
+            Self::note_udp_drop(&inner, &inner.counters.diagnostics.udp_byte_budget);
             return Ok(false);
         };
         let Ok(slot) = inner.slots.clone().try_acquire_owned() else {
-            self.note_udp_drop();
+            Self::note_udp_drop(&inner, &inner.counters.diagnostics.udp_slots);
             return Ok(false);
         };
         peak(
@@ -729,6 +920,7 @@ impl Sender {
             &inner.counters.tx_peak,
             data.len(),
         );
+        self.state.window.sample_udp_credit();
         inner
             .data
             .send(Queued {
@@ -737,6 +929,7 @@ impl Sender {
                     kind: Kind::Data,
                     data,
                 },
+                queued_at: Instant::now(),
                 priority: false,
                 cancelled: Some(self.state.cancelled.clone()),
                 bytes: Some(bytes),
@@ -756,14 +949,20 @@ impl Sender {
         }
         self.enqueue(Kind::Eof, vec![], false).await
     }
-    pub fn note_udp_drop(&self) {
-        if let Some(inner) = self.state.inner.upgrade() {
-            inner.counters.udp_drops.fetch_add(1, Ordering::Relaxed);
-        }
+    fn note_udp_drop(inner: &Inner, cause: &AtomicU64) {
+        cause.fetch_add(1, Ordering::Relaxed);
+        inner.counters.udp_drops.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn note_udp_failure(&self, reason: &str) {
-        self.note_udp_drop();
+    pub fn note_udp_failure(&self, failure: UdpFailure, reason: &str) {
         if let Some(inner) = self.state.inner.upgrade() {
+            let metrics = &inner.counters.diagnostics;
+            Self::note_udp_drop(
+                &inner,
+                match failure {
+                    UdpFailure::Dns => &metrics.udp_dns,
+                    UdpFailure::Send => &metrics.udp_send,
+                },
+            );
             *inner.udp_error.lock().unwrap() = reason.chars().take(256).collect();
         }
     }
@@ -793,7 +992,7 @@ impl Sender {
                 if *all_closed.borrow() || self.state.cancelled.load(Ordering::Relaxed) {
                     return Err("Flow closed".into());
                 }
-                if let Some(reservation) = self.state.window.reserve(data.len()) {
+                if let Ok(reservation) = self.state.window.reserve(data.len()) {
                     break Some(reservation);
                 }
                 tokio::select! { _ = notified => (), _ = all_closed.changed() => return Err("Transport closed".into()), _ = flow_closed.changed() => return Err("Flow closed".into()) }
@@ -842,6 +1041,7 @@ impl Sender {
                     kind,
                     data,
                 },
+                queued_at: Instant::now(),
                 priority: false,
                 cancelled: if kind == Kind::Close {
                     None
@@ -858,6 +1058,12 @@ impl Sender {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum UdpFailure {
+    Dns,
+    Send,
 }
 
 async fn read_loop<R: AsyncRead + Unpin>(reader: R, inner: Arc<Inner>) {
@@ -882,9 +1088,19 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: R, inner: Arc<Inner>) {
 fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
     let Frame { kind, id, data } = frame;
     if kind == Kind::Stats {
-        if id != 0 || !(96..=352).contains(&data.len()) {
+        if id != 0 || data.len() < 96 {
             return Err("Invalid transport statistics".into());
         }
+        let extra = &data[96..];
+        let (last_udp_error, diagnostics) = match extra.strip_prefix(diagnostics::MARKER) {
+            Some(encoded) if encoded.len() <= diagnostics::MAX_BYTES => {
+                let report: diagnostics::PeerReport =
+                    serde_json::from_slice(encoded).map_err(|_| "Invalid transport diagnostics")?;
+                (report.last_udp_error, Some(report.metrics))
+            }
+            None if extra.len() <= 256 => (String::from_utf8_lossy(extra).into_owned(), None),
+            _ => return Err("Invalid transport statistics".into()),
+        };
         let number = |i: usize| u64::from_be_bytes(data[i * 8..i * 8 + 8].try_into().unwrap());
         *inner.peer_stats.lock().unwrap() = Some(PeerSnapshot {
             active: number(0),
@@ -899,23 +1115,26 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
             send_budget: number(9),
             udp_drops: number(10),
             protocol_errors: number(11),
-            last_udp_error: String::from_utf8_lossy(&data[96..]).into_owned(),
+            last_udp_error,
+            diagnostics,
         });
         return Ok(());
     }
-    if matches!(kind, Kind::OpenTcp | Kind::OpenUdp) {
+    if matches!(kind, Kind::OpenTcp | Kind::OpenUdp | Kind::ProbeTcp) {
+        if kind == Kind::ProbeTcp && inner.config.udp_window.is_none() {
+            return Err("TCP probe extension was not negotiated".into());
+        }
         if (id % 2 == 1) != inner.remote_odd || data.len() > 512 {
             return Err("Invalid open frame".into());
         }
         if id <= inner.last_remote.swap(id, Ordering::Relaxed) {
             return Err("Flow ID reused or reordered".into());
         }
-        let flow_kind = if kind == Kind::OpenTcp {
-            FlowKind::Tcp
-        } else {
-            FlowKind::Udp
+        let flow_kind = match kind {
+            Kind::OpenUdp => FlowKind::Udp,
+            _ => FlowKind::Tcp,
         };
-        match inner.state(id, flow_kind, None) {
+        match inner.state(id, flow_kind, kind == Kind::ProbeTcp, None) {
             Ok((state, receiver)) => {
                 let incoming = Incoming {
                     kind: flow_kind,
@@ -966,10 +1185,18 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
             if data.len() != 8 {
                 return Err("Invalid credit frame".into());
             }
-            state.window.grant(
+            let elapsed = state.window.grant(
                 u32::from_be_bytes(data[..4].try_into().unwrap()) as usize,
                 u32::from_be_bytes(data[4..].try_into().unwrap()) as usize,
+                true,
             )?;
+            if let Some(elapsed) = elapsed {
+                inner
+                    .counters
+                    .diagnostics
+                    .udp_credit_return
+                    .observe(elapsed);
+            }
         }
         Kind::Close => {
             if !data.is_empty() {
@@ -1020,7 +1247,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 .fetch_add(data.len(), Ordering::Relaxed)
                 + data.len();
             let slots = state.received_slots.fetch_add(1, Ordering::Relaxed) + 1;
-            if bytes > inner.config.receive_window || slots > inner.config.receive_slots {
+            if bytes > state.receive_window.bytes || slots > state.receive_window.slots {
                 state
                     .received_bytes
                     .fetch_sub(data.len(), Ordering::Relaxed);
@@ -1031,6 +1258,13 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 .counters
                 .bytes_rx
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
+            if state.kind == FlowKind::Udp {
+                inner
+                    .counters
+                    .diagnostics
+                    .udp_received
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             peak(
                 &inner.counters.rx_queue,
                 &inner.counters.rx_peak,
@@ -1039,6 +1273,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
             let received = Received {
                 data,
                 state: state.clone(),
+                arrived_at: Instant::now(),
             };
             state
                 .packets
@@ -1126,11 +1361,30 @@ async fn write_loop<W: AsyncWrite + Unpin>(
         if buffer.is_empty() {
             continue;
         }
+        let started = Instant::now();
+        let mut has_data = false;
+        for frame in &batch {
+            if frame.frame.kind == Kind::Data {
+                has_data = true;
+                inner
+                    .counters
+                    .diagnostics
+                    .tx_queue
+                    .observe(started.duration_since(frame.queued_at));
+            }
+        }
         let result = tokio::time::timeout(Duration::from_secs(15), async {
             writer.write_all(&buffer).await?;
             writer.flush().await
         })
         .await;
+        if has_data {
+            inner
+                .counters
+                .diagnostics
+                .write_batch
+                .observe(started.elapsed());
+        }
         if !matches!(result, Ok(Ok(()))) {
             inner.fail("Transport write failed or timed out");
             return;

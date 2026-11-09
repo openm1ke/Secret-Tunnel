@@ -32,8 +32,11 @@ if [[ "$ndk" == /mnt/* && -O "$ndk" ]] && { [[ ! -x "$llvm/aarch64-linux-android
 fi
 # Gradle also reads NDK metadata and launches objcopy when assembling release APKs.
 if [[ "$ndk" == /mnt/* && -O "$ndk" ]]; then
-    chmod u+rw "$ndk/source.properties"
-    chmod u+rx "$llvm/llvm-objcopy" "$llvm/llvm-readelf"
+    chmod u+rw "$ndk/source.properties" "$ndk/meta/abis.json" "$ndk/meta/platforms.json"
+    chmod u+rx "$llvm/llvm-objcopy" "$llvm/llvm-readelf" "$llvm/llvm-ar" "$llvm/llvm-ranlib" "$ndk/build/ndk-build"
+    if [[ ! -r "$ndk/build/core/build-local.mk" || ! -r "$ndk/build/tools/ndk_bin_common.sh" ]]; then
+        chmod -R u+rwX "$ndk/build"
+    fi
 fi
 "$llvm/clang" --version >/dev/null
 export CARGO_TARGET_DIR="$work/rust-target"
@@ -51,11 +54,17 @@ for pair in 'aarch64-linux-android arm64-v8a' 'x86_64-linux-android x86_64'; do
     mkdir -p "$repo/android/app/src/main/jniLibs/$abi"
     cp "$CARGO_TARGET_DIR/$target/release/libsecret_tunnel_android.so" "$repo/android/app/src/main/jniLibs/$abi/"
 done
-"$ndk/ndk-build" NDK_PROJECT_PATH=null APP_BUILD_SCRIPT="$hev/Android.mk" \
-    NDK_APPLICATION_MK="$repo/android/ndk/Application.mk" NDK_OUT="$work/ndk-obj" \
+hev_build="$work/hev-accounting-$revision"
+hev_obj="$work/ndk-accounting-obj"
+mkdir -p "$hev_build"
+tar --exclude=.git -cf - -C "$hev" . | tar -xf - -C "$hev_build"
+patch --fuzz=0 -d "$hev_build" -p1 < "$repo/android/ndk/hev-traffic.patch"
+cp "$repo/android/ndk/"st-traffic.[ch] "$hev_build/src/"
+"$ndk/ndk-build" NDK_PROJECT_PATH=null APP_BUILD_SCRIPT="$hev_build/Android.mk" REV_ID="$revision" \
+    NDK_APPLICATION_MK="$repo/android/ndk/Application.mk" NDK_OUT="$hev_obj" \
     NDK_LIBS_OUT="$repo/android/app/src/main/jniLibs" -j 2 hev-socks5-tunnel
 for abi in arm64-v8a x86_64; do
-    cp "$work/ndk-obj/local/$abi/libhev-socks5-tunnel.so" "$repo/android/app/src/main/jniLibs/$abi/"
+    cp "$hev_obj/local/$abi/libhev-socks5-tunnel.so" "$repo/android/app/src/main/jniLibs/$abi/"
 done
 # Preserve dependency notices in the installable application.
 assets="$repo/android/app/src/main/assets/licenses"

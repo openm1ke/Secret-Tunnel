@@ -79,6 +79,7 @@ impl server::Handler for Handler {
                 _ => {
                     let mut caps = agent::Capabilities::current("0.1.0", 64);
                     caps.udp = !matches!(self.mode, Mode::NoUdp);
+                    caps.flow_control = matches!(self.mode, Mode::Current);
                     (0, serde_json::to_vec(&caps).unwrap(), vec![])
                 }
             };
@@ -92,9 +93,10 @@ impl server::Handler for Handler {
             session.eof(id)?;
             session.close(id)?;
         } else {
+            let flow_control = matches!(self.mode, Mode::Current);
             assert_eq!(
                 command,
-                agent::START_COMMAND,
+                if flow_control { agent::FLOW_CONTROL_COMMAND } else { agent::START_COMMAND },
                 "No arbitrary remote commands"
             );
             if matches!(self.mode, Mode::NetworkDrop) {
@@ -108,6 +110,7 @@ impl server::Handler for Handler {
                         Role::Server,
                         MuxConfig {
                             max_flows: 64,
+                            udp_window: flow_control.then_some(secret_tunnel_mux::UDP_WINDOW),
                             ..Default::default()
                         },
                     )
@@ -116,6 +119,10 @@ impl server::Handler for Handler {
                     while let Some(incoming) = endpoint.accept().await {
                         tokio::spawn(async move {
                             let mut flow = incoming.flow;
+                            if incoming.target == b"fixture timeout" {
+                                flow.reject("TCP connect timeout");
+                                return;
+                            }
                             if flow.accept().is_err() {
                                 return;
                             }
@@ -235,6 +242,8 @@ async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
             .unwrap();
             let (transport, report) = start_agent_transport(&session, 64).await.unwrap();
             assert_eq!(report.protocols, vec![3]);
+            assert!(report.flow_control);
+            assert_eq!(transport.snapshot().diagnostics.udp_window_bytes, 131072);
             for kind in [FlowKind::Tcp, FlowKind::Udp] {
                 let mut flow = transport.open(kind, vec![]).await.unwrap();
                 flow.sender()
@@ -250,13 +259,17 @@ async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
                     flow.finish().await.unwrap();
                 }
             }
+            let error = transport.open(FlowKind::Tcp, b"fixture timeout".to_vec()).await
+                .err().expect("Expected the remote rejection");
+            assert_eq!(error, "TCP connect timeout");
+            assert_eq!(transport.snapshot().diagnostics.last_tcp.unwrap().outcome, error);
             transport.shutdown();
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "", "English")
                 .await;
             assert_eq!(
                 *fixture.commands.lock().unwrap(),
-                [agent::QUERY_COMMAND, agent::START_COMMAND]
+                [agent::QUERY_COMMAND, agent::FLOW_CONTROL_COMMAND]
             );
         }
     })

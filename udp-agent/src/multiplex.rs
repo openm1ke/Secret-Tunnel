@@ -1,5 +1,10 @@
-use crate::udp_protocol::{self, PacketAddress};
-use secret_tunnel_mux::{Config, DatagramBuffers, Endpoint, Flow, FlowKind, Role};
+use crate::{
+    diagnostic_log::DiagnosticLog,
+    udp_protocol::{self, PacketAddress},
+};
+use secret_tunnel_mux::{
+    Config, DatagramBuffers, Endpoint, Flow, FlowKind, Role, TcpStage, UdpFailure,
+};
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -49,7 +54,7 @@ fn capacity() -> usize {
 }
 
 #[tokio::main(flavor = "current_thread")]
-pub async fn main() -> io::Result<()> {
+pub async fn run(detailed: bool, flow_control: bool) -> io::Result<()> {
     let limit = capacity();
     if limit < 32 {
         return Err(io::Error::other(
@@ -64,6 +69,7 @@ pub async fn main() -> io::Result<()> {
         Role::Server,
         Config {
             max_flows: limit,
+            udp_window: flow_control.then_some(secret_tunnel_mux::UDP_WINDOW),
             ..Default::default()
         },
     )
@@ -72,6 +78,7 @@ pub async fn main() -> io::Result<()> {
     let buffers = DatagramBuffers::default();
     let mut tasks = JoinSet::new();
     let mut telemetry = tokio::time::interval(Duration::from_secs(5));
+    let log = DiagnosticLog::new(detailed);
     let mut reported = None;
     loop {
         tokio::select! {
@@ -82,18 +89,34 @@ pub async fn main() -> io::Result<()> {
                         FlowKind::Tcp=>tcp(incoming.flow,incoming.target).await,
                         FlowKind::Udp=>udp(incoming.flow,buffers).await,
                     };
-                    if let Err(error)=result {eprintln!("Multiplex flow: {error}");}
+                    if let Err(error)=result {
+                        if !secret_tunnel_mux::is_flow_cancellation(&error) {
+                            eprintln!("Multiplex flow: {error}");
+                        }
+                    }
                 });
             }
             Some(result)=tasks.join_next(),if !tasks.is_empty()=>{if let Err(error)=result{eprintln!("Multiplex task: {error}");}}
             _=telemetry.tick()=>{
-                let s=endpoint.snapshot();let signature=(s.active,s.peak,s.bytes_tx,s.bytes_rx,s.udp_drops,s.rejected);
-                if reported!=Some(signature){endpoint.publish_stats();reported=Some(signature);}
+                let s = endpoint.snapshot();
+                let d = &s.diagnostics;
+                let signature = (s.active, s.peak, s.bytes_tx, s.bytes_rx, s.udp_drops, s.rejected,
+                    d.tcp_errors, d.tcp_slow, d.tx_queue.over_100_ms, d.rx_hold.over_100_ms,
+                    d.write_batch.over_100_ms,
+                    (d.tcp_cancelled, d.tcp_probes, d.udp_tx_attempts, d.udp_received,
+                     d.udp_credit_return.samples));
+                if reported != Some(signature) {
+                    if detailed { log.report(&s); }
+                    if endpoint.publish_stats(detailed) { reported = Some(signature); }
+                }
             }
         }
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+    if detailed {
+        log.report(&endpoint.snapshot());
+    }
     eprintln!("Multiplex stopped: {:?}", endpoint.snapshot());
     Ok(())
 }
@@ -110,12 +133,15 @@ async fn resolve(target: PacketAddress<'_>) -> io::Result<Vec<SocketAddr>> {
         .map(|addresses| addresses.take(8).collect()),
     }
 }
-async fn connect(target: &[u8]) -> io::Result<TcpStream> {
+async fn resolve_tcp(target: &[u8]) -> io::Result<Vec<SocketAddr>> {
     let parsed = udp_protocol::parse_packet(target)?;
     if !parsed.payload.is_empty() {
         return Err(io::Error::other("Invalid TCP target"));
     }
-    let mut addresses = resolve(parsed.address).await?;
+    resolve(parsed.address).await
+}
+
+async fn connect(mut addresses: Vec<SocketAddr>) -> io::Result<TcpStream> {
     if let Some(first) = addresses.first() {
         if let Some(other) = addresses
             .iter()
@@ -157,13 +183,56 @@ async fn connect(target: &[u8]) -> io::Result<TcpStream> {
 }
 async fn tcp(mut flow: Flow, target: Vec<u8>) -> secret_tunnel_mux::Result<()> {
     let sender = flow.sender();
-    let connected = tokio::select! {
-        stream=tokio::time::timeout(Duration::from_secs(10),connect(&target))=>match stream {Ok(Ok(stream))=>stream,Ok(Err(error))=>{flow.reject(&format!("TCP connect: {error}"));return Ok(())},Err(_)=>{flow.reject("TCP connect timeout");return Ok(())}},
-        _=sender.closed()=>return Ok(()),
+    let deadline = tokio::time::Instant::now() + secret_tunnel_mux::TCP_DESTINATION_TIMEOUT;
+    let dns_started = Instant::now();
+    let addresses = tokio::select! {
+        addresses = resolve_tcp(&target) => addresses,
+        _ = sender.closed() => {
+            flow.record_tcp(TcpStage::Dns, dns_started.elapsed(), Err("Flow cancelled"));
+            return Ok(());
+        },
     };
-    let mut stream = connected;
+    let addresses = match addresses {
+        Ok(addresses) => {
+            flow.record_tcp(TcpStage::Dns, dns_started.elapsed(), Ok(()));
+            addresses
+        }
+        Err(error) => {
+            let error = format!("TCP resolve: {error}");
+            flow.record_tcp(TcpStage::Dns, dns_started.elapsed(), Err(&error));
+            flow.reject(&error);
+            return Ok(());
+        }
+    };
+    let connect_started = Instant::now();
+    let result = tokio::select! {
+        result = tokio::time::timeout_at(deadline, connect(addresses)) => match result {
+            Ok(result) => result.map_err(|error| format!("TCP connect: {error}")),
+            Err(_) => Err("TCP connect timeout".into()),
+        },
+        _ = sender.closed() => {
+            flow.record_tcp(TcpStage::Connect, connect_started.elapsed(), Err("Flow cancelled"));
+            return Ok(());
+        },
+    };
+    let mut stream = match result {
+        Ok(stream) => {
+            flow.record_tcp(TcpStage::Connect, connect_started.elapsed(), Ok(()));
+            stream
+        }
+        Err(error) => {
+            flow.record_tcp(TcpStage::Connect, connect_started.elapsed(), Err(&error));
+            flow.reject(&error);
+            return Ok(());
+        }
+    };
     flow.accept()?;
-    secret_tunnel_mux::relay(&mut flow, &mut stream, |_, _| {}).await
+    let relay_started = Instant::now();
+    let result = secret_tunnel_mux::relay(&mut flow, &mut stream, |_, _| {}).await;
+    if let Err(error) = &result {
+        flow.record_tcp(TcpStage::Relay, relay_started.elapsed(), Err(error));
+    }
+    result
 }
 
 type Allowed = Arc<Mutex<HashMap<SocketAddr, Instant>>>;
@@ -186,7 +255,7 @@ async fn udp(mut flow: Flow, buffers: DatagramBuffers) -> secret_tunnel_mux::Res
         let addresses = match resolve(parsed.address).await {
             Ok(addresses) => addresses,
             Err(error) => {
-                sender.note_udp_failure(&format!("UDP DNS: {error}"));
+                sender.note_udp_failure(UdpFailure::Dns, &format!("UDP DNS: {error}"));
                 continue;
             }
         };
@@ -256,7 +325,7 @@ async fn udp(mut flow: Flow, buffers: DatagramBuffers) -> secret_tunnel_mux::Res
             }
         }
         if !delivered {
-            sender.note_udp_failure(&send_error);
+            sender.note_udp_failure(UdpFailure::Send, &send_error);
         }
         drop(packet);
     }

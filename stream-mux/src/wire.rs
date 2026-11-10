@@ -21,6 +21,11 @@ pub enum Kind {
     Abort = 9,
     Stats = 10,
     ProbeTcp = 11,
+    Ping = 12,
+    Pong = 13,
+}
+fn session_frame(kind: Kind) -> bool {
+    matches!(kind, Kind::Stats | Kind::Ping | Kind::Pong)
 }
 impl TryFrom<u8> for Kind {
     type Error = io::Error;
@@ -37,6 +42,8 @@ impl TryFrom<u8> for Kind {
             9 => Self::Abort,
             10 => Self::Stats,
             11 => Self::ProbeTcp,
+            12 => Self::Ping,
+            13 => Self::Pong,
             _ => return Err(invalid("Unknown frame type")),
         })
     }
@@ -55,7 +62,7 @@ pub fn invalid(message: &str) -> io::Error {
 
 impl Frame {
     pub fn encode(&self, output: &mut Vec<u8>) -> io::Result<()> {
-        if (self.id == 0) != (self.kind == Kind::Stats) || self.data.len() > MAX_PAYLOAD {
+        if (self.id == 0) != session_frame(self.kind) || self.data.len() > MAX_PAYLOAD {
             return Err(invalid("Invalid frame size or ID"));
         }
         output.extend_from_slice(&((self.data.len() + 5) as u16).to_be_bytes());
@@ -79,7 +86,7 @@ pub async fn read<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Frame> {
     }
     let kind = Kind::try_from(header[2])?;
     let id = u32::from_be_bytes(header[3..7].try_into().unwrap());
-    if (id == 0) != (kind == Kind::Stats) {
+    if (id == 0) != session_frame(kind) {
         return Err(invalid("Reserved flow ID"));
     }
     let mut data = vec![0; length - 5];

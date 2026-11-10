@@ -530,7 +530,12 @@ class MainActivity:Activity() {
     private fun activeTunnelDetails(): String {
         val status = "TCP и UDP выбранных приложений идут через туннель"
         val windows = lastStatus.optJSONObject("transport")?.let(TransportDiagnostics::windows)
-        return if (windows == null) status else "$status\n$windows"
+        val heartbeat = lastStatus.optJSONObject("transport")?.optJSONObject("diagnostics")?.optJSONObject("heartbeat")
+        val measuredAt = heartbeat?.optLong("last_ack_at_ms")?:0
+        val freshness = (heartbeat?.optLong("interval_ms",5000)?:5000).times(3).coerceAtLeast(15_000)
+        val latency = if(measuredAt>0&&System.currentTimeMillis()-measuredAt<=freshness&&!heartbeat!!.isNull("last_rtt_ms"))
+            "Задержка туннеля: ${heartbeat.optLong("last_rtt_ms")} мс" else null
+        return listOfNotNull(status,windows,latency).joinToString("\n")
     }
     private fun diagnostics():String=buildString{
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")

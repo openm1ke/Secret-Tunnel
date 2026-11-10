@@ -2,6 +2,7 @@
 use secret_tunnel_core::embedded_ssh::*;
 use serde::Deserialize;
 use serde_json::json;
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize)]
@@ -72,8 +73,23 @@ fn main() {
         "READY {}",
         json!({"ssh":tunnel.ssh_stats(),"agent":tunnel.agent_summary()})
     );
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let _keepalive = if std::env::args().any(|arg| arg == "--interactive") {
+        std::thread::spawn(move || {
+            let _ = std::io::stdin().read(&mut [0u8; 1]);
+            let _ = stop_tx.send(());
+        });
+        None
+    } else {
+        Some(stop_tx)
+    };
     for _ in 0..config.seconds {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        if stop_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok()
+        {
+            break;
+        }
         assert!(tunnel.try_wait().is_none(), "tunnel stopped");
         let stats = tunnel.transport_stats();
         println!(

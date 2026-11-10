@@ -133,7 +133,8 @@ async fn serve(mode: Mode) -> io::Result<()> {
                     d.tcp_errors, d.tcp_slow, d.tx_queue.over_100_ms, d.rx_hold.over_100_ms,
                     d.write_batch.over_100_ms,
                     (d.tcp_cancelled, d.tcp_probes, d.udp_tx_attempts, d.udp_received,
-                     d.udp_credit_return.samples));
+                     d.udp_credit_return.samples, d.heartbeat.probes, d.heartbeat.acknowledged,
+                     d.heartbeat.timeouts, d.heartbeat.pending_ms.map(|ms|ms/5000)));
                 if reported != Some(signature) {
                     if detailed { log.report(&s); }
                     if endpoint.publish_stats(detailed) { reported = Some(signature); }

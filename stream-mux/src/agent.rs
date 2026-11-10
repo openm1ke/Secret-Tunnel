@@ -30,6 +30,8 @@ pub struct Capabilities {
     pub max_udp_slots: usize,
     #[serde(default)]
     pub udp_config: bool,
+    #[serde(default)]
+    pub heartbeat: bool,
 }
 
 fn legacy_udp_slot_limit() -> usize {
@@ -51,6 +53,7 @@ impl Capabilities {
             flow_control: false,
             max_udp_slots: crate::UDP_FLOW_SLOT_LIMIT,
             udp_config: false,
+            heartbeat: true,
         }
     }
     pub fn validate(&self) -> Result<(), String> {

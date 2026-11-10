@@ -50,6 +50,7 @@ pub struct UdpCreditStall {
 #[serde(default)]
 pub struct Diagnostics {
     pub process_id: u32,
+    pub heartbeat: crate::HeartbeatSnapshot,
     pub at_ms: u64,
     pub bytes_tx: u64,
     pub bytes_rx: u64,
@@ -211,6 +212,7 @@ impl Metrics {
         let tcp = self.tcp.lock().unwrap();
         Diagnostics {
             process_id: std::process::id(),
+            heartbeat: Default::default(),
             at_ms: unix_millis(),
             bytes_tx,
             bytes_rx,

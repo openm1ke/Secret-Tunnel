@@ -4,6 +4,8 @@ pub mod agent;
 mod capacity;
 mod datagrams;
 mod diagnostics;
+mod heartbeat;
+pub use heartbeat::HeartbeatSnapshot;
 pub use capacity::socket_capacity;
 pub use diagnostics::{is_flow_cancellation, unix_millis, Diagnostics, TcpStage};
 mod relay;
@@ -71,6 +73,9 @@ pub struct Config {
     pub receive_slots: usize,
     pub outbound_bytes: usize,
     pub udp_window: Option<FlowWindow>,
+    /// Start probes only after discovery confirmed peer heartbeat support.
+    /// A passive peer starts its own probes after receiving the first Ping.
+    pub heartbeat_initiator: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -80,6 +85,7 @@ impl Default for Config {
             receive_slots: 64,
             outbound_bytes: 8 * 1024 * 1024,
             udp_window: None,
+            heartbeat_initiator: false,
         }
     }
 }
@@ -329,6 +335,7 @@ struct Inner {
     counters: Arc<Counters>,
     peer_stats: Mutex<Option<PeerSnapshot>>,
     udp_error: Mutex<String>,
+    heartbeat: Mutex<heartbeat::Heartbeat>,
 }
 impl Inner {
     fn fail(&self, error: impl Into<String>) {
@@ -516,6 +523,7 @@ impl Endpoint {
             bytes: Arc::new(Semaphore::new(config.outbound_bytes)),
             slots: Arc::new(Semaphore::new(4096)),
             control_slots: Arc::new(Semaphore::new(receive_slot_budget + limit * 4 + 64)),
+            heartbeat: Mutex::new(heartbeat::Heartbeat::new(config.heartbeat_initiator)),
             config,
             closed,
             error: Default::default(),
@@ -532,9 +540,11 @@ impl Endpoint {
         let writer = tokio::spawn(async move {
             write_loop(writer, data_rx, control_rx, write_inner).await;
         });
+        let probe_inner = inner.clone();
+        let heartbeat = tokio::spawn(async move { heartbeat::run(probe_inner).await; });
         let owner = Arc::new(IoOwner {
             inner: inner.clone(),
-            tasks: vec![reader, writer],
+            tasks: vec![reader, writer, heartbeat],
         });
         Ok(Self {
             inner,
@@ -561,6 +571,7 @@ impl Endpoint {
         );
         diagnostics.udp_window_bytes = udp_window.bytes;
         diagnostics.udp_window_slots = udp_window.slots;
+        diagnostics.heartbeat = self.inner.heartbeat.lock().unwrap().snapshot(Instant::now());
         Snapshot {
             active: c.active.load(Ordering::Relaxed),
             peak: c.peak.load(Ordering::Relaxed),
@@ -1147,6 +1158,16 @@ async fn read_loop<R: AsyncRead + Unpin>(reader: R, inner: Arc<Inner>) {
 }
 fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
     let Frame { kind, id, data } = frame;
+    if matches!(kind, Kind::Ping | Kind::Pong) {
+        if id != 0 || data.len() != 8 { return Err("Invalid heartbeat frame".into()); }
+        if kind == Kind::Ping {
+            inner.heartbeat.lock().unwrap().activate();
+            inner.control(Frame { kind: Kind::Pong, id: 0, data })?;
+        } else {
+            inner.heartbeat.lock().unwrap().acknowledge(u64::from_be_bytes(data.try_into().unwrap()), Instant::now());
+        }
+        return Ok(());
+    }
     if kind == Kind::Stats {
         if id != 0 || data.len() < 96 {
             return Err("Invalid transport statistics".into());

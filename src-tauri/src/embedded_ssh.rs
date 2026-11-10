@@ -651,6 +651,9 @@ async fn run_embedded_tunnel(
                 if let Ok(snapshot) = serde_json::to_string(&route.outer_tcp.snapshot()) {
                     super::log_line(&logs, format!("SSH TCP {snapshot}"));
                 }
+                if let Ok(snapshot) = serde_json::to_string(&transport.snapshot().diagnostics.heartbeat) {
+                    super::log_line(&logs, format!("SSH heartbeat {snapshot}"));
+                }
             }
             accepted = listener.accept() => {
                 let (stream, originator_addr) = accepted.map_err(|error| error.to_string())?;
@@ -771,6 +774,7 @@ async fn start_agent_transport(
         }
         let transport = Endpoint::start(stream, Role::Client, MuxConfig {
             max_flows: max_connections,
+            heartbeat_initiator: discovery.heartbeat,
             udp_window: discovery
                 .flow_control
                 .then_some(udp_receive_window.unwrap_or(secret_tunnel_mux::UDP_WINDOW)),

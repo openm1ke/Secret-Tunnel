@@ -1256,10 +1256,24 @@ fn start_session_workers(app: tauri::AppHandle) {
                 if let Some(plan) = snapshot.plan {
                     if let (Ok(server), Ok(proxy)) = (selected_server(&plan), selected_proxy(&plan))
                     {
-                        let latency = server_jumps(&plan, &server).ok().and_then(|jumps| {
+                        #[cfg(feature = "embedded-ssh")]
+                        let embedded_latency = state.runtime.lock().ok().and_then(|slot| {
+                            slot.as_ref().filter(|runtime| runtime.generation == snapshot.generation)
+                                .and_then(|runtime| match &runtime.handle {
+                                    TunnelHandle::Embedded(tunnel) => {
+                                        let heartbeat = tunnel.transport_stats().diagnostics.heartbeat;
+                                        let fresh = heartbeat.last_ack_at_ms.is_some_and(|at| now_epoch().saturating_mul(1000).saturating_sub(at) <= heartbeat.interval_ms.saturating_mul(3).max(15_000));
+                                        Some(heartbeat.last_rtt_ms.filter(|_| fresh))
+                                    },
+                                    _ => None,
+                                })
+                        });
+                        #[cfg(not(feature = "embedded-ssh"))]
+                        let embedded_latency: Option<Option<u64>> = None;
+                        let latency = embedded_latency.unwrap_or_else(|| server_jumps(&plan, &server).ok().and_then(|jumps| {
                             let entry = jumps.first().copied().unwrap_or(&server);
                             tcp_latency_ms(&entry.host, entry.port, Duration::from_secs(2))
-                        });
+                        }));
                         if state.control.current(snapshot.generation) {
                             *state.latency.lock().unwrap() = latency;
                         }

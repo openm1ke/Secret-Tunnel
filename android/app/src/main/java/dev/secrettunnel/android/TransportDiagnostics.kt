@@ -32,6 +32,12 @@ internal object TransportDiagnostics {
     fun describe(metrics: JSONObject): String = buildString {
         append("Снимок ${timestamp(metrics.optLong("at_ms"))} · ↓ ${metrics.optLong("bytes_rx")} Б · ↑ ${metrics.optLong("bytes_tx")} Б\n")
         if(metrics.optLong("process_id")>0)append("Процесс #${metrics.optLong("process_id")}\n")
+        metrics.optJSONObject("heartbeat")?.let { h ->
+            fun value(key:String)=if(h.has(key)&&!h.isNull(key))"${h.optLong(key)} мс" else "н/д"
+            append("Весь туннель: RTT ${value("last_rtt_ms")} · сглаженный ${value("smoothed_rtt_ms")} · джиттер ${value("jitter_ms")}\n")
+            append("Heartbeat: ${h.optLong("acknowledged")} / ${h.optLong("probes")} · p95 ${value("p95_rtt_ms")} (${h.optInt("recent_samples")} замеров) · тайм-аутов ${h.optLong("timeouts")}\n")
+            if(!h.isNull("pending_ms"))append("Ожидаем подтверждение ${h.optLong("pending_ms")} мс / ${h.optLong("timeout_ms")} мс\n")
+        }
         append("UDP: окно потока ${metrics.optLong("udp_flow_credit")} · бюджет байтов ${metrics.optLong("udp_byte_budget")} · слоты ${metrics.optLong("udp_slots")}\n")
         val attempts = metrics.optLong("udp_tx_attempts")
         val window = metrics.optLong("udp_window_bytes")

@@ -1,6 +1,68 @@
 use super::*;
 
 #[tokio::test]
+async fn heartbeat_measures_both_directions_without_creating_flows() {
+    let (a, b) = tokio::io::duplex(8192);
+    let (client, server) = tokio::join!(
+        Endpoint::start(a, Role::Client, Config { heartbeat_initiator: true, ..Default::default() }),
+        Endpoint::start(b, Role::Server, Config::default()),
+    );
+    let (client, server) = (client.unwrap(), server.unwrap());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while client.snapshot().diagnostics.heartbeat.acknowledged == 0 || server.snapshot().diagnostics.heartbeat.acknowledged == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    for endpoint in [&client, &server] {
+        let snapshot = endpoint.snapshot();
+        assert_eq!(snapshot.active, 0);
+        assert_eq!(snapshot.bytes_tx, 0);
+        assert_eq!(snapshot.protocol_errors, 0);
+        assert!(snapshot.diagnostics.heartbeat.last_rtt_ms.is_some());
+        assert!(endpoint.publish_stats(true));
+    }
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(1), server.closed()).await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_heartbeat_ack_closes_a_live_but_unresponsive_transport() {
+    let (a, mut b) = tokio::io::duplex(8192);
+    let peer = tokio::spawn(async move {
+        wire::handshake(&mut b, true, wire::Limits { flows: 1024,
+            tcp: FlowWindow { bytes: 65536, slots: 64 }, udp: None }).await.unwrap();
+        let ping = wire::read(&mut b).await.unwrap();
+        assert_eq!(ping.kind, Kind::Ping);
+        // The byte transport stays open; no matching Pong is ever sent.
+        std::future::pending::<()>().await;
+    });
+    let client = Endpoint::start(a, Role::Client, Config { heartbeat_initiator: true, ..Default::default() }).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while client.snapshot().diagnostics.heartbeat.probes == 0 { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    // Advance only the probe's monotonic start; no minute-long test sleep.
+    client.inner.heartbeat.lock().unwrap().expire_for_test();
+    tokio::time::timeout(Duration::from_secs(2), client.closed()).await.unwrap();
+    assert!(client.error().unwrap().contains("heartbeat timed out"));
+    assert_eq!(client.snapshot().diagnostics.heartbeat.timeouts, 1);
+    peer.abort();
+}
+
+#[tokio::test]
+async fn malformed_heartbeat_is_rejected_before_touching_flow_state() {
+    let (client, server) = pair(Config::default()).await;
+    for size in [0, 7, 9, 512] {
+        assert!(dispatch(wire::Frame { kind: Kind::Ping, id: 0, data: vec![0; size] }, &server.inner).is_err());
+    }
+    assert!(dispatch(wire::Frame { kind: Kind::Pong, id: 1, data: vec![0; 8] }, &server.inner).is_err());
+    dispatch(wire::Frame { kind: Kind::Pong, id: 0, data: vec![0; 8] }, &client.inner).unwrap();
+    let stats = client.snapshot();
+    assert_eq!(stats.active, 0);
+    assert_eq!(stats.diagnostics.heartbeat.unexpected_pongs, 1);
+    assert!(stats.diagnostics.heartbeat.last_rtt_ms.is_none());
+}
+
+#[tokio::test]
 async fn aborted_open_does_not_wait_for_the_setup_timeout() {
     let (client, server) = pair(Config::default()).await;
     let opening = tokio::spawn(async move { client.open(FlowKind::Tcp, vec![]).await });

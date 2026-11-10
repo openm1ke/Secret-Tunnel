@@ -23,6 +23,7 @@ pub enum Kind {
     ProbeTcp = 11,
     Ping = 12,
     Pong = 13,
+    Delivered = 14,
 }
 fn session_frame(kind: Kind) -> bool {
     matches!(kind, Kind::Stats | Kind::Ping | Kind::Pong)
@@ -44,6 +45,7 @@ impl TryFrom<u8> for Kind {
             11 => Self::ProbeTcp,
             12 => Self::Ping,
             13 => Self::Pong,
+            14 => Self::Delivered,
             _ => return Err(invalid("Unknown frame type")),
         })
     }

@@ -5,9 +5,12 @@ mod capacity;
 mod datagrams;
 mod diagnostics;
 mod heartbeat;
-pub use heartbeat::HeartbeatSnapshot;
+mod scheduler;
+mod tcp_flight;
 pub use capacity::socket_capacity;
 pub use diagnostics::{is_flow_cancellation, unix_millis, Diagnostics, TcpStage};
+pub use heartbeat::HeartbeatSnapshot;
+pub use tcp_flight::TcpFlightSnapshot;
 mod relay;
 pub use datagrams::DatagramBuffers;
 #[cfg(test)]
@@ -76,6 +79,7 @@ pub struct Config {
     /// Start probes only after discovery confirmed peer heartbeat support.
     /// A passive peer starts its own probes after receiving the first Ping.
     pub heartbeat_initiator: bool,
+    pub tcp_interactive_bytes: Option<usize>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -86,6 +90,7 @@ impl Default for Config {
             outbound_bytes: 8 * 1024 * 1024,
             udp_window: None,
             heartbeat_initiator: false,
+            tcp_interactive_bytes: None,
         }
     }
 }
@@ -97,6 +102,9 @@ impl Config {
             || self.max_flows > MAX_RECEIVE_BUDGET / self.receive_window
             || self.max_receive_window() > self.max_flows * self.receive_window
             || !(65536..=64 * 1024 * 1024).contains(&self.outbound_bytes)
+            || self.tcp_interactive_bytes.is_some_and(|bytes| {
+                !(65536..=8 * 1024 * 1024).contains(&bytes) || bytes % 1024 != 0
+            })
         {
             return Err("Invalid multiplex transport resource budget".into());
         }
@@ -298,6 +306,7 @@ struct Queued {
     queued_at: Instant,
     priority: bool,
     udp_credit: bool,
+    udp_data: bool,
     cancelled: Option<Arc<AtomicBool>>,
     bytes: Option<OwnedSemaphorePermit>,
     _slot: Option<OwnedSemaphorePermit>,
@@ -336,6 +345,7 @@ struct Inner {
     peer_stats: Mutex<Option<PeerSnapshot>>,
     udp_error: Mutex<String>,
     heartbeat: Mutex<heartbeat::Heartbeat>,
+    tcp_flight: Arc<tcp_flight::TcpFlight>,
 }
 impl Inner {
     fn fail(&self, error: impl Into<String>) {
@@ -343,6 +353,7 @@ impl Inner {
             *self.error.lock().unwrap() = error.into();
         }
         self.closed.send_replace(true);
+        self.tcp_flight.close();
         for state in self.flows.lock().unwrap().values() {
             state.window.ready.notify_waiters();
         }
@@ -370,6 +381,7 @@ impl Inner {
                 queued_at: Instant::now(),
                 priority: !ordered,
                 udp_credit,
+                udp_data: false,
                 cancelled: None,
                 bytes: None,
                 _slot: Some(slot),
@@ -378,7 +390,13 @@ impl Inner {
             .map_err(|_| "Multiplex writer stopped".to_owned())
     }
     fn remove(&self, id: u32) {
-        if self.flows.lock().unwrap().remove(&id).is_some() {
+        let removed = self.flows.lock().unwrap().remove(&id);
+        if let Some(state) = removed {
+            self.tcp_flight.retire(
+                id,
+                &state.outbound_closed,
+                state.cancelled.load(Ordering::Relaxed),
+            );
             self.counters.active.fetch_sub(1, Ordering::Relaxed);
         }
     }
@@ -430,6 +448,7 @@ impl Inner {
             opening: Mutex::new(opening),
             ready: AtomicBool::new(false),
             cancelled: Arc::new(AtomicBool::new(false)),
+            outbound_closed: AtomicBool::new(false),
             closed,
             received_bytes: AtomicUsize::new(0),
             received_slots: AtomicUsize::new(0),
@@ -524,6 +543,10 @@ impl Endpoint {
             slots: Arc::new(Semaphore::new(4096)),
             control_slots: Arc::new(Semaphore::new(receive_slot_budget + limit * 4 + 64)),
             heartbeat: Mutex::new(heartbeat::Heartbeat::new(config.heartbeat_initiator)),
+            tcp_flight: tcp_flight::TcpFlight::new(
+                config.outbound_bytes,
+                config.tcp_interactive_bytes,
+            ),
             config,
             closed,
             error: Default::default(),
@@ -572,6 +595,7 @@ impl Endpoint {
         diagnostics.udp_window_bytes = udp_window.bytes;
         diagnostics.udp_window_slots = udp_window.slots;
         diagnostics.heartbeat = self.inner.heartbeat.lock().unwrap().snapshot(Instant::now());
+        diagnostics.tcp_flight = self.inner.tcp_flight.snapshot();
         Snapshot {
             active: c.active.load(Ordering::Relaxed),
             peak: c.peak.load(Ordering::Relaxed),
@@ -654,6 +678,7 @@ impl Endpoint {
                 queued_at: Instant::now(),
                 priority: true,
                 udp_credit: false,
+                udp_data: false,
                 cancelled: None,
                 bytes: None,
                 _slot: Some(slot),
@@ -740,6 +765,7 @@ struct State {
     opening: Mutex<Option<oneshot::Sender<Result<()>>>>,
     ready: AtomicBool,
     cancelled: Arc<AtomicBool>,
+    outbound_closed: AtomicBool,
     closed: watch::Sender<bool>,
     received_bytes: AtomicUsize,
     received_slots: AtomicUsize,
@@ -955,6 +981,9 @@ impl Sender {
             return Err("Flow closed".into());
         }
         let metrics = &inner.counters.diagnostics;
+        if data.len() <= 512 {
+            inner.tcp_flight.note_short(Instant::now());
+        }
         metrics.udp_tx_attempts.fetch_add(1, Ordering::Relaxed);
         let mut credit = match self.state.window.reserve(data.len()) {
             Ok(credit) => credit,
@@ -1001,6 +1030,7 @@ impl Sender {
                 queued_at: Instant::now(),
                 priority: false,
                 udp_credit: false,
+                udp_data: true,
                 cancelled: Some(self.state.cancelled.clone()),
                 bytes: Some(bytes),
                 _slot: Some(slot),
@@ -1052,6 +1082,12 @@ impl Sender {
             return Err("Data after EOF".into());
         }
         let inner = self.state.inner.upgrade().ok_or("Transport closed")?;
+        if self.state.outbound_closed.load(Ordering::Relaxed) {
+            return Err("Flow closed".into());
+        }
+        if credit && self.state.kind == FlowKind::Udp && data.len() <= 512 {
+            inner.tcp_flight.note_short(Instant::now());
+        }
         let mut all_closed = inner.closed.subscribe();
         let mut flow_closed = self.state.closed.subscribe();
         let mut reservation = if credit {
@@ -1071,6 +1107,16 @@ impl Sender {
             None
         };
         let acquire = async {
+            // TCP waiting for delivery credit must leave the shared writer
+            // slots and byte budget available for UDP.
+            let flight = if credit
+                && self.state.kind == FlowKind::Tcp
+                && inner.config.tcp_interactive_bytes.is_some()
+            {
+                Some(inner.tcp_flight.reserve(data.len()).await?)
+            } else {
+                None
+            };
             let bytes = if data.is_empty() {
                 None
             } else {
@@ -1089,41 +1135,49 @@ impl Sender {
                 .acquire_owned()
                 .await
                 .map_err(|_| "Budget closed")?;
-            Ok::<_, String>((bytes, slot))
+            Ok::<_, String>((bytes, slot, flight))
         };
-        let (bytes, slot) = tokio::select! {
+        let (bytes, slot, flight) = tokio::select! {
             value = acquire => value?,
             _ = all_closed.changed() => return Err("Transport closed".into()),
             _ = flow_closed.changed() => return Err("Flow closed".into()),
         };
-        if bytes.is_some() {
-            peak(
-                &inner.counters.tx_queue,
-                &inner.counters.tx_peak,
-                data.len(),
-            );
+        let send = || {
+            if bytes.is_some() {
+                peak(
+                    &inner.counters.tx_queue,
+                    &inner.counters.tx_peak,
+                    data.len(),
+                );
+            }
+            inner
+                .data
+                .send(Queued {
+                    frame: Frame {
+                        id: self.state.id,
+                        kind,
+                        data,
+                    },
+                    queued_at: Instant::now(),
+                    priority: false,
+                    udp_credit: false,
+                    udp_data: self.state.kind == FlowKind::Udp && kind == Kind::Data,
+                    cancelled: if kind == Kind::Close {
+                        None
+                    } else {
+                        Some(self.state.cancelled.clone())
+                    },
+                    bytes,
+                    _slot: Some(slot),
+                    counters: inner.counters.clone(),
+                })
+                .map_err(|_| "Writer stopped".to_string())
+        };
+        if let Some(flight) = flight {
+            flight.commit(self.state.id, &self.state.outbound_closed, send)?;
+        } else {
+            send()?;
         }
-        inner
-            .data
-            .send(Queued {
-                frame: Frame {
-                    id: self.state.id,
-                    kind,
-                    data,
-                },
-                queued_at: Instant::now(),
-                priority: false,
-                udp_credit: false,
-                cancelled: if kind == Kind::Close {
-                    None
-                } else {
-                    Some(self.state.cancelled.clone())
-                },
-                bytes,
-                _slot: Some(slot),
-                counters: inner.counters.clone(),
-            })
-            .map_err(|_| "Writer stopped")?;
         if let Some(reservation) = &mut reservation {
             reservation.committed = true;
         }
@@ -1243,7 +1297,29 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
         return Ok(());
     }
     let state = { inner.flows.lock().unwrap().get(&id).cloned() };
+    if kind == Kind::Delivered {
+        if id == 0
+            || inner.config.tcp_interactive_bytes.is_none()
+            || state
+                .as_ref()
+                .is_some_and(|flow| flow.kind != FlowKind::Tcp)
+            || data.len() != 8
+            || data[..4] == [0; 4]
+            || data[4..] == [0; 4]
+        {
+            return Err("Unnegotiated or invalid TCP delivery acknowledgement".into());
+        }
+        // A graceful local retirement can precede the last delivery ACK.
+        return inner.tcp_flight.acknowledge(
+            id,
+            u32::from_be_bytes(data[..4].try_into().unwrap()) as usize,
+            u32::from_be_bytes(data[4..].try_into().unwrap()) as usize,
+        );
+    }
     let Some(state) = state else {
+        if matches!(kind, Kind::Close | Kind::Abort) {
+            inner.tcp_flight.clear(id);
+        }
         return Ok(());
     }; // Late credit/data after cancellation.
     match kind {
@@ -1303,6 +1379,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 }
                 // Ordered graceful close must not discard queued DATA/EOF. The
                 // application owns admission until it has consumed those bytes.
+                inner.tcp_flight.clear(id);
             } else {
                 state.cancel();
             }
@@ -1312,6 +1389,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 return Err("Invalid abort frame".into());
             }
             state.cancel();
+            inner.tcp_flight.clear(id);
         }
         Kind::Eof => {
             if !data.is_empty() || state.peer_eof.swap(true, Ordering::Relaxed) {
@@ -1352,6 +1430,9 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 .bytes_rx
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
             if state.kind == FlowKind::Udp {
+                if data.len() <= 512 {
+                    inner.tcp_flight.note_short(Instant::now());
+                }
                 inner
                     .counters
                     .diagnostics
@@ -1363,6 +1444,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 &inner.counters.rx_peak,
                 data.len(),
             );
+            let delivered_bytes = data.len();
             let received = Received {
                 data,
                 state: state.clone(),
@@ -1372,6 +1454,16 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 .packets
                 .try_send(Event::Data(received))
                 .map_err(|_| "Flow queue exceeded credit")?;
+            if state.kind == FlowKind::Tcp && inner.config.tcp_interactive_bytes.is_some() {
+                let mut delivered = Vec::with_capacity(8);
+                delivered.extend_from_slice(&(delivered_bytes as u32).to_be_bytes());
+                delivered.extend_from_slice(&1u32.to_be_bytes());
+                inner.control(Frame {
+                    id,
+                    kind: Kind::Delivered,
+                    data: delivered,
+                })?;
+            }
         }
         _ => return Err("Unexpected frame".into()),
     }
@@ -1381,24 +1473,22 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
 fn next_ready(
     data: &mut mpsc::UnboundedReceiver<Queued>,
     control: &mut mpsc::UnboundedReceiver<Queued>,
-    pending: &mut Option<Queued>,
-    controls: &mut usize,
+    scheduled: &mut scheduler::Scheduler,
+    controls: usize,
 ) -> Option<Queued> {
-    if *controls < 32 {
+    // Bound ingestion work while looking beyond already queued bulk flows.
+    for _ in 0..128 {
+        match data.try_recv() {
+            Ok(frame) => scheduled.push(frame),
+            Err(_) => break,
+        }
+    }
+    if controls < 32 {
         if let Ok(frame) = control.try_recv() {
-            *controls += 1;
             return Some(frame);
         }
     }
-    if let Some(frame) = pending.take().or_else(|| data.try_recv().ok()) {
-        *controls = 0;
-        return Some(frame);
-    }
-    if let Ok(frame) = control.try_recv() {
-        *controls += 1;
-        return Some(frame);
-    }
-    None
+    scheduled.next().or_else(|| control.try_recv().ok())
 }
 async fn write_loop<W: AsyncWrite + Unpin>(
     mut writer: W,
@@ -1407,49 +1497,71 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     inner: Arc<Inner>,
 ) {
     let mut closed = inner.closed.subscribe();
-    let mut pending = None;
+    let mut scheduled = scheduler::Scheduler::default();
     let mut controls = 0usize;
-    let mut buffer = Vec::with_capacity(131072);
+    let mut buffer = Vec::with_capacity(65536);
+    // Short writes also bound what ChannelStream can enqueue per message.
+    // flush() alone does not confirm network delivery in russh.
+    const BATCH_TARGET: usize = TCP_CHUNK + wire::HEADER;
+    const WRITE_SLICE: usize = 8192;
     loop {
-        let first = match next_ready(&mut data, &mut control, &mut pending, &mut controls) {
+        if *closed.borrow() {
+            return;
+        }
+        let first = match next_ready(&mut data, &mut control, &mut scheduled, controls) {
             Some(frame) => frame,
             None => {
-                tokio::select! { biased; _ = closed.changed() => return, Some(frame) = control.recv() => { controls += 1; frame }, Some(frame) = data.recv() => { controls = 0; frame }, else => return }
+                tokio::select! {
+                    biased;
+                    _ = closed.changed() => return,
+                    Some(frame) = control.recv() => frame,
+                    Some(frame) = data.recv() => {
+                        scheduled.push(frame);
+                        scheduled.next().unwrap()
+                    },
+                    else => return
+                }
             }
         };
         buffer.clear();
         let mut batch = Vec::new();
         let mut next = Some(first);
         while let Some(frame) = next {
+            let id = frame.frame.id;
+            let from_data = !frame.priority;
+            let urgent = scheduler::interactive(&frame);
             if frame
                 .cancelled
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
             {
-                next = next_ready(&mut data, &mut control, &mut pending, &mut controls);
+                if from_data {
+                    scheduled.complete(id, None, None);
+                }
+                next = next_ready(&mut data, &mut control, &mut scheduled, controls);
                 continue;
             }
-            if !buffer.is_empty() && buffer.len() + wire::HEADER + frame.frame.data.len() > 65536 {
-                if frame.priority {
-                    if let Err(error) = frame.frame.encode(&mut buffer) {
-                        inner.fail(error.to_string());
-                        return;
-                    }
-                    batch.push(frame);
-                } else {
-                    pending = Some(frame);
-                }
+            let over_target = !buffer.is_empty()
+                && buffer.len() + wire::HEADER + frame.frame.data.len() > BATCH_TARGET;
+            if over_target && from_data && !urgent {
+                scheduled.complete(id, None, Some(frame));
                 break;
             }
             if let Err(error) = frame.frame.encode(&mut buffer) {
                 inner.fail(error.to_string());
                 return;
             }
+            if from_data {
+                scheduled.complete(id, Some(urgent), None);
+                controls = 0;
+            } else {
+                controls = controls.saturating_add(1);
+            }
             batch.push(frame);
-            if batch.len() >= 32 {
+            if over_target || batch.len() >= 32 {
                 break;
             }
-            next = next_ready(&mut data, &mut control, &mut pending, &mut controls);
+            next = next_ready(&mut data, &mut control, &mut scheduled, controls);
         }
         if buffer.is_empty() {
             continue;
@@ -1465,6 +1577,19 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                     .diagnostics
                     .tx_queue
                     .observe(started.duration_since(frame.queued_at));
+                if scheduler::interactive(frame) {
+                    inner
+                        .counters
+                        .diagnostics
+                        .short_udp_queue
+                        .observe(started.duration_since(frame.queued_at));
+                } else {
+                    inner
+                        .counters
+                        .diagnostics
+                        .bulk_data_queue
+                        .observe(started.duration_since(frame.queued_at));
+                }
             }
             if frame.udp_credit {
                 has_udp_credit = true;
@@ -1475,8 +1600,15 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                     .observe(started.duration_since(frame.queued_at));
             }
         }
+        inner
+            .counters
+            .diagnostics
+            .write_batch_peak_bytes
+            .fetch_max(buffer.len() as u64, Ordering::Relaxed);
         let result = tokio::time::timeout(Duration::from_secs(15), async {
-            writer.write_all(&buffer).await?;
+            for chunk in buffer.chunks(WRITE_SLICE) {
+                writer.write_all(chunk).await?;
+            }
             writer.flush().await
         })
         .await;
@@ -1509,6 +1641,12 @@ async fn write_loop<W: AsyncWrite + Unpin>(
                     .counters
                     .bytes_tx
                     .fetch_add(frame.frame.data.len() as u64, Ordering::Relaxed);
+                let count = if scheduler::interactive(frame) {
+                    &inner.counters.diagnostics.short_udp_packets_written
+                } else {
+                    &inner.counters.diagnostics.bulk_data_packets_written
+                };
+                count.fetch_add(1, Ordering::Relaxed);
             }
         }
         drop(batch);

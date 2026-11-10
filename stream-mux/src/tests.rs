@@ -1,6 +1,38 @@
 use super::*;
 
 #[tokio::test]
+async fn malformed_or_unnegotiated_delivery_acks_are_rejected_even_after_retirement() {
+    for budget in [None, Some(65536)] {
+        let (_client, server) = pair(Config {
+            tcp_interactive_bytes: budget,
+            ..Default::default()
+        })
+        .await;
+        for data in [vec![], vec![0; 8], vec![1; 7], vec![1; 9]] {
+            assert!(dispatch(
+                wire::Frame {
+                    kind: Kind::Delivered,
+                    id: 999,
+                    data
+                },
+                &server.inner
+            )
+            .is_err());
+        }
+        let data = [16384u32.to_be_bytes(), 1u32.to_be_bytes()].concat();
+        let result = dispatch(
+            wire::Frame {
+                kind: Kind::Delivered,
+                id: 999,
+                data,
+            },
+            &server.inner,
+        );
+        assert_eq!(result.is_ok(), budget.is_some());
+    }
+}
+
+#[tokio::test]
 async fn heartbeat_measures_both_directions_without_creating_flows() {
     let (a, b) = tokio::io::duplex(8192);
     let (client, server) = tokio::join!(
@@ -468,40 +500,47 @@ fn echo_server(endpoint: Endpoint) -> tokio::task::JoinHandle<()> {
 #[tokio::test]
 async fn slow_receiver_does_not_block_an_independent_flow() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        let config = Config {
-            max_flows: 8,
-            outbound_bytes: 65536,
-            ..Default::default()
-        };
-        let (client, server) = pair(config).await;
-        let serving = echo_server(server.clone());
-        let slow = client.open(FlowKind::Tcp, b"slow".to_vec()).await.unwrap();
-        let sender = slow.sender();
-        let flooding = tokio::spawn(async move {
+        for tcp_interactive_bytes in [None, Some(65536)] {
+            let config = Config {
+                max_flows: 8,
+                outbound_bytes: 65536,
+                tcp_interactive_bytes,
+                ..Default::default()
+            };
+            let (client, server) = pair(config).await;
+            for _ in 0..12 {
+                client.inner.tcp_flight.note_short(Instant::now());
+                server.inner.tcp_flight.note_short(Instant::now());
+            }
+            let serving = echo_server(server.clone());
+            let slow = client.open(FlowKind::Tcp, b"slow".to_vec()).await.unwrap();
+            let sender = slow.sender();
+            let flooding = tokio::spawn(async move {
+                for _ in 0..100 {
+                    sender.send(vec![7; TCP_CHUNK]).await?;
+                }
+                Ok::<_, String>(())
+            });
             for _ in 0..100 {
-                sender.send(vec![7; TCP_CHUNK]).await?;
+                if server.snapshot().receive_queue_bytes == 65536 {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            Ok::<_, String>(())
-        });
-        for _ in 0..100 {
-            if server.snapshot().receive_queue_bytes == 65536 {
-                break;
-            }
-            tokio::task::yield_now().await;
+            assert!(!flooding.is_finished());
+            let mut fast = client.open(FlowKind::Tcp, b"fast".to_vec()).await.unwrap();
+            fast.sender().send(b"independent".to_vec()).await.unwrap();
+            fast.sender().eof().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(&*fast.recv().await.unwrap().unwrap(), b"independent");
+            assert!(fast.recv().await.unwrap().is_none());
+            fast.finish().await.unwrap();
+            drop(slow);
+            assert!(flooding.await.unwrap().is_err());
+            assert!(server.snapshot().receive_queue_peak <= server.snapshot().receive_budget);
+            client.shutdown();
+            serving.await.unwrap();
         }
-        assert!(!flooding.is_finished());
-        let mut fast = client.open(FlowKind::Tcp, b"fast".to_vec()).await.unwrap();
-        fast.sender().send(b"independent".to_vec()).await.unwrap();
-        fast.sender().eof().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(&*fast.recv().await.unwrap().unwrap(), b"independent");
-        assert!(fast.recv().await.unwrap().is_none());
-        fast.finish().await.unwrap();
-        drop(slow);
-        assert!(flooding.await.unwrap().is_err());
-        assert!(server.snapshot().receive_queue_peak <= server.snapshot().receive_budget);
-        client.shutdown();
-        serving.await.unwrap();
     })
     .await
     .unwrap();

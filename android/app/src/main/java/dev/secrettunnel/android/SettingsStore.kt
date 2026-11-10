@@ -47,14 +47,22 @@ data class UdpWindow(val kib: Int, val slots: Int) {
         }
     }
 }
-data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false) {
-    init { require(cipher in listOf("auto","aes128_gcm","chacha20_poly1305")) { "Неизвестный шифр SSH" } }
-    fun toJson():JSONObject=JSONObject().put("cipher",cipher).put("smallQueue",smallQueue)
+data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, val qos:String="balanced") {
+    init {
+        require(cipher in listOf("auto","aes128_gcm","chacha20_poly1305")) { "Неизвестный шифр SSH" }
+        require(qos in listOf("balanced","voice","throughput")) { "Неизвестный профиль трафика" }
+    }
+    fun toJson():JSONObject=JSONObject().put("cipher",cipher).put("smallQueue",smallQueue).put("qos",qos)
     fun toNativeJson():JSONObject=JSONObject().put("cipher",cipher)
         .put("channel_buffer_messages",if(smallQueue)8 else 32)
         .put("channel_receive_window_bytes",if(smallQueue)1024*1024 else 2*1024*1024)
+        .put("tcp_interactive_bytes", when (qos) {
+            "voice" -> 64 * 1024
+            "balanced" -> 96 * 1024
+            else -> JSONObject.NULL
+        })
     companion object {
-        fun fromJson(value:JSONObject)=SshSettings(value.optString("cipher","auto"),value.optBoolean("smallQueue",false))
+        fun fromJson(value:JSONObject)=SshSettings(value.optString("cipher","auto"),value.optBoolean("smallQueue",false),value.optString("qos","balanced"))
     }
 }
 

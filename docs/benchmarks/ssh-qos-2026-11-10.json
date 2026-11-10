@@ -1,0 +1,309 @@
+{
+  "scope": "RU to FR, one synthetic run per condition, no injected packet loss",
+  "udp_bytes": 160,
+  "udp_packets_per_second": 50,
+  "udp_load_duration_seconds": 12,
+  "interactive_hold_seconds": 15,
+  "runs": [
+    {
+      "route": "chain",
+      "scenario": "long",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 64,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 150,
+      "per_direction_mbps": 2,
+      "tcp_mbps": 1.1924105188338074,
+      "voice_during_tcp": {
+        "sent": 618,
+        "received": 618,
+        "within_700ms": 618,
+        "p95_all_received_ms": 437.0000000053551
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 750,
+        "p95_all_received_ms": 422.0000000204891,
+        "max_ms": 577.9999999795109
+      },
+      "server_tcp_flight_peak_observed": 65536,
+      "build": "candidate"
+    },
+    {
+      "route": "chain",
+      "scenario": "mobile",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 64,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 50,
+      "per_direction_mbps": 5,
+      "tcp_mbps": 2.8034448993272876,
+      "voice_during_tcp": {
+        "sent": 599,
+        "received": 599,
+        "within_700ms": 599,
+        "p95_all_received_ms": 203.00000000861473
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 750,
+        "p95_all_received_ms": 203.00000000861473,
+        "max_ms": 312.0000000053551
+      },
+      "server_tcp_flight_peak_observed": 65536,
+      "build": "candidate"
+    },
+    {
+      "route": "chain",
+      "scenario": "long",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 96,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 150,
+      "per_direction_mbps": 2,
+      "tcp_mbps": 1.6037870184479084,
+      "voice_during_tcp": {
+        "sent": 621,
+        "received": 621,
+        "within_700ms": 616,
+        "p95_all_received_ms": 483.99999999674037
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 745,
+        "p95_all_received_ms": 483.99999999674037,
+        "max_ms": 765.9999999741558
+      },
+      "server_tcp_flight_peak_observed": 98304,
+      "build": "candidate"
+    },
+    {
+      "route": "chain",
+      "scenario": "mobile",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 96,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 50,
+      "per_direction_mbps": 5,
+      "tcp_mbps": 3.9917240066537265,
+      "voice_during_tcp": {
+        "sent": 421,
+        "received": 421,
+        "within_700ms": 421,
+        "p95_all_received_ms": 203.99999999790452
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 750,
+        "p95_all_received_ms": 203.00000000861473,
+        "max_ms": 312.9999999946449
+      },
+      "server_tcp_flight_peak_observed": 98304,
+      "build": "candidate"
+    },
+    {
+      "route": "chain",
+      "scenario": "long",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 256,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 150,
+      "per_direction_mbps": 2,
+      "tcp_mbps": 1.5640904302443503,
+      "voice_during_tcp": {
+        "sent": 619,
+        "received": 619,
+        "within_700ms": 20,
+        "p95_all_received_ms": 1312.999999994645
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 151,
+        "p95_all_received_ms": 1312.000000005355,
+        "max_ms": 1500.0
+      },
+      "server_tcp_flight_peak_observed": 262144,
+      "build": "candidate"
+    },
+    {
+      "route": "chain",
+      "scenario": "mobile",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 256,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 50,
+      "per_direction_mbps": 5,
+      "tcp_mbps": 3.9116847750019,
+      "voice_during_tcp": {
+        "sent": 431,
+        "received": 431,
+        "within_700ms": 431,
+        "p95_all_received_ms": 531.0000000172295
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 750,
+        "p95_all_received_ms": 516.0000000032596,
+        "max_ms": 625.0
+      },
+      "server_tcp_flight_peak_observed": 262144,
+      "build": "candidate"
+    },
+    {
+      "route": "chain",
+      "scenario": "long",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 0,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 150,
+      "per_direction_mbps": 2,
+      "tcp_mbps": 1.5219500158737613,
+      "voice_during_tcp": {
+        "sent": 619,
+        "received": 276,
+        "within_700ms": 18,
+        "p95_all_received_ms": 5359.99999998603
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 407,
+        "within_700ms": 149,
+        "p95_all_received_ms": 5343.9999999827705,
+        "max_ms": 5437.000000005355
+      },
+      "server_tcp_flight_peak_observed": 0,
+      "build": "final"
+    },
+    {
+      "route": "chain",
+      "scenario": "mobile",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 0,
+      "voice_lead_seconds": 3,
+      "added_one_way_delay_ms": 50,
+      "per_direction_mbps": 5,
+      "tcp_mbps": 3.890368927536232,
+      "voice_during_tcp": {
+        "sent": 432,
+        "received": 432,
+        "within_700ms": 44,
+        "p95_all_received_ms": 2078.9999999979045
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 750,
+        "received": 750,
+        "within_700ms": 362,
+        "p95_all_received_ms": 2078.0000000086147,
+        "max_ms": 2109.99999998603
+      },
+      "server_tcp_flight_peak_observed": 0,
+      "build": "final"
+    },
+    {
+      "route": "chain",
+      "scenario": "long",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 96,
+      "voice_lead_seconds": 0,
+      "added_one_way_delay_ms": 150,
+      "per_direction_mbps": 2,
+      "tcp_mbps": 1.579032094117647,
+      "voice_during_tcp": {
+        "sent": 600,
+        "received": 460,
+        "within_700ms": 331,
+        "p95_all_received_ms": 4889.999999984866
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 600,
+        "received": 460,
+        "within_700ms": 331,
+        "p95_all_received_ms": 4889.999999984866,
+        "max_ms": 5342.999999993481
+      },
+      "server_tcp_flight_peak_observed": 491520,
+      "build": "final"
+    },
+    {
+      "route": "chain",
+      "scenario": "mobile",
+      "queue": 32,
+      "window_bytes": 2097152,
+      "cipher": "auto",
+      "tcp_streams": 16,
+      "tcp_budget_kib": 96,
+      "voice_lead_seconds": 0,
+      "added_one_way_delay_ms": 50,
+      "per_direction_mbps": 5,
+      "tcp_mbps": 3.8347922285714287,
+      "voice_during_tcp": {
+        "sent": 428,
+        "received": 428,
+        "within_700ms": 350,
+        "p95_all_received_ms": 1766.0000000032596
+      },
+      "bridge_errors": [],
+      "tcp_total_bytes": 4194304,
+      "voice": {
+        "sent": 600,
+        "received": 600,
+        "within_700ms": 522,
+        "p95_all_received_ms": 1594.0000000118744,
+        "max_ms": 2155.9999999881256
+      },
+      "server_tcp_flight_peak_observed": 98304,
+      "build": "final"
+    }
+  ]
+}

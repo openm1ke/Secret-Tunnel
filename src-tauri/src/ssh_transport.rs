@@ -21,6 +21,7 @@ pub struct SshTuning {
     pub cipher: CipherPolicy,
     pub channel_buffer_messages: usize,
     pub channel_receive_window_bytes: u32,
+    pub tcp_interactive_bytes: Option<usize>,
 }
 
 impl Default for SshTuning {
@@ -29,6 +30,7 @@ impl Default for SshTuning {
             cipher: CipherPolicy::Auto,
             channel_buffer_messages: 32,
             channel_receive_window_bytes: 2 * 1024 * 1024,
+            tcp_interactive_bytes: Some(96 * 1024),
         }
     }
 }
@@ -37,6 +39,9 @@ impl SshTuning {
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=128).contains(&self.channel_buffer_messages)
             || !(65536..=8 * 1024 * 1024).contains(&self.channel_receive_window_bytes)
+            || self.tcp_interactive_bytes.is_some_and(|bytes| {
+                !(64 * 1024..=8 * 1024 * 1024).contains(&bytes) || bytes % 1024 != 0
+            })
         {
             return Err("Некорректные пределы очереди или окна SSH".into());
         }
@@ -335,6 +340,7 @@ mod tests {
             cipher: CipherPolicy::Aes128Gcm,
             channel_buffer_messages: 8,
             channel_receive_window_bytes: 1024 * 1024,
+            tcp_interactive_bytes: None,
         };
         tuning.validate().unwrap();
         tuning.configure(&mut config);

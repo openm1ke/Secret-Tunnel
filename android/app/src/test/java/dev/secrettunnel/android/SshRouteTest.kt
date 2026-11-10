@@ -5,6 +5,13 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class SshRouteTest {
+    @Test fun trafficPriorityDefaultsAndValidationAreExplicit() {
+        assertEquals("balanced", SshSettings().qos)
+        assertEquals("voice", SshSettings(qos="voice").copy().qos)
+        assertEquals("throughput", SshSettings(qos="throughput").qos)
+        assertThrows(IllegalArgumentException::class.java) { SshSettings(qos="unknown") }
+    }
+
     private fun server(id: String, jump: String? = null) =
         ServerProfile(id, id, "$id.example", 22, "test", jump)
 

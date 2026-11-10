@@ -58,6 +58,7 @@ pub enum Mode {
     Diagnostics,
     FlowControl,
     UdpConfig,
+    Qos,
 }
 
 pub fn run(mode: Mode) -> io::Result<()> {
@@ -81,7 +82,20 @@ async fn serve(mode: Mode) -> io::Result<()> {
         input: tokio::io::stdin(),
         output: tokio::io::stdout(),
     };
+    let qos = if matches!(mode, Mode::Qos) {
+        Some(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                secret_tunnel_mux::agent::read_session_settings(&mut stream),
+            )
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Session settings timed out"))??,
+        )
+    } else {
+        None
+    };
     let udp_window = match mode {
+        Mode::Qos => qos.map(|settings| settings.udp_window),
         Mode::Basic | Mode::Diagnostics => None,
         Mode::FlowControl => Some(secret_tunnel_mux::UDP_WINDOW),
         Mode::UdpConfig => Some(
@@ -99,6 +113,7 @@ async fn serve(mode: Mode) -> io::Result<()> {
         Config {
             max_flows: limit,
             udp_window,
+            tcp_interactive_bytes: qos.map(|settings| settings.tcp_interactive_bytes),
             ..Default::default()
         },
     )

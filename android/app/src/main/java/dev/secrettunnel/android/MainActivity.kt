@@ -421,6 +421,19 @@ class MainActivity:Activity() {
                 }.setNegativeButton("Отмена",null).show()
         }
         addView(queue,spaced(8))
+        val qosCodes=listOf("balanced","voice","throughput")
+        val qosNames=listOf("Сбалансированный","Голос","Максимальная скорость")
+        fun qosCaption()="Приоритет · ${qosNames[qosCodes.indexOf(proxySsh.qos)]}"
+        lateinit var qos:Button
+        qos=button(qosCaption()){
+            unlocked()
+            AlertDialog.Builder(this@MainActivity).setTitle("Профиль трафика")
+                .setSingleChoiceItems(qosNames.toTypedArray(),qosCodes.indexOf(proxySsh.qos)){dialog,index->
+                    proxySsh=proxySsh.copy(qos=qosCodes[index]);qos.text=qosCaption();dialog.dismiss()
+                }.setNegativeButton("Отмена",null).show()
+        }
+        addView(qos,spaced(8))
+        addView(label("«Голос» сильнее ограничивает TCP-загрузки при активном коротком UDP. «Максимальная скорость» отключает это ограничение. Профиль согласуется с конечным сервером для этого сеанса.",12,false,Palette.muted),spaced(8))
         addView(label("Уменьшенная очередь предназначена для сравнения задержек под нагрузкой. Она может ограничить скорость на соединениях с большим RTT. Сжатие выключено.",12,false,Palette.muted),spaced(8))
     }
 

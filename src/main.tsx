@@ -52,8 +52,10 @@ type SshTuning = {
   cipher: "auto" | "aes128_gcm" | "chacha20_poly1305";
   channel_buffer_messages: number;
   channel_receive_window_bytes: number;
+  tcp_interactive_bytes?: number | null;
 };
-const defaultSshTuning: SshTuning = {cipher:"auto",channel_buffer_messages:32,channel_receive_window_bytes:2097152};
+const balancedTcpBudget = 96 * 1024;
+const defaultSshTuning: SshTuning = {cipher:"auto",channel_buffer_messages:32,channel_receive_window_bytes:2097152,tcp_interactive_bytes:balancedTcpBudget};
 
 type AppSettings = {
   redirect_cli_path: string;
@@ -1202,6 +1204,15 @@ function App() {
                   </select>
                 </label>
                 <p className="hint">Уменьшенная очередь предназначена для сравнения задержек под нагрузкой и может ограничить скорость на соединениях с большим RTT.</p>
+                <label>
+                  Приоритет короткого UDP
+                  <select value={settingsDraft.ssh_tuning?.tcp_interactive_bytes === undefined ? balancedTcpBudget : settingsDraft.ssh_tuning.tcp_interactive_bytes ?? 0} onChange={(event) => updateSettings("ssh_tuning",{...defaultSshTuning,...settingsDraft.ssh_tuning,tcp_interactive_bytes:Number(event.target.value)||null})}>
+                    <option value={balancedTcpBudget}>Сбалансированный · 96 КиБ TCP</option>
+                    <option value={65536}>Голос · 64 КиБ TCP</option>
+                    <option value={0}>Максимальная скорость</option>
+                  </select>
+                </label>
+                <p className="hint">При активном коротком UDP ограничивает TCP-данные в пути. «Голос» сильнее ограничивает загрузки. Применяется к обоим концам нового сеанса и требует обновлённого агента.</p>
               </details>
               <label>
                 <SettingLabel hint="Токен IPinfo Lite нужен только для определения публичного IP, страны и флага через запущенный SOCKS proxy. Можно оставить пустым, тогда IP/страна не будут подтягиваться.">

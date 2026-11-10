@@ -183,6 +183,7 @@ pub(super) async fn run(inner: Arc<Inner>) {
         }
         tokio::select! { _ = closed.changed() => return, _ = tick.tick() => {} }
         let now = Instant::now();
+        inner.tcp_flight.tick(now);
         let action = {
             let mut heartbeat = inner.heartbeat.lock().unwrap();
             heartbeat.payload_progress(

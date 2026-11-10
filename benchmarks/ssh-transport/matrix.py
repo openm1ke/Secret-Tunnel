@@ -206,6 +206,7 @@ def run_one(args, base, route, scenario, queue, repetition):
     link = Link(entry["host"], entry["port"], delay_ms, mbps)
     entry.update(host="127.0.0.1", port=link.port)
     config["ssh_tuning"] = {"cipher": "auto", "channel_buffer_messages": queue, "channel_receive_window_bytes": 2097152}
+    config["ssh_tuning"]["tcp_interactive_bytes"] = args.tcp_budget_kib * 1024 if args.tcp_budget_kib else None
     config["socks_port"] = args.socks_port
     config["seconds"] = 100
     name = f"{repetition}-{route}-{scenario}-s{args.tcp_streams}-q{queue}"
@@ -227,13 +228,15 @@ def run_one(args, base, route, scenario, queue, repetition):
             started = time.time()
             load_start = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.tcp_streams + 1) as pool:
+                udp = pool.submit(voice, args.socks_port, base["targets"].get("host", "127.0.0.1"), base["targets"]["udp_port"], args.duration + args.voice_lead_seconds, load_start)
+                if args.voice_lead_seconds: time.sleep(args.voice_lead_seconds)
+                bulk_start_ms = 1000 * (time.monotonic() - load_start)
                 bulk = [pool.submit(tcp_load, args.socks_port, base["targets"].get("host", "127.0.0.1"), base["targets"]["tcp_port"], 2 * TCP_BYTES // args.tcp_streams) for _ in range(args.tcp_streams)]
-                udp = pool.submit(voice, args.socks_port, base["targets"].get("host", "127.0.0.1"), base["targets"]["udp_port"], args.duration, load_start)
                 result = {"route": route, "scenario": scenario, "queue": queue, "window_bytes": 2097152, "cipher": "auto",
-                          "repetition": repetition, "tcp_streams": args.tcp_streams, "added_one_way_delay_ms": delay_ms, "per_direction_mbps": mbps or None,
+                          "repetition": repetition, "tcp_streams": args.tcp_streams, "tcp_budget_kib":args.tcp_budget_kib, "voice_lead_seconds":args.voice_lead_seconds, "added_one_way_delay_ms": delay_ms, "per_direction_mbps": mbps or None,
                           "load_started_unix": started, "tcp": [item.result() for item in bulk], "voice": udp.result()}
             bulk_end_ms = 1000 * (max(item.pop("finished_monotonic") for item in result["tcp"]) - load_start)
-            loaded = [packet for packet in result["voice"]["packets"] if packet["sent_ms"] <= bulk_end_ms]
+            loaded = [packet for packet in result["voice"]["packets"] if bulk_start_ms <= packet["sent_ms"] <= bulk_end_ms]
             values = sorted(packet["rtt_ms"] for packet in loaded if packet["rtt_ms"] is not None)
             result["voice_during_tcp"] = {"sent": len(loaded), "received": len(values), "within_700ms": sum(value <= 700 for value in values),
                                           "p95_all_received_ms": values[math.ceil(.95 * len(values)) - 1] if values else None}
@@ -277,11 +280,15 @@ def main():
     parser.add_argument("--duration", type=int, default=12)
     parser.add_argument("--socks-port", type=int, default=1082)
     parser.add_argument("--tcp-streams", type=int, default=2)
+    parser.add_argument("--tcp-budget-kib", type=int, default=0)
+    parser.add_argument("--voice-lead-seconds",type=int,default=0)
     args = parser.parse_args()
     base = json.loads(args.config.read_text(encoding="utf-8-sig"))
     assert all(base["targets"][key] > 0 for key in ("tcp_port", "udp_port"))
     assert 1 <= args.repeats <= 10 and 3 <= args.duration <= 60
     assert args.tcp_streams in (2, 4, 8, 16)
+    assert args.tcp_budget_kib == 0 or 64 <= args.tcp_budget_kib <= 8192
+    assert 0 <= args.voice_lead_seconds <= 10
     routes, scenarios, queues = args.routes.split(","), args.scenarios.split(","), list(map(int, args.queues.split(",")))
     assert set(routes) <= {"direct", "chain"} and set(scenarios) <= SCENARIOS.keys()
     assert set(queues) <= {8, 16, 32, 64}

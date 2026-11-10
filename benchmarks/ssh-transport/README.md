@@ -2,8 +2,8 @@
 
 `matrix.py` compares the actual shared embedded SSH engine with the same TCP
 and UDP workload, directly and through configured jump hosts. It changes only
-the SSH queue size (8/32 messages); the cipher is Auto, receive window 2 MiB,
-and UDP windows remain those of the input configuration.
+the requested SSH queue size and optional TCP budget. The cipher is Auto,
+the receive window is 2 MiB, and UDP windows come from the input configuration.
 
 The local bridge adds a pipelined propagation delay and a rate limit to the
 physical entry byte stream. It never drops encrypted bytes. It is **not** an
@@ -24,10 +24,14 @@ TCP bodies and sends 160-byte UDP echoes at 50 packets/second for 12 seconds.
 The report separates all received echoes from those received within 700 ms.
 It records full-route heartbeats and both client/server mux diagnostics.
 Quantiles over received responses do not include missing responses.
-`voice_during_tcp` separately reports packets sent before the last TCP body
-finished, so an unloaded tail cannot hide latency during bulk transfer.
+`voice_during_tcp` separately reports packets sent between TCP start and the
+last completed body. This excludes both the warmup and the unloaded tail.
 `--tcp-streams 16` splits the same total 4 MiB over sixteen 256 KiB downloads;
 this exercises more concurrent flow windows without increasing total bytes.
+`--tcp-budget-kib 64` negotiates the per-session budget with a QoS-capable
+agent. The default `0` leaves the TCP budget disabled. `--voice-lead-seconds 3`
+starts the UDP stream three seconds before the TCP downloads. Keep both flags
+fixed across repeats and use a separate output directory per combination.
 
 Queue order reverses between repeats, and adjacent pairs use the same route
 and impairment. The reports are experiments, not a guarantee that a profile is

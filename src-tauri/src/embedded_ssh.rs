@@ -588,12 +588,14 @@ async fn run_embedded_tunnel(
     .await
     .map_err(|_| format!("Embedded SSH connect/authentication timed out: {route_description}"))??;
     super::log_line(&logs, "SSH и ключ проверены; проверяем серверный агент");
-    let (transport, agent) = start_agent_transport(
+    let tcp_interactive_bytes = ssh_tuning.tcp_interactive_bytes;
+    let (transport, agent) = start_agent_transport_qos(
         &route.destination,
         max_connections,
         udp_receive_window,
         agent_udp_receive_window,
         cap_default_udp_receive_slots,
+        tcp_interactive_bytes,
     )
     .await?;
     super::log_line(&logs, agent.summary());
@@ -727,6 +729,7 @@ async fn discover_agent(session: &client::Handle<SshClient>) -> Result<AgentCapa
     result?
 }
 
+#[cfg(test)]
 async fn start_agent_transport(
     session: &client::Handle<SshClient>,
     max_connections: usize,
@@ -734,7 +737,29 @@ async fn start_agent_transport(
     agent_udp_receive_window: Option<FlowWindow>,
     cap_default_udp_receive_slots: bool,
 ) -> Result<(Endpoint, AgentCapabilities), String> {
+    start_agent_transport_qos(
+        session,
+        max_connections,
+        udp_receive_window,
+        agent_udp_receive_window,
+        cap_default_udp_receive_slots,
+        None,
+    )
+    .await
+}
+
+async fn start_agent_transport_qos(
+    session: &client::Handle<SshClient>,
+    max_connections: usize,
+    udp_receive_window: Option<FlowWindow>,
+    agent_udp_receive_window: Option<FlowWindow>,
+    cap_default_udp_receive_slots: bool,
+    tcp_interactive_bytes: Option<usize>,
+) -> Result<(Endpoint, AgentCapabilities), String> {
     let discovery = discover_agent(session).await?;
+    if tcp_interactive_bytes.is_some() && !discovery.qos {
+        return Err("AGENT_INCOMPATIBLE: Для приоритета UDP обновите серверный агент.".into());
+    }
     let udp_receive_window = udp_receive_window.map(|mut window| {
         if cap_default_udp_receive_slots {
             window.slots = window.slots.min(discovery.max_udp_slots);
@@ -756,7 +781,9 @@ async fn start_agent_transport(
     }
     let transport = tokio::time::timeout(Duration::from_secs(10), async {
         let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-        let command = if agent_udp_receive_window.is_some() {
+        let command = if tcp_interactive_bytes.is_some() {
+            agent::QOS_COMMAND
+        } else if agent_udp_receive_window.is_some() {
             agent::UDP_CONFIG_COMMAND
         } else if discovery.flow_control {
             agent::FLOW_CONTROL_COMMAND
@@ -767,7 +794,11 @@ async fn start_agent_transport(
         };
         channel.exec(true, command).await.map_err(|e| e.to_string())?;
         let mut stream = channel.into_stream();
-        if let Some(window) = agent_udp_receive_window {
+        if let Some(bytes) = tcp_interactive_bytes {
+            agent::write_session_settings(&mut stream,agent::SessionSettings {
+                udp_window:agent_udp_receive_window.unwrap_or(secret_tunnel_mux::UDP_WINDOW), tcp_interactive_bytes:bytes,
+            }).await.map_err(|error|error.to_string())?;
+        } else if let Some(window) = agent_udp_receive_window {
             agent::write_udp_window_request(&mut stream, window)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -775,6 +806,7 @@ async fn start_agent_transport(
         let transport = Endpoint::start(stream, Role::Client, MuxConfig {
             max_flows: max_connections,
             heartbeat_initiator: discovery.heartbeat,
+            tcp_interactive_bytes,
             udp_window: discovery
                 .flow_control
                 .then_some(udp_receive_window.unwrap_or(secret_tunnel_mux::UDP_WINDOW)),
@@ -816,15 +848,27 @@ pub fn diagnose_server_with_options(
         .build()
         .map_err(|e| e.to_string())?;
     let timeout = route_connect_timeout(&options) + Duration::from_secs(15);
+    let tcp_interactive_bytes = options.ssh_tuning.tcp_interactive_bytes;
     runtime.block_on(async {
         tokio::time::timeout(timeout, async {
             let route = connect_route(&server, options).await?;
             let result = if check_agent {
-                start_agent_transport(&route.destination, 64, None, None, false).await
-                    .map(|(transport, discovery)| {
-                        transport.shutdown();
-                        format!("SSH и ключ: OK. {}. Проверка STMUX003: OK.", discovery.summary())
-                    })
+                start_agent_transport_qos(
+                    &route.destination,
+                    64,
+                    None,
+                    None,
+                    false,
+                    tcp_interactive_bytes,
+                )
+                .await
+                .map(|(transport, discovery)| {
+                    transport.shutdown();
+                    format!(
+                        "SSH и ключ: OK. {}. Проверка STMUX003: OK.",
+                        discovery.summary()
+                    )
+                })
             } else {
                 Ok("SSH и ключ: OK.".into())
             };

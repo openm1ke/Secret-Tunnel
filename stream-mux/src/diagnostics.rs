@@ -51,6 +51,7 @@ pub struct UdpCreditStall {
 pub struct Diagnostics {
     pub process_id: u32,
     pub heartbeat: crate::HeartbeatSnapshot,
+    pub tcp_flight: crate::TcpFlightSnapshot,
     pub at_ms: u64,
     pub bytes_tx: u64,
     pub bytes_rx: u64,
@@ -77,6 +78,11 @@ pub struct Diagnostics {
     pub tx_queue: Delay,
     pub rx_hold: Delay,
     pub write_batch: Delay,
+    pub short_udp_queue: Delay,
+    pub bulk_data_queue: Delay,
+    pub short_udp_packets_written: u64,
+    pub bulk_data_packets_written: u64,
+    pub write_batch_peak_bytes: u64,
     pub tcp_errors: u64,
     pub tcp_slow: u64,
     pub tcp_cancelled: u64,
@@ -121,6 +127,11 @@ impl Timing {
 
 #[derive(Default)]
 pub(crate) struct Metrics {
+    pub(crate) short_udp_queue: Timing,
+    pub(crate) bulk_data_queue: Timing,
+    pub(crate) short_udp_packets_written: AtomicU64,
+    pub(crate) bulk_data_packets_written: AtomicU64,
+    pub(crate) write_batch_peak_bytes: AtomicU64,
     pub(crate) udp_flow_credit: AtomicU64,
     pub(crate) udp_credit_bytes: AtomicU64,
     pub(crate) udp_credit_slots: AtomicU64,
@@ -213,6 +224,7 @@ impl Metrics {
         Diagnostics {
             process_id: std::process::id(),
             heartbeat: Default::default(),
+            tcp_flight: Default::default(),
             at_ms: unix_millis(),
             bytes_tx,
             bytes_rx,
@@ -239,6 +251,11 @@ impl Metrics {
             tx_queue: self.tx_queue.snapshot(),
             rx_hold: self.rx_hold.snapshot(),
             write_batch: self.write_batch.snapshot(),
+            short_udp_queue: self.short_udp_queue.snapshot(),
+            bulk_data_queue: self.bulk_data_queue.snapshot(),
+            short_udp_packets_written: self.short_udp_packets_written.load(Relaxed),
+            bulk_data_packets_written: self.bulk_data_packets_written.load(Relaxed),
+            write_batch_peak_bytes: self.write_batch_peak_bytes.load(Relaxed),
             tcp_errors: tcp.0,
             tcp_slow: tcp.1,
             tcp_cancelled: self.tcp_cancelled.load(Relaxed),

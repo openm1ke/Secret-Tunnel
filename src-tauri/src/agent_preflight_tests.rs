@@ -105,6 +105,7 @@ impl server::Handler for Handler {
                     caps.udp = !matches!(self.mode, Mode::NoUdp);
                     caps.flow_control = matches!(self.mode, Mode::Current | Mode::LimitedUdpSlots);
                     caps.udp_config = matches!(self.mode, Mode::Current);
+                    caps.qos = matches!(self.mode, Mode::Current);
                     if matches!(self.mode, Mode::LimitedUdpSlots) {
                         caps.max_udp_slots = 128;
                     }
@@ -122,10 +123,13 @@ impl server::Handler for Handler {
             session.close(id)?;
         } else {
             let flow_control = matches!(self.mode, Mode::Current | Mode::LimitedUdpSlots);
+            let qos = matches!(self.mode, Mode::Current) && command == agent::QOS_COMMAND;
             let configured = flow_control && command == agent::UDP_CONFIG_COMMAND;
             assert_eq!(
                 command,
-                if configured {
+                if qos {
+                    agent::QOS_COMMAND
+                } else if configured {
                     agent::UDP_CONFIG_COMMAND
                 } else if flow_control {
                     agent::FLOW_CONTROL_COMMAND
@@ -141,7 +145,14 @@ impl server::Handler for Handler {
                 let channel = self.channels.remove(&id).unwrap();
                 tokio::spawn(async move {
                     let mut stream = channel.into_stream();
-                    let udp_window = if configured {
+                    let settings = if qos {
+                        Some(agent::read_session_settings(&mut stream).await.unwrap())
+                    } else {
+                        None
+                    };
+                    let udp_window = if let Some(settings) = settings {
+                        Some(settings.udp_window)
+                    } else if configured {
                         Some(agent::read_udp_window_request(&mut stream).await.unwrap())
                     } else {
                         flow_control.then_some(secret_tunnel_mux::UDP_WINDOW)
@@ -152,6 +163,8 @@ impl server::Handler for Handler {
                         MuxConfig {
                             max_flows: 64,
                             udp_window,
+                            tcp_interactive_bytes: settings
+                                .map(|settings| settings.tcp_interactive_bytes),
                             ..Default::default()
                         },
                     )
@@ -326,11 +339,20 @@ async fn forced_cipher_and_small_queue_apply_to_every_ssh_hop() {
         let mut exit = fixture_with_cipher(Mode::Current, Some(russh::cipher::AES_128_GCM)).await;
         let relay = fixture_with_cipher(Mode::Relay(exit.server.port), Some(russh::cipher::AES_128_GCM)).await;
         exit.server.host = "aes-exit.invalid".into();
-        exit.options.ssh_tuning = SshTuning { cipher: CipherPolicy::Aes128Gcm,
-            channel_buffer_messages:8,channel_receive_window_bytes:1024*1024 };
-        exit.options.jumps.push(EmbeddedJump { server:relay.server.clone(),host_key_sha256:relay.options.host_key_sha256.clone() });
-        let route = connect_route(&exit.server, exit.options.clone()).await.unwrap();
-        let stats=route.outer_tcp.snapshot();
+        exit.options.ssh_tuning = SshTuning {
+            cipher: CipherPolicy::Aes128Gcm,
+            channel_buffer_messages: 8,
+            channel_receive_window_bytes: 1024 * 1024,
+            tcp_interactive_bytes: None,
+        };
+        exit.options.jumps.push(EmbeddedJump {
+            server: relay.server.clone(),
+            host_key_sha256: relay.options.host_key_sha256.clone(),
+        });
+        let route = connect_route(&exit.server, exit.options.clone())
+            .await
+            .unwrap();
+        let stats = route.outer_tcp.snapshot();
         assert!(stats.connected);
         #[cfg(any(target_os="linux",target_os="android",windows))]
         assert!(stats.rtt_us.is_some(),"{stats:?}");
@@ -593,4 +615,67 @@ async fn changed_host_pin_never_runs_agent_commands() {
     .await
     .is_err());
     assert!(fixture.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn negotiated_qos_budgets_keep_tcp_streaming_with_short_udp_active() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for budget in [65536, 262144] {
+            let fixture = fixture(Mode::Current).await;
+            let session = connect_ssh(
+                &fixture.server,
+                (&*fixture.server.host, fixture.server.port),
+                fixture.options.clone(),
+            )
+            .await
+            .unwrap();
+            let (transport, caps) = start_agent_transport_qos(
+                &session,
+                64,
+                Some(FlowWindow {
+                    bytes: 262144,
+                    slots: 192,
+                }),
+                None,
+                false,
+                Some(budget),
+            )
+            .await
+            .unwrap();
+            assert!(caps.qos);
+            let mut udp = transport.open(FlowKind::Udp, vec![]).await.unwrap();
+            for _ in 0..8 {
+                udp.sender().send(vec![1; 160]).await.unwrap();
+                drop(udp.recv().await.unwrap().unwrap());
+            }
+            assert!(transport.snapshot().diagnostics.tcp_flight.interactive);
+            assert_eq!(
+                transport.snapshot().diagnostics.tcp_flight.configured_bytes,
+                Some(budget)
+            );
+            let mut tcp = transport.open(FlowKind::Tcp, vec![]).await.unwrap();
+            let sender = tcp.sender();
+            let sending = tokio::spawn(async move {
+                for _ in 0..16 {
+                    sender.send(vec![42; 16384]).await.unwrap();
+                }
+                sender.eof().await.unwrap();
+            });
+            let mut received = 0;
+            while let Some(packet) = tcp.recv().await.unwrap() {
+                assert!(packet.iter().all(|byte| *byte == 42));
+                received += packet.len();
+            }
+            sending.await.unwrap();
+            assert_eq!(received, 262144);
+            tcp.finish().await.unwrap();
+            assert_eq!(transport.snapshot().diagnostics.tcp_flight.held_bytes, 0);
+            transport.shutdown();
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "", "English")
+                .await;
+        }
+    })
+    .await
+    .unwrap();
 }

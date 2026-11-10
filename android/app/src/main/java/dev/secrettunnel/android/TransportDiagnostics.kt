@@ -60,6 +60,17 @@ internal object TransportDiagnostics {
             append("$label: макс. ${delay.optLong("max_ms")} мс · ≥100 мс: ${delay.optLong("over_100_ms")}\n")
         }
         append("UDP: эпизодов нехватки окна ${metrics.optLong("udp_credit_stall_events")}\n")
+        if(metrics.has("short_udp_queue")){
+            append("Планировщик: коротких UDP ${metrics.optLong("short_udp_packets_written")} · остальных DATA ${metrics.optLong("bulk_data_packets_written")}\n")
+            append("Очередь до SSH: короткий UDP макс. ${metrics.optJSONObject("short_udp_queue")?.optLong("max_ms")} мс · остальные DATA ${metrics.optJSONObject("bulk_data_queue")?.optLong("max_ms")} мс\n")
+            append("Пик пакета записи: ${metrics.optLong("write_batch_peak_bytes")} Б\n")
+        }
+        metrics.optJSONObject("tcp_flight")?.let { flight ->
+            if(!flight.isNull("configured_bytes")){
+                append("Приоритет UDP: ${if(flight.optBoolean("interactive"))"активен" else "ожидание"}\n")
+                append("TCP: учтено ${flight.optLong("held_bytes")} Б · бюджет ${flight.optLong("effective_bytes")} Б · при UDP ${flight.optLong("configured_bytes")} Б\n")
+            }else append("Приоритет UDP: без дополнительного бюджета TCP\n")
+        }
         metrics.optJSONObject("last_udp_credit_stall")?.let {
             append("${timestamp(it.optLong("at_ms"))} · поток #${it.optLong("flow")} · следующий кредит через ${it.optLong("elapsed_ms")} мс · ${it.optLong("credit_bytes")} Б / ${it.optLong("credit_slots")} сл.\n")
         }

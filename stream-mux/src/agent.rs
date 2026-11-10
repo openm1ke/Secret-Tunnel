@@ -10,6 +10,7 @@ pub const START_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" -
 pub const DIAGNOSTICS_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-diagnostics"#;
 pub const FLOW_CONTROL_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-flow-control"#;
 pub const UDP_CONFIG_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-udp-config"#;
+pub const QOS_COMMAND: &str = r#"exec "$HOME/.local/bin/secret-tunnel-agent" --stdio-v3-qos"#;
 const UDP_CONFIG_MAGIC: &[u8; 8] = b"STUDPC01";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -32,6 +33,8 @@ pub struct Capabilities {
     pub udp_config: bool,
     #[serde(default)]
     pub heartbeat: bool,
+    #[serde(default)]
+    pub qos: bool,
 }
 
 fn legacy_udp_slot_limit() -> usize {
@@ -54,6 +57,7 @@ impl Capabilities {
             max_udp_slots: crate::UDP_FLOW_SLOT_LIMIT,
             udp_config: false,
             heartbeat: true,
+            qos: false,
         }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -76,6 +80,58 @@ impl Capabilities {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionSettings {
+    pub udp_window: FlowWindow,
+    pub tcp_interactive_bytes: usize,
+}
+impl SessionSettings {
+    fn valid(self) -> bool {
+        self.udp_window.valid(FlowKind::Udp)
+            && (65536..=8 * 1024 * 1024).contains(&self.tcp_interactive_bytes)
+            && self.tcp_interactive_bytes % 1024 == 0
+    }
+}
+pub async fn write_session_settings<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    settings: SessionSettings,
+) -> io::Result<()> {
+    if !settings.valid() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid session QoS settings",
+        ));
+    }
+    let mut request = Vec::with_capacity(16);
+    request.extend_from_slice(b"STQOS001");
+    request.extend_from_slice(&(settings.udp_window.bytes as u32).to_be_bytes());
+    request.extend_from_slice(&(settings.udp_window.slots as u16).to_be_bytes());
+    request.extend_from_slice(&((settings.tcp_interactive_bytes / 1024) as u16).to_be_bytes());
+    writer.write_all(&request).await?;
+    writer.flush().await
+}
+pub async fn read_session_settings<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> io::Result<SessionSettings> {
+    let mut request = [0; 16];
+    reader.read_exact(&mut request).await?;
+    let settings = SessionSettings {
+        udp_window: FlowWindow {
+            bytes: u32::from_be_bytes(request[8..12].try_into().unwrap()) as usize,
+            slots: u16::from_be_bytes(request[12..14].try_into().unwrap()) as usize,
+        },
+        tcp_interactive_bytes: u16::from_be_bytes(request[14..16].try_into().unwrap()) as usize
+            * 1024,
+    };
+    if &request[..8] != b"STQOS001" || !settings.valid() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid session QoS settings",
+        ));
+    }
+    Ok(settings)
 }
 
 pub async fn write_udp_window_request<W: AsyncWrite + Unpin>(
@@ -145,6 +201,35 @@ pub fn parse(exit: Option<u32>, stdout: &[u8], stderr: &[u8]) -> Result<Capabili
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn session_settings_are_bounded_and_reject_truncated_or_unknown_requests() {
+        let settings = SessionSettings {
+            udp_window: FlowWindow {
+                bytes: 262144,
+                slots: 192,
+            },
+            tcp_interactive_bytes: 65536,
+        };
+        let mut bytes = Vec::new();
+        write_session_settings(&mut bytes, settings).await.unwrap();
+        assert_eq!(
+            read_session_settings(&mut bytes.as_slice()).await.unwrap(),
+            settings
+        );
+        assert!(read_session_settings(&mut &bytes[..15]).await.is_err());
+        bytes[0] = b'X';
+        assert!(read_session_settings(&mut bytes.as_slice()).await.is_err());
+        assert!(write_session_settings(
+            &mut Vec::new(),
+            SessionSettings {
+                tcp_interactive_bytes: 1024,
+                ..settings
+            }
+        )
+        .await
+        .is_err());
+    }
 
     #[tokio::test]
     async fn udp_window_request_rejects_invalid_limits_and_magic() {

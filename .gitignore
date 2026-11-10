@@ -54,3 +54,8 @@ src-tauri/resources/
 *.pfx
 
 session-control/target/
+
+# iOS client: build outputs and the XcodeGen-generated project
+ios/build/
+ios/native/target/
+ios/*.xcodeproj/

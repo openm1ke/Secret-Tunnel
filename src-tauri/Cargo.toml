@@ -12,7 +12,8 @@ embedded-ssh = ["dep:russh", "dep:tokio", "dep:secret-tunnel-mux"]
 [lib]
 name = "secret_tunnel_lib"
 # Desktop is linked into a Rust executable. Android JNI has its own crate.
-crate-type = ["rlib"]
+# iOS (Tauri mobile) links the static library into the Xcode app.
+crate-type = ["staticlib", "rlib"]
 
 [[example]]
 name = "check_embedded"

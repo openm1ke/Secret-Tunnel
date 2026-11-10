@@ -1879,6 +1879,7 @@ fn stop_redirect(state: State<'_, AppState>) -> Result<String, String> {
     Ok("Перехват выключен".into())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

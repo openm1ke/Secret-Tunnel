@@ -1,0 +1,11 @@
+#!/bin/bash
+# swift-rs (used by Tauri for iOS) calls `swift build` with -sdk/-target overrides
+# and expects the native build layout (<arch>-apple-macosx/<config>). SwiftPM 6.4+
+# defaults to the `swiftbuild` system, which ignores those overrides and scans
+# iOS headers against the macOS SDK. Force the native build system for `build`.
+REAL_SWIFT="$(xcrun --find swift)"
+if [ "${1:-}" = "build" ]; then
+  shift
+  exec "$REAL_SWIFT" build --build-system native "$@"
+fi
+exec "$REAL_SWIFT" "$@"

@@ -280,6 +280,9 @@ mod platform_tests {
             panic!("Client did not reach the fixture: {result:?}");
         }
         let mut socket = accepted.unwrap();
+        // Windows can inherit the listener's nonblocking mode on accept.
+        // The fixture uses blocking reads with a deadline below.
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();

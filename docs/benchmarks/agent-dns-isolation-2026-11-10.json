@@ -1,0 +1,36 @@
+{
+  "release": "v0.3.6",
+  "release_commit": "0743ef3e45f1d73dcb377eee515471bf23ca7945",
+  "agent_sha256": "b0f4eea5f4273529ba71c309c57378c57ddf6272e9507a00e10c1a0feac0f683",
+  "environment": "WSL2 Linux, private network and mount namespaces, loopback DNS and UDP echo, stdio STMUX003 QoS, no SSH",
+  "measurement": {
+    "dns_delay_ms": 1200,
+    "control_ms": {
+      "1": 1.18,
+      "3": 1.22
+    },
+    "samples": [
+      {
+        "same_association_ms": 1203.16,
+        "other_association_ms": 1.13
+      },
+      {
+        "same_association_ms": 1202.94,
+        "other_association_ms": 0.6
+      },
+      {
+        "same_association_ms": 1203.89,
+        "other_association_ms": 0.62
+      },
+      {
+        "same_association_ms": 1363.59,
+        "other_association_ms": 0.59
+      },
+      {
+        "same_association_ms": 1203.02,
+        "other_association_ms": 0.65
+      }
+    ],
+    "udp_sent_after_abort": true
+  }
+}

@@ -86,3 +86,20 @@ shutdown fails the run rather than silently leaving it successful.
 
 The shared example uses ring. The production Windows GUI uses aws-lc, so a
 separate GUI smoke test and Android per-app VPN test are still required.
+
+## Agent DNS isolation
+
+On Linux or WSL, run the production agent locally without SSH:
+
+```sh
+python3 benchmarks/ssh-transport/agent-dns-isolation.py \
+  udp-agent/target/x86_64-unknown-linux-musl/release/secret-tunnel-agent
+```
+
+The command needs `unshare`, `ip`, `mount` and working user namespaces. It
+starts loopback-only DNS and UDP echo in private network and mount namespaces.
+It supplies the resolver configuration only inside that namespace. The fixture
+sends IP-addressed packets in two associations while one waits on a deliberately
+slow domain lookup. It also checks whether a delayed positive DNS answer leads
+to UDP egress after the agent processed `Abort`. The JSON is a measurement and
+reports the observed behavior, including `udp_sent_after_abort`.

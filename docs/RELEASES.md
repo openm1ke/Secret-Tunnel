@@ -50,4 +50,4 @@ CI расшифровывает keystore во временный каталог 
 
 Windows EXE и setup пока без Authenticode-подписи приложения; upstream-драйвер WinDivert сохраняет проверенную подпись. Контрольные суммы драйвера, DLL, import library и заголовка закреплены в `scripts/prepare-windows-component.ps1`; компилируемый ProxyBridge закреплён по commit. Скрипты не отключают Defender, SmartScreen или проверку драйверов.
 
-Android остаётся первой версией без физической проверки на телефоне; это явно отражено в release notes. Доменные regex-правила есть в Windows; Android пока маршрутизирует по приложениям.
+Android проверен на физическом телефоне через VPN выбранных приложений. Доменные regex-правила есть в Windows, Android маршрутизирует по приложениям.

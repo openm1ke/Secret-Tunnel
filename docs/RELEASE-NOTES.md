@@ -1,9 +1,10 @@
-Secret Tunnel v0.3.5 adds SSH server chains on desktop and Android.
+Secret Tunnel v0.3.6 reduces delays for short UDP packets during concurrent TCP downloads over Embedded SSH.
 
-- Choose an intermediate SSH server in the destination server profile. Routes support up to three intermediate servers, reject cycles and keep each server's credentials and host-key verification separate. Desktop chains use Embedded Rust SSH. The traffic agent runs only on the final server.
-- Android now defaults to a 256 KiB / 192-slot UDP receive window for download and 128 KiB / 128 slots for upload. Explicit per-proxy settings retain priority. An automatic download profile can reduce its slot count to the agent's advertised limit.
-- Windows and Android checks passed HTTPS, UDP DNS and association shutdown through the RU → FR chain. A real Android device transferred 8 MiB TCP and all 528 controlled UDP datagrams. During a subsequent LTE run, Instagram, Telegram and Discord worked normally according to the user; the VPN and agent remained active. The tunnel still recorded UDP drops under load. [Measurements and limitations](SSH-CHAIN-MOBILE-2026-11-10.md).
-- Existing direct connections and saved application selections are preserved. The bundled Linux agent supports per-session UDP settings; no traffic agent is required on intermediate SSH servers.
-- The SSH cancellation test explicitly uses blocking reads on its accepted fixture socket, avoiding Windows-specific `WouldBlock` failures. The earlier v0.3.4 candidate build was cancelled before publication.
+- Select **Balanced** (96 KiB, default), **Voice** (64 KiB) or **Maximum speed** (extra TCP budget disabled). Balanced and Voice activate the budget during sustained short UDP traffic. Windows stores the choice in advanced SSH settings, and Android stores it in the proxy profile.
+- Full-route heartbeat measures tunnel RTT. Android can reconnect after a network change and shows client and server queue timings in the journal.
+- On a chain with 16 TCP downloads and UDP already active, the 96 KiB candidate recorded 204 ms and 484 ms p95 UDP RTT in two shaped scenarios. The unlimited control recorded 2.08 s and 5.36 s. Concurrent startup can still delay early UDP packets. [Measurements and limits](https://github.com/openm1ke/Secret-Tunnel/blob/v0.3.6/docs/QOS-SCHEDULING-2026-11-10.md).
+- Tested Windows HTTPS and UDP over SOCKS, HTTPS and UDP through an Android app selected for VPN routing, and two simultaneous clients using independent TCP budgets on the same route.
+
+For Balanced or Voice, install the **server agent from this release** on the final SSH server before reconnecting. Its `--capabilities` response includes `"qos": true`. Select Maximum speed to connect to a compatible STMUX003 agent without this capability. [Agent setup guide](https://github.com/openm1ke/Secret-Tunnel/blob/v0.3.6/docs/SERVER-UDP-SETUP.md).
 
 Packages include a signed Android APK, Windows setup and portable ZIP, macOS universal DMG and ZIP, and the Linux x86_64 agent archive. macOS per-app routing uses the separately installed ProxyBridge component.

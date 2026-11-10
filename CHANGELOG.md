@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.3.6 — 2026-11-10
+
+- Added per-session UDP priority in Embedded SSH. Balanced uses a 96 KiB TCP flight budget during sustained short UDP traffic, Voice uses 64 KiB, and Maximum speed disables the extra budget. The first two profiles require the bundled agent on the destination server.
+- Added full-route heartbeat, transport diagnostics and Android network handover recovery. The Android journal shows the negotiated budget and queue timings on both ends.
+- Verified Windows SOCKS TCP and UDP, Android per-app VPN and concurrent clients with different settings. The benchmark records the remaining startup delay when bulk TCP and UDP begin together. [Validation](docs/QOS-SCHEDULING-2026-11-10.md).
+
+## Earlier changes
 
 - Added an Android APK target in the same repository: native per-app VpnService, shared Rust SSH/SOCKS TCP/UDP transport, key import protected by Android Keystore, host-key pinning, reconnect, traffic chart and logs. Added Linux/WSL build scripts and Android CI.
 - Added protected transport sockets for Android and removed the coarse session lock after SSH authentication so independent channel opens do not block each other.

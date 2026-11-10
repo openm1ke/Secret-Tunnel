@@ -2007,5 +2007,27 @@
       "client_udp_credit_drops": 0,
       "server_udp_credit_drops": 0
     }
-  ]
+  ],
+  "concurrent_android_observation": {
+    "route": "RU -> FR",
+    "same_client_and_agent_process_through_series": true,
+    "client_bytes_received": 66018108,
+    "client_bytes_sent": 3131797,
+    "client_heartbeat_acknowledged": 315,
+    "client_heartbeat_timeouts": 0,
+    "client_last64_heartbeat_p95_ms": 296,
+    "server_udp_tx_attempts": 56741,
+    "server_udp_credit_drops": 657,
+    "server_credit_stall_events": 31,
+    "server_credit_stall_max_ms": 88,
+    "tcp_errors": 1,
+    "last_tcp_outcome": "TCP connect timeout",
+    "last_tcp_stage": "connect",
+    "last_tcp_elapsed_ms": 10003,
+    "limitations": [
+      "uncontrolled foreground/background applications; no attribution to individual app",
+      "aggregate window drops are not measured IP loss",
+      "server and RU network shared with benchmark sessions"
+    ]
+  }
 }

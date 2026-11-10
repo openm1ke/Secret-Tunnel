@@ -31,6 +31,7 @@ internal object TransportDiagnostics {
 
     fun describe(metrics: JSONObject): String = buildString {
         append("Снимок ${timestamp(metrics.optLong("at_ms"))} · ↓ ${metrics.optLong("bytes_rx")} Б · ↑ ${metrics.optLong("bytes_tx")} Б\n")
+        if(metrics.optLong("process_id")>0)append("Процесс #${metrics.optLong("process_id")}\n")
         append("UDP: окно потока ${metrics.optLong("udp_flow_credit")} · бюджет байтов ${metrics.optLong("udp_byte_budget")} · слоты ${metrics.optLong("udp_slots")}\n")
         val attempts = metrics.optLong("udp_tx_attempts")
         val window = metrics.optLong("udp_window_bytes")
@@ -47,9 +48,14 @@ internal object TransportDiagnostics {
             "rx_hold" to "Приём до освобождения буфера",
             "write_batch" to "Запись в транспорт",
             "udp_credit_return" to "До следующего кредита UDP",
+            "udp_credit_stall" to "От нехватки окна до следующего кредита UDP",
         )) {
             val delay = metrics.optJSONObject(key) ?: continue
             append("$label: макс. ${delay.optLong("max_ms")} мс · ≥100 мс: ${delay.optLong("over_100_ms")}\n")
+        }
+        append("UDP: эпизодов нехватки окна ${metrics.optLong("udp_credit_stall_events")}\n")
+        metrics.optJSONObject("last_udp_credit_stall")?.let {
+            append("${timestamp(it.optLong("at_ms"))} · поток #${it.optLong("flow")} · следующий кредит через ${it.optLong("elapsed_ms")} мс · ${it.optLong("credit_bytes")} Б / ${it.optLong("credit_slots")} сл.\n")
         }
         append("TCP: ошибок ${metrics.optLong("tcp_errors")} · медленных открытий / этапов ${metrics.optLong("tcp_slow")}\n")
         append("TCP: отмен ${metrics.optLong("tcp_cancelled")} · проверок IPv6 ${metrics.optLong("tcp_probes")} · недоступно ${metrics.optLong("tcp_probe_errors")}\n")
@@ -66,16 +72,41 @@ internal object TransportDiagnostics {
         }
     }
 
+    fun describeSsh(ssh: JSONObject): String = buildString {
+        val tuning = ssh.optJSONObject("tuning")
+        val cipher = when(tuning?.optString("cipher")) {
+            "aes128_gcm" -> "AES-128-GCM"
+            "chacha20_poly1305" -> "ChaCha20-Poly1305"
+            else -> "Авто"
+        }
+        append("SSH: выбор шифра $cipher · очередь ${tuning?.optInt("channel_buffer_messages")} сообщений · окно ${(tuning?.optLong("channel_receive_window_bytes")?:0)/1024} КиБ\n")
+        val tcp = ssh.optJSONObject("outer_tcp") ?: return@buildString
+        append("TCP до первого сервера · ${timestamp(tcp.optLong("at_ms"))}\n")
+        if(!tcp.optBoolean("connected")) { append("Соединение закрыто\n"); return@buildString }
+        fun metric(key:String, scale:Double=1.0):String = if(tcp.has(key)&&!tcp.isNull(key))
+            String.format(Locale.ROOT,"%.1f",tcp.optDouble(key)/scale) else "н/д"
+        append("RTT ${metric("rtt_us",1000.0)} мс · RTO ${metric("rto_us",1000.0)} мс\n")
+        append("Не отправлено ${metric("not_sent_bytes")} Б · очередь сокета ${metric("send_queue_bytes")} Б\n")
+        append("Повторно отправлено ${metric("bytes_retransmitted")} Б · сегментов ${metric("total_retransmits")}\n")
+        append("Без подтверждения: ${metric("unacked_packets")} сегм. / ${metric("bytes_in_flight")} Б · источник ${tcp.optString("source")}\n")
+    }
+
     class Sampler {
         private var nextSample = 0L
         private var client = ""
         private var server = ""
+        private var ssh = ""
 
         fun sample(now: Long, transport: JSONObject) {
             if (now < nextSample) return
             nextSample = now + 5000
             client = emit("client", transport, client)
             transport.optJSONObject("server")?.let { server = emit("server", it, server) }
+            transport.optJSONObject("ssh")?.let { value ->
+                val signature = JSONObject(value.toString()).apply { optJSONObject("outer_tcp")?.remove("at_ms") }.toString()
+                if(signature!=ssh) Log.i("SecretTunnelTcp",value.toString())
+                ssh=signature
+            }
         }
 
         private fun emit(side: String, transport: JSONObject, previous: String): String {

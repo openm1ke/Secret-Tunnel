@@ -19,6 +19,10 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 mod agent_preflight_tests;
 #[path = "tls_target.rs"]
 mod tls_target;
+#[path = "ssh_transport.rs"]
+mod ssh_transport;
+pub use ssh_transport::{CipherPolicy, SshSnapshot, SshTuning};
+use ssh_transport::{ObservedStream, TcpObserver};
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedServer {
@@ -60,6 +64,7 @@ pub struct EmbeddedOptions {
     /// Allow the automatic local window to use a lower slot limit advertised by the agent.
     pub cap_default_udp_receive_slots: bool,
     pub agent_udp_receive_window: Option<FlowWindow>,
+    pub ssh_tuning: SshTuning,
 }
 
 #[derive(Debug)]
@@ -71,6 +76,8 @@ pub struct EmbeddedTunnelHandle {
     ipv6_supported: Option<bool>,
     transport: Endpoint,
     agent: AgentCapabilities,
+    outer_tcp: Arc<TcpObserver>,
+    ssh_tuning: SshTuning,
 }
 
 impl EmbeddedTunnelHandle {
@@ -79,6 +86,9 @@ impl EmbeddedTunnelHandle {
     }
     pub fn transport_stats(&self) -> TransportSnapshot {
         self.transport.snapshot()
+    }
+    pub fn ssh_stats(&self) -> SshSnapshot {
+        SshSnapshot { tuning: self.ssh_tuning.clone(), outer_tcp: self.outer_tcp.snapshot() }
     }
     pub fn ipv6_supported(&self) -> Option<bool> {
         self.ipv6_supported
@@ -204,6 +214,7 @@ impl client::Handler for SshClient {
 struct SshRoute {
     destination: client::Handle<SshClient>,
     jumps: Vec<client::Handle<SshClient>>,
+    outer_tcp: Arc<TcpObserver>,
 }
 
 impl SshRoute {
@@ -452,6 +463,7 @@ pub fn start_with_options_cancellable(
     options: EmbeddedOptions,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<EmbeddedTunnelHandle, String> {
+    options.ssh_tuning.validate()?;
     if !proxy
         .host
         .parse::<std::net::IpAddr>()
@@ -527,7 +539,7 @@ pub fn start_with_options_cancellable(
             .unwrap_or_else(|| "Embedded SSH startup failed".into()));
     }
 
-    let (ipv6_supported, transport, agent) = readiness.unwrap();
+    let (ipv6_supported, transport, agent, outer_tcp, ssh_tuning) = readiness.unwrap();
     Ok(EmbeddedTunnelHandle {
         stop_tx,
         join: Some(join),
@@ -536,6 +548,8 @@ pub fn start_with_options_cancellable(
         ipv6_supported,
         transport,
         agent,
+        outer_tcp,
+        ssh_tuning,
     })
 }
 
@@ -544,13 +558,15 @@ async fn run_embedded_tunnel(
     server: EmbeddedServer,
     mut stop: tokio::sync::watch::Receiver<bool>,
     counters: Arc<TrafficCounters>,
-    ready: Sender<(Option<bool>, Endpoint, AgentCapabilities)>,
+    ready: Sender<(Option<bool>, Endpoint, AgentCapabilities, Arc<TcpObserver>, SshTuning)>,
     logs: Arc<std::sync::Mutex<Vec<String>>>,
     options: EmbeddedOptions,
 ) -> Result<(), String> {
     let listener =
         tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
+    let log_tcp = options.protect_socket.is_none();
+    let ssh_tuning = options.ssh_tuning.clone();
     let udp_receive_window = options.udp_receive_window;
     let cap_default_udp_receive_slots = options.cap_default_udp_receive_slots;
     let agent_udp_receive_window = options.agent_udp_receive_window;
@@ -621,7 +637,9 @@ async fn run_embedded_tunnel(
     };
     let buffers = DatagramBuffers::default();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
-    let _ = ready.send((ipv6_supported, transport.clone(), agent));
+    let _ = ready.send((ipv6_supported, transport.clone(), agent, route.outer_tcp.clone(), ssh_tuning));
+    let mut tcp_tick = tokio::time::interval(Duration::from_secs(5));
+    tcp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if *stop.borrow() {
             transport.shutdown();
@@ -629,6 +647,11 @@ async fn run_embedded_tunnel(
             return Ok(());
         }
         tokio::select! {
+            _ = tcp_tick.tick(), if log_tcp => {
+                if let Ok(snapshot) = serde_json::to_string(&route.outer_tcp.snapshot()) {
+                    super::log_line(&logs, format!("SSH TCP {snapshot}"));
+                }
+            }
             accepted = listener.accept() => {
                 let (stream, originator_addr) = accepted.map_err(|error| error.to_string())?;
                 let permit = match Arc::clone(&connection_limit).try_acquire_owned() {
@@ -813,6 +836,7 @@ async fn handshake<A: ToSocketAddrs>(
     server: &EmbeddedServer,
     addrs: A,
     options: EmbeddedOptions,
+    observer: Arc<TcpObserver>,
 ) -> Result<client::Handle<SshClient>, String> {
     // Create and protect the transport before connect: VPN routes must never
     // capture their own SSH connection. No extra transport connection is made.
@@ -852,7 +876,7 @@ async fn handshake<A: ToSocketAddrs>(
     }
     let stream = connected.ok_or(last_error)?;
     let _ = stream.set_nodelay(true);
-    handshake_stream(server, stream, options).await
+    handshake_stream(server, ObservedStream::new(stream, observer), options).await
 }
 
 async fn handshake_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
@@ -860,14 +884,17 @@ async fn handshake_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     options: EmbeddedOptions,
 ) -> Result<client::Handle<SshClient>, String> {
-    let config = Arc::new(client::Config {
+    options.ssh_tuning.validate()?;
+    let mut config = client::Config {
         nodelay: true,
         channel_buffer_size: 32,
         inactivity_timeout: Some(Duration::from_secs(30)),
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
         ..Default::default()
-    });
+    };
+    options.ssh_tuning.configure(&mut config);
+    let config = Arc::new(config);
     let handler = SshClient {
         host: server.host.clone(),
         port: server.port,
@@ -965,7 +992,7 @@ async fn connect_ssh<A: ToSocketAddrs>(
     options: EmbeddedOptions,
 ) -> Result<client::Handle<SshClient>, String> {
     let key_pair = load_identity(server)?;
-    let mut session = handshake(server, addrs, options).await?;
+    let mut session = handshake(server, addrs, options, Arc::new(TcpObserver::default())).await?;
     authenticate_ssh(server, &mut session, key_pair).await?;
     Ok(session)
 }
@@ -1011,6 +1038,7 @@ async fn handshake_via(
     server: &EmbeddedServer,
     options: EmbeddedOptions,
     previous: Option<&client::Handle<SshClient>>,
+    observer: Arc<TcpObserver>,
 ) -> Result<client::Handle<SshClient>, String> {
     if let Some(previous) = previous {
         let channel = previous.channel_open_direct_tcpip(&server.host, server.port.into(), "127.0.0.1", 0)
@@ -1018,11 +1046,13 @@ async fn handshake_via(
             .map_err(|error| format!("SSH-проброс до {}:{} отклонён или недоступен: {error}", server.host, server.port))?;
         handshake_stream(server, channel.into_stream(), options).await
     } else {
-        handshake(server, (server.host.as_str(), server.port), options).await
+        handshake(server, (server.host.as_str(), server.port), options, observer).await
     }
 }
 
 async fn route_handshake(server: &EmbeddedServer, mut options: EmbeddedOptions) -> Result<SshRoute, String> {
+    options.ssh_tuning.validate()?;
+    let outer_tcp = Arc::new(TcpObserver::default());
     let jumps = std::mem::take(&mut options.jumps);
     if jumps.len() > MAX_SSH_JUMPS {
         return Err(format!("Допустимо не более {MAX_SSH_JUMPS} промежуточных SSH-серверов"));
@@ -1036,20 +1066,21 @@ async fn route_handshake(server: &EmbeddedServer, mut options: EmbeddedOptions) 
     let mut sessions = Vec::with_capacity(jumps.len());
     for (index, jump) in jumps.into_iter().enumerate() {
         let hop_options = EmbeddedOptions {
+            ssh_tuning: options.ssh_tuning.clone(),
             host_key_sha256: jump.host_key_sha256,
             protect_socket: options.protect_socket.clone(),
             ..Default::default()
         };
         let result = async {
             let identity = load_identity(&jump.server)?;
-            let mut session = handshake_via(&jump.server, hop_options, sessions.last()).await?;
+            let mut session = handshake_via(&jump.server, hop_options, sessions.last(), outer_tcp.clone()).await?;
             authenticate_ssh(&jump.server, &mut session, identity).await?;
             Ok::<_, String>(session)
         }.await;
         sessions.push(result.map_err(|error| format!("SSH-звено {} ({}): {error}", index + 1, jump.server.name))?);
     }
-    let destination = handshake_via(server, options, sessions.last()).await?;
-    Ok(SshRoute { destination, jumps: sessions })
+    let destination = handshake_via(server, options, sessions.last(), outer_tcp.clone()).await?;
+    Ok(SshRoute { destination, jumps: sessions, outer_tcp })
 }
 
 async fn connect_route(server: &EmbeddedServer, options: EmbeddedOptions) -> Result<SshRoute, String> {

@@ -202,6 +202,9 @@ impl Drop for Fixture {
     }
 }
 async fn fixture(mode: Mode) -> Fixture {
+    fixture_with_cipher(mode, None).await
+}
+async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) -> Fixture {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     // Public fixed seeds are used only by this loopback fixture.
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -229,12 +232,16 @@ async fn fixture(mode: Mode) -> Fixture {
         ),
         ..Default::default()
     };
-    let config = Arc::new(server::Config {
+    let mut config = server::Config {
         keys: vec![host],
         auth_rejection_time: Duration::ZERO,
         auth_rejection_time_initial: Some(Duration::ZERO),
         ..Default::default()
-    });
+    };
+    if let Some(cipher) = cipher {
+        config.preferred.cipher = std::borrow::Cow::Owned(vec![cipher]);
+    }
+    let config = Arc::new(config);
     let commands = Arc::new(Mutex::new(Vec::new()));
     let captured = commands.clone();
     let task = tokio::spawn(async move {
@@ -311,6 +318,28 @@ async fn a_wrong_jump_fingerprint_prevents_the_forwarding_request() {
     let error = connect_route(&exit.server, options).await.err().unwrap();
     assert!(error.contains("SSH-звено 1") && error.contains("host key"), "{error}");
     assert!(relay.commands.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn forced_cipher_and_small_queue_apply_to_every_ssh_hop() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut exit = fixture_with_cipher(Mode::Current, Some(russh::cipher::AES_128_GCM)).await;
+        let relay = fixture_with_cipher(Mode::Relay(exit.server.port), Some(russh::cipher::AES_128_GCM)).await;
+        exit.server.host = "aes-exit.invalid".into();
+        exit.options.ssh_tuning = SshTuning { cipher: CipherPolicy::Aes128Gcm,
+            channel_buffer_messages:8,channel_receive_window_bytes:1024*1024 };
+        exit.options.jumps.push(EmbeddedJump { server:relay.server.clone(),host_key_sha256:relay.options.host_key_sha256.clone() });
+        let route = connect_route(&exit.server, exit.options.clone()).await.unwrap();
+        let stats=route.outer_tcp.snapshot();
+        assert!(stats.connected);
+        #[cfg(any(target_os="linux",target_os="android",windows))]
+        assert!(stats.rtt_us.is_some(),"{stats:?}");
+        let (transport, _) = start_agent_transport(&route.destination,64,None,None,false).await.unwrap();
+        let mut udp=transport.open(FlowKind::Udp,vec![]).await.unwrap();
+        assert!(udp.sender().try_send_datagram(b"AES chain".to_vec()).unwrap());
+        assert_eq!(&*udp.recv().await.unwrap().unwrap(), b"AES chain");
+        transport.shutdown();route.disconnect().await;
+    }).await.unwrap();
 }
 
 #[tokio::test]

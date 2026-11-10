@@ -37,6 +37,8 @@ struct Config {
     udp_receive_window: Option<FlowWindow>,
     #[serde(default)]
     agent_udp_receive_window: Option<FlowWindow>,
+    #[serde(default)]
+    ssh_tuning: embedded_ssh::SshTuning,
 }
 
 fn android_name() -> String { "Android".into() }
@@ -181,6 +183,7 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                 observed_host_key: Some(observed()),
                 protect_socket: Some(protect),
                 jumps,
+                ssh_tuning: cfg.ssh_tuning,
                 probe_ipv6: true,
                 udp_receive_window: Some(cfg.udp_receive_window.unwrap_or(FlowWindow {
                     bytes: udp_receive_kib * 1024,
@@ -295,6 +298,8 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         "receive_queue_bytes":stats.receive_queue_bytes,"receive_queue_peak":stats.receive_queue_peak,"receive_budget":stats.receive_budget,
         "send_queue_bytes":stats.send_queue_bytes,"send_queue_peak":stats.send_queue_peak,"send_budget":stats.send_budget,
         "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors,"diagnostics":stats.diagnostics});
+    let mut transport = transport;
+    transport["ssh"] = json!(s.tunnel.as_ref().map(|t| t.ssh_stats()));
     let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.agent_summary()),"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
 }
@@ -367,6 +372,7 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_checkServer(
             EmbeddedOptions {
                 host_key_sha256: Some(cfg.host_key_sha256),
                 jumps: ssh_jumps(cfg.ssh_jumps)?,
+                ssh_tuning: cfg.ssh_tuning,
                 ..Default::default()
             },
             cfg.check_agent.unwrap_or(true),

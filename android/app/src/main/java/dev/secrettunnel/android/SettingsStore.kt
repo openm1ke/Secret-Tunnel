@@ -47,10 +47,21 @@ data class UdpWindow(val kib: Int, val slots: Int) {
         }
     }
 }
+data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false) {
+    init { require(cipher in listOf("auto","aes128_gcm","chacha20_poly1305")) { "Неизвестный шифр SSH" } }
+    fun toJson():JSONObject=JSONObject().put("cipher",cipher).put("smallQueue",smallQueue)
+    fun toNativeJson():JSONObject=JSONObject().put("cipher",cipher)
+        .put("channel_buffer_messages",if(smallQueue)8 else 32)
+        .put("channel_receive_window_bytes",if(smallQueue)1024*1024 else 2*1024*1024)
+    companion object {
+        fun fromJson(value:JSONObject)=SshSettings(value.optString("cipher","auto"),value.optBoolean("smallQueue",false))
+    }
+}
+
 data class ProxyProfile(val id:String, val name:String, val serverId:String, val port:Int,
-    val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null)
+    val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null, val ssh:SshSettings=SshSettings())
 data class TunnelSession(val route:List<SshEndpoint>, val socksPort:Int, val packages:Set<String>,
-    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?)
+    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?, val ssh:SshSettings)
 
 class SettingsStore(private val context:Context, private val profileId:String?=null) {
     val prefs = context.getSharedPreferences("tunnel", Context.MODE_PRIVATE)
@@ -128,7 +139,8 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
             val o = a.getJSONObject(it)
             ProxyProfile(o.getString("id"), o.getString("name"), o.getString("serverId"), o.getInt("port"),
                 o.optJSONObject("udpReceive")?.let { UdpWindow.fromJson(it) },
-                o.optJSONObject("udpAgentReceive")?.let { UdpWindow.fromJson(it) })
+                o.optJSONObject("udpAgentReceive")?.let { UdpWindow.fromJson(it) },
+                o.optJSONObject("ssh")?.let { SshSettings.fromJson(it) }?:SshSettings())
         }
     }
     fun saveServer(profile:ServerProfile) {
@@ -151,7 +163,7 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
         items.forEach {
             a.put(JSONObject().put("id", it.id).put("name", it.name).put("serverId", it.serverId)
                 .put("port", it.port).put("udpReceive", it.udpReceive?.toJson())
-                .put("udpAgentReceive", it.udpAgentReceive?.toJson()))
+                .put("udpAgentReceive", it.udpAgentReceive?.toJson()).put("ssh",it.ssh.toJson()))
         }
         check(prefs.edit().putString("proxy_profiles",a.toString()).commit()) {"Не удалось сохранить прокси"}
     }
@@ -183,7 +195,7 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
         }
         require(packages.isNotEmpty()) {"Выберите приложения"}
         return TunnelSession(route,proxy.port,packages,
-            proxy.udpReceive,proxy.udpAgentReceive)
+            proxy.udpReceive,proxy.udpAgentReceive,proxy.ssh)
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {

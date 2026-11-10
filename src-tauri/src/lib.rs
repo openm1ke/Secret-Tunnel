@@ -95,6 +95,8 @@ struct AppSettings {
     ipinfo_token: String,
     #[serde(default = "default_ssh_engine")]
     ssh_engine: String,
+    #[serde(default)]
+    ssh_tuning: Option<Value>,
     #[serde(default = "default_true")]
     hide_sensitive: bool,
     #[serde(default = "default_true")]
@@ -117,6 +119,7 @@ impl Default for AppSettings {
             domain_rules: Vec::new(),
             ipinfo_token: String::new(),
             ssh_engine: default_ssh_engine(),
+            ssh_tuning: None,
             hide_sensitive: true,
             verify_proxy_on_start: true,
             auto_reconnect: false,
@@ -145,6 +148,8 @@ struct TunnelStatus {
     server_id: String,
     server_name: String,
     ssh_route: Vec<String>,
+    #[cfg(feature = "embedded-ssh")]
+    ssh_transport: Option<embedded_ssh::SshSnapshot>,
     proxy_id: String,
     proxy_name: String,
     proxy_host: String,
@@ -609,7 +614,11 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
         validate_server(hop)?;
         Ok(embedded_ssh::EmbeddedJump { server: embedded_server(hop), host_key_sha256: None })
     }).collect::<Result<Vec<_>, String>>()?;
-    Ok(embedded_ssh::EmbeddedOptions { jumps, ..Default::default() })
+    let ssh_tuning = config.settings.ssh_tuning.as_ref()
+        .map(|value| serde_json::from_value::<embedded_ssh::SshTuning>(value.clone()).map_err(|e| e.to_string()))
+        .transpose()?.unwrap_or_default();
+    ssh_tuning.validate()?;
+    Ok(embedded_ssh::EmbeddedOptions { jumps, ssh_tuning, ..Default::default() })
 }
 
 fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
@@ -633,6 +642,11 @@ fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
 }
 
 fn validate_settings(settings: &AppSettings) -> Result<(), String> {
+    #[cfg(feature = "embedded-ssh")]
+    if let Some(value) = &settings.ssh_tuning {
+        let tuning: embedded_ssh::SshTuning = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        tuning.validate()?;
+    }
     secret_tunnel_routing::validate(&settings.domain_rules)?;
     if !settings.redirect_processes.is_empty() || !settings.domain_rules.is_empty() {
         #[cfg(target_os = "macos")]
@@ -949,6 +963,11 @@ fn build_status(
         server_id: server.id,
         server_name: server.name,
         ssh_route,
+        #[cfg(feature = "embedded-ssh")]
+        ssh_transport: runtime.and_then(|runtime| match &runtime.handle {
+            TunnelHandle::Embedded(tunnel) => Some(tunnel.ssh_stats()),
+            _ => None,
+        }),
         proxy_id: proxy.id,
         proxy_name: proxy.name,
         proxy_host: proxy.host,

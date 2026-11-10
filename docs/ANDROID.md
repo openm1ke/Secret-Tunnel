@@ -57,6 +57,8 @@ Workflow `.github/workflows/android.yml` собирает debug APK для pull 
 
 ## Проверки
 
+Расширенные параметры SSH находятся в редакторе прокси: выбор шифра и профиля очереди применяется при следующем подключении ко всем звеньям цепочки. В «Журнале» доступны RTT/RTO первого TCP-соединения, повторные передачи и эпизоды нехватки окна UDP. Клиент переподключает SSH при смене основной сети с сохранением VPN-интерфейса. Результаты и ограничения: [диагностика и проверка мобильной сети](SSH-TRANSPORT-DIAGNOSTICS-2026-11-10.md).
+
 Общий Rust-код: `cargo test --manifest-path tunnel-core/Cargo.toml --locked` (включая отказ при пустом/неверном SSH fingerprint). Проверка JNI на хосте: `cargo check --manifest-path android/native/Cargo.toml --locked`. Windows регрессия: существующие unit tests `src-tauri`.
 
 Пример `tunnel-core/examples/check_tunnel.rs` запускает отдельный SOCKS на 1082 по переданным аргументам и завершает его через 45 секунд. Его можно проверить `python scripts/check_socks_udp.py 1082`: HTTPS, восемь UDP DNS-запросов и закрытие UDP-ассоциации. Этот тест проверяет общий транспорт, **не Android VPN API**.

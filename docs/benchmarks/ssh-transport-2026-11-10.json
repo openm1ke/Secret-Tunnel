@@ -1,0 +1,408 @@
+{
+  "date": "2026-11-10",
+  "route": "client -> RU SSH -> FR SSH -> user agent",
+  "load": {
+    "tcp_streams": 2,
+    "tcp_bytes_per_stream": 4194304,
+    "producer_sleep_ms_per_16kib": 10,
+    "udp_bursts": 3,
+    "packets_per_burst": 180,
+    "udp_packet_bytes": 900,
+    "echo_packets": 48,
+    "echo_payload_bytes": 160,
+    "echo_deadline_ms": 700
+  },
+  "limitations": [
+    "phone probes use local SOCKS; no claim of complete per-app VPN measurement",
+    "Windows comparison uses shared-core CLI with ring, not GUI aws-lc backend",
+    "Windows runs overlapped build activity",
+    "one mobile repeat, unstable mobile path; profiles are not proven causal",
+    "p95 is over received echoes; deadline misses are reported separately"
+  ],
+  "measurements": [
+    {
+      "platform": "windows",
+      "iteration": 0,
+      "profile": "aes-small",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 13.17,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 78.99999999790452
+    },
+    {
+      "platform": "windows",
+      "iteration": 0,
+      "profile": "aes-standard",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 3.83,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 405.99999998812564
+    },
+    {
+      "platform": "windows",
+      "iteration": 0,
+      "profile": "auto-small",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 14.82,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 78.99999999790452
+    },
+    {
+      "platform": "windows",
+      "iteration": 0,
+      "profile": "baseline",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 13.76,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 125.0
+    },
+    {
+      "platform": "windows",
+      "iteration": 1,
+      "profile": "aes-small",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 12.09,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 109.99999998603016
+    },
+    {
+      "platform": "windows",
+      "iteration": 1,
+      "profile": "aes-standard",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 12.02,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 125.0
+    },
+    {
+      "platform": "windows",
+      "iteration": 1,
+      "profile": "auto-small",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 1.54,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 27,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 594.0000000118744
+    },
+    {
+      "platform": "windows",
+      "iteration": 1,
+      "profile": "baseline",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 12.62,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 125.0
+    },
+    {
+      "platform": "windows",
+      "iteration": 2,
+      "profile": "aes-small",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 14.96,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 78.00000000861473
+    },
+    {
+      "platform": "windows",
+      "iteration": 2,
+      "profile": "aes-standard",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 1.22,
+      "udp_sent": 540,
+      "udp_received": 528,
+      "echo_sent": 48,
+      "echo_received": 11,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 687.0000000053551
+    },
+    {
+      "platform": "windows",
+      "iteration": 2,
+      "profile": "auto-small",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 15.44,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 78.00000000861473
+    },
+    {
+      "platform": "windows",
+      "iteration": 2,
+      "profile": "baseline",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 13.32,
+      "udp_sent": 540,
+      "udp_received": 540,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 109.0000000258442
+    },
+    {
+      "platform": "phone",
+      "iteration": 1,
+      "profile": "aes-small",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 4.6,
+      "udp_sent": 540,
+      "udp_received": 372,
+      "echo_sent": 48,
+      "echo_received": 46,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 455.81,
+      "same_physical_network": true,
+      "same_ssh_session": true,
+      "outer_tcp": {
+        "at_ms": 1794286089878,
+        "bytes_in_flight": null,
+        "bytes_retransmitted": 616,
+        "congestion_window_bytes": 60660,
+        "connected": true,
+        "error_code": null,
+        "min_rtt_us": 30713,
+        "not_sent_bytes": 0,
+        "retransmit_timeouts": null,
+        "rto_us": 292000,
+        "rtt_us": 83165,
+        "send_queue_bytes": 0,
+        "source": "linux_tcp_info",
+        "total_retransmits": 6,
+        "unacked_packets": 0
+      },
+      "server_credit_stall_events": 5,
+      "server_credit_stall": {
+        "max_ms": 136,
+        "over_100_ms": 1,
+        "samples": 5
+      }
+    },
+    {
+      "platform": "phone",
+      "iteration": 1,
+      "profile": "aes-standard",
+      "ssh_tuning": {
+        "cipher": "aes128_gcm",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 3.17,
+      "udp_sent": 540,
+      "udp_received": 231,
+      "echo_sent": 48,
+      "echo_received": 41,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 570.53,
+      "same_physical_network": true,
+      "same_ssh_session": true,
+      "outer_tcp": {
+        "at_ms": 1794286160103,
+        "bytes_in_flight": null,
+        "bytes_retransmitted": 1556,
+        "congestion_window_bytes": 51224,
+        "connected": true,
+        "error_code": null,
+        "min_rtt_us": 30935,
+        "not_sent_bytes": 0,
+        "retransmit_timeouts": null,
+        "rto_us": 280000,
+        "rtt_us": 57474,
+        "send_queue_bytes": 0,
+        "source": "linux_tcp_info",
+        "total_retransmits": 8,
+        "unacked_packets": 0
+      },
+      "server_credit_stall_events": 4,
+      "server_credit_stall": {
+        "max_ms": 52,
+        "over_100_ms": 0,
+        "samples": 4
+      }
+    },
+    {
+      "platform": "phone",
+      "iteration": 1,
+      "profile": "auto-small",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 8,
+        "channel_receive_window_bytes": 1048576
+      },
+      "tcp_mbps": 4.68,
+      "udp_sent": 540,
+      "udp_received": 362,
+      "echo_sent": 48,
+      "echo_received": 45,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 355.361,
+      "same_physical_network": true,
+      "same_ssh_session": true,
+      "outer_tcp": {
+        "at_ms": 1794286023533,
+        "bytes_in_flight": null,
+        "bytes_retransmitted": 3036,
+        "congestion_window_bytes": 13480,
+        "connected": true,
+        "error_code": null,
+        "min_rtt_us": 31659,
+        "not_sent_bytes": 0,
+        "retransmit_timeouts": null,
+        "rto_us": 276000,
+        "rtt_us": 70394,
+        "send_queue_bytes": 0,
+        "source": "linux_tcp_info",
+        "total_retransmits": 14,
+        "unacked_packets": 0
+      },
+      "server_credit_stall_events": 3,
+      "server_credit_stall": {
+        "max_ms": 346,
+        "over_100_ms": 1,
+        "samples": 3
+      }
+    },
+    {
+      "platform": "phone",
+      "iteration": 1,
+      "profile": "baseline",
+      "ssh_tuning": {
+        "cipher": "auto",
+        "channel_buffer_messages": 32,
+        "channel_receive_window_bytes": 2097152
+      },
+      "tcp_mbps": 4.89,
+      "udp_sent": 540,
+      "udp_received": 538,
+      "echo_sent": 48,
+      "echo_received": 48,
+      "echo_deadline_ms": 700,
+      "echo_p95_ms": 544.558,
+      "same_physical_network": true,
+      "same_ssh_session": true,
+      "outer_tcp": {
+        "at_ms": 1794286223204,
+        "bytes_in_flight": null,
+        "bytes_retransmitted": 3148,
+        "congestion_window_bytes": 13480,
+        "connected": true,
+        "error_code": null,
+        "min_rtt_us": 30426,
+        "not_sent_bytes": 0,
+        "retransmit_timeouts": null,
+        "rto_us": 348000,
+        "rtt_us": 82311,
+        "send_queue_bytes": 132,
+        "source": "linux_tcp_info",
+        "total_retransmits": 13,
+        "unacked_packets": 1
+      },
+      "server_credit_stall_events": 1,
+      "server_credit_stall": {
+        "max_ms": 12,
+        "over_100_ms": 0,
+        "samples": 1
+      }
+    }
+  ],
+  "handover": {
+    "mobile_data_restored": true,
+    "vpn_network_preserved": true,
+    "tun_preserved": true,
+    "ssh_session_changed": true,
+    "recovery_observed_seconds": 7.92,
+    "tcp_bytes_after": 4194304,
+    "udp_sent_after": 540,
+    "udp_received_after": 540,
+    "echo_sent_after": 48,
+    "echo_received_after": 48
+  }
+}

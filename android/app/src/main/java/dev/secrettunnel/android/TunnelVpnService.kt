@@ -36,6 +36,25 @@ class TunnelVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private val main = Handler(Looper.getMainLooper())
     private val recovery=RecoveryPolicy()
+    private val underlying=UnderlyingNetworkTracker()
+    private var recoveryNetworkHandle:Long?=null
+    private val connectivity by lazy {getSystemService(android.net.ConnectivityManager::class.java)}
+    private val networkCallback=object:android.net.ConnectivityManager.NetworkCallback(){
+        override fun onAvailable(network:android.net.Network){
+            connectivity.getNetworkCapabilities(network)?.let{onCapabilitiesChanged(network,it)}
+        }
+        override fun onCapabilitiesChanged(network:android.net.Network,capabilities:android.net.NetworkCapabilities){
+            if(connectivity.activeNetwork!=network)return
+            if(!capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)&&capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)){
+                if(underlying.currentHandle()!=network.networkHandle)android.util.Log.i("SecretTunnelNetwork","default_available handle=${network.networkHandle}")
+                underlying.available(network.networkHandle,SystemClock.elapsedRealtime())
+            }
+        }
+        override fun onLost(network:android.net.Network){
+            if(underlying.currentHandle()==network.networkHandle)android.util.Log.i("SecretTunnelNetwork","default_lost handle=${network.networkHandle}")
+            underlying.lost(network.networkHandle,SystemClock.elapsedRealtime())
+        }
+    }
     private val diagnostics = TransportDiagnostics.Sampler()
     private var engineIpv6:Boolean?=null
     private var engineCapacity=0
@@ -47,17 +66,26 @@ class TunnelVpnService : VpnService() {
                 if(stopping.get())return@execute
                 var recoveryAttempted=false
                 try {
+                    val networkAction=underlying.action(SystemClock.elapsedRealtime())
+                    if(networkAction==UnderlyingNetworkTracker.Action.OFFLINE||networkAction==UnderlyingNetworkTracker.Action.WAIT){
+                        val waiting=if(networkAction==UnderlyingNetworkTracker.Action.OFFLINE)"Ожидание сети" else "Смена сети"
+                        if(phase!=waiting){phase=waiting;detail="VPN включён. Ждём доступную сеть для SSH.";notifyState()}
+                        main.postDelayed(this,1500);return@execute
+                    }
+                    val moved=networkAction==UnderlyingNetworkTracker.Action.RECONNECT
                     val nativeLog=File(filesDir,"tun.log")
                     if(nativeLog.length()>1_048_576)java.io.RandomAccessFile(nativeLog,"rw").use{it.setLength(0)}
                     val status=JSONObject(NativeBridge.status())
                     if (status.optBoolean("running")) {
                         status.optJSONObject("transport")?.let { diagnostics.sample(SystemClock.elapsedRealtime(), it) }
                     }
-                    when(recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running"),TProxyIsRunning())){
+                    val newNetwork=moved&&recoveryNetworkHandle!=underlying.currentHandle()
+                    when(if(newNetwork)RecoveryPolicy.Action.RECONNECT_SSH else recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running")&&!moved,TProxyIsRunning())){
                         RecoveryPolicy.Action.RECONNECT_SSH->{
-                            recoveryAttempted=true
-                            if(!beginRecovery(status.optString("error").ifBlank{"SSH connection stopped"})){main.postDelayed(this,1500);return@execute}
-                            phase="Переподключение";detail="Восстанавливаем SSH. Трафик остаётся в VPN.";notifyState()
+                            recoveryAttempted=!newNetwork
+                            if(newNetwork)recovery.reset()
+                            else if(!beginRecovery(status.optString("error").ifBlank{"SSH connection stopped"})){main.postDelayed(this,1500);return@execute}
+                            phase=if(newNetwork)"Смена сети" else "Переподключение";detail="Восстанавливаем SSH. Трафик остаётся в VPN.";notifyState()
                             NativeBridge.stop()
                             if(!stopping.get())connectSsh()
                             if(!stopping.get()){startPacketEngine();markReady()}
@@ -84,6 +112,8 @@ class TunnelVpnService : VpnService() {
     }
     override fun onCreate() {
         super.onCreate()
+        connectivity.activeNetwork?.let {network->connectivity.getNetworkCapabilities(network)?.let{networkCallback.onCapabilitiesChanged(network,it)}}
+        connectivity.registerDefaultNetworkCallback(networkCallback,main)
         File(filesDir, "ssh-key.runtime").delete()
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "SSH-туннель", NotificationManager.IMPORTANCE_LOW))
     }
@@ -140,8 +170,11 @@ class TunnelVpnService : VpnService() {
     }
     private fun markReady(){
         if(stopping.get())return
-        phase="Работает"
-        detail="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"
+        when(underlying.action(SystemClock.elapsedRealtime())){
+            UnderlyingNetworkTracker.Action.OFFLINE->{phase="Ожидание сети";detail="VPN включён. Ждём доступную сеть для SSH."}
+            UnderlyingNetworkTracker.Action.WAIT,UnderlyingNetworkTracker.Action.RECONNECT->{phase="Смена сети";detail="VPN включён. Переподключаем SSH."}
+            else->{phase="Работает";detail="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"}
+        }
         notifyState()
     }
     private fun startPacketEngine(){
@@ -194,6 +227,8 @@ class TunnelVpnService : VpnService() {
     }
     private fun connectSsh() {
         if (stopping.get()) return
+        val networkWhenConnecting=underlying.currentHandle()
+        recoveryNetworkHandle=networkWhenConnecting
         val current = session ?: error("Нет параметров сеанса")
         SettingsStore(this).withSshConfig(current.route) { config ->
             config.put("socks_port", current.socksPort)
@@ -201,8 +236,10 @@ class TunnelVpnService : VpnService() {
                 .put("max_connections", connectionBudget())
                 .put("udp_receive_window", current.udpReceive?.toJson())
                 .put("agent_udp_receive_window", current.udpAgentReceive?.toJson())
+                .put("ssh_tuning",current.ssh.toNativeJson())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
+            underlying.connectedOn(networkWhenConnecting)
         }
     }
     private fun notification(): Notification {
@@ -239,6 +276,7 @@ class TunnelVpnService : VpnService() {
     }
     override fun onRevoke() { stopAsync() }
     override fun onDestroy() {
+        runCatching{connectivity.unregisterNetworkCallback(networkCallback)}
         if (active && !stopping.get()) stopAsync()
         worker.shutdown()
         sampling.shutdownNow()

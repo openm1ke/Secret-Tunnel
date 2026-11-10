@@ -48,12 +48,20 @@ type ProxyProfile = {
   port: number;
 };
 
+type SshTuning = {
+  cipher: "auto" | "aes128_gcm" | "chacha20_poly1305";
+  channel_buffer_messages: number;
+  channel_receive_window_bytes: number;
+};
+const defaultSshTuning: SshTuning = {cipher:"auto",channel_buffer_messages:32,channel_receive_window_bytes:2097152};
+
 type AppSettings = {
   redirect_cli_path: string;
   redirect_processes: string[];
   domain_rules: DomainRule[];
   ipinfo_token: string;
   ssh_engine: string;
+  ssh_tuning?: SshTuning | null;
   hide_sensitive: boolean;
   verify_proxy_on_start: boolean;
   auto_reconnect: boolean;
@@ -1175,6 +1183,26 @@ function App() {
                   Embedded Rust SSH runs the SOCKS tunnel inside the app. Build with --embedded and keep System OpenSSH as the stable fallback.
                 </div>
               )}
+              <details>
+                <summary>Расширенные · Embedded SSH</summary>
+                <p className="hint">Применяется при следующем подключении через встроенный движок, включая все звенья SSH-цепочки. Сжатие выключено.</p>
+                <label>
+                  Шифрование
+                  <select value={settingsDraft.ssh_tuning?.cipher ?? "auto"} onChange={(event) => updateSettings("ssh_tuning", {...defaultSshTuning,...settingsDraft.ssh_tuning,cipher:event.target.value as SshTuning["cipher"]})}>
+                    <option value="auto">Авто</option>
+                    <option value="aes128_gcm">AES-128-GCM</option>
+                    <option value="chacha20_poly1305">ChaCha20-Poly1305</option>
+                  </select>
+                </label>
+                <label>
+                  Очередь SSH
+                  <select value={settingsDraft.ssh_tuning?.channel_buffer_messages === 8 ? "small" : "default"} onChange={(event) => updateSettings("ssh_tuning", {...defaultSshTuning,...settingsDraft.ssh_tuning,channel_buffer_messages:event.target.value === "small" ? 8 : 32,channel_receive_window_bytes:event.target.value === "small" ? 1048576 : 2097152})}>
+                    <option value="default">Стандартная · 32 сообщения / 2 МиБ</option>
+                    <option value="small">Уменьшенная · 8 сообщений / 1 МиБ · тест</option>
+                  </select>
+                </label>
+                <p className="hint">Уменьшенная очередь предназначена для сравнения задержек под нагрузкой и может ограничить скорость на соединениях с большим RTT.</p>
+              </details>
               <label>
                 <SettingLabel hint="Токен IPinfo Lite нужен только для определения публичного IP, страны и флага через запущенный SOCKS proxy. Можно оставить пустым, тогда IP/страна не будут подтягиваться.">
                   IPinfo token

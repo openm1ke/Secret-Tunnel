@@ -99,6 +99,9 @@ async fn udp_overload_is_counted_and_does_not_retain_unbounded_packets() {
     assert_eq!(client.snapshot().udp_drops, 1);
     assert_eq!(client.snapshot().diagnostics.udp_flow_credit, 1);
     assert_eq!(client.snapshot().diagnostics.udp_credit_slots, 1);
+    assert!(!sender.try_send_datagram(vec![1]).unwrap());
+    assert_eq!(client.snapshot().diagnostics.udp_credit_stall_events, 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
     drop(incoming.recv().await.unwrap().unwrap());
     for _ in 0..100 {
         if sender.state.window.counts.lock().unwrap().slots > 0 {
@@ -108,6 +111,12 @@ async fn udp_overload_is_counted_and_does_not_retain_unbounded_packets() {
     }
     assert!(sender.try_send_datagram(vec![3]).unwrap());
     assert!(client.snapshot().diagnostics.udp_credit_return.samples > 0);
+    let stalled = client.snapshot().diagnostics;
+    assert_eq!(stalled.udp_credit_stall.samples, 1);
+    let event = stalled.last_udp_credit_stall.unwrap();
+    assert_eq!(event.flow, flow.id());
+    assert!(event.elapsed_ms >= 20);
+    assert_eq!(event.credit_slots, 1);
     let diagnostics = server.snapshot().diagnostics;
     assert_eq!(diagnostics.udp_receive_hold.samples, 1);
     assert_eq!(diagnostics.udp_credit_queue.samples, 1);

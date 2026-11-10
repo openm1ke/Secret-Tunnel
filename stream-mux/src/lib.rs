@@ -188,12 +188,25 @@ struct WindowCredit {
     bytes: usize,
     slots: usize,
     udp_sample: Option<Instant>,
+    shortage_sample: Option<Instant>,
 }
 
+#[derive(Debug)]
 enum CreditShortage {
     Bytes,
     Slots,
     Both,
+}
+
+#[derive(Debug)]
+struct WindowShortage {
+    cause: CreditShortage,
+    first_rejection: bool,
+}
+#[derive(Default)]
+struct CreditTiming {
+    since_enqueue: Option<Duration>,
+    since_shortage: Option<Duration>,
 }
 
 impl Window {
@@ -204,18 +217,24 @@ impl Window {
                 bytes,
                 slots,
                 udp_sample: None,
+                shortage_sample: None,
             }),
             max: (bytes, slots),
             ready: Notify::new(),
         })
     }
-    fn reserve(self: &Arc<Self>, bytes: usize) -> std::result::Result<Reservation, CreditShortage> {
+    fn reserve(self: &Arc<Self>, bytes: usize) -> std::result::Result<Reservation, WindowShortage> {
         let mut counts = self.counts.lock().unwrap();
-        match (counts.bytes < bytes, counts.slots == 0) {
-            (true, true) => return Err(CreditShortage::Both),
-            (true, false) => return Err(CreditShortage::Bytes),
-            (false, true) => return Err(CreditShortage::Slots),
-            (false, false) => {}
+        let shortage = match (counts.bytes < bytes, counts.slots == 0) {
+            (true, true) => Some(CreditShortage::Both),
+            (true, false) => Some(CreditShortage::Bytes),
+            (false, true) => Some(CreditShortage::Slots),
+            (false, false) => None,
+        };
+        if let Some(cause) = shortage {
+            let first_rejection = counts.shortage_sample.is_none();
+            counts.shortage_sample.get_or_insert_with(Instant::now);
+            return Err(WindowShortage { cause, first_rejection });
         }
         counts.bytes -= bytes;
         counts.slots -= 1;
@@ -233,7 +252,7 @@ impl Window {
             .get_or_insert_with(Instant::now);
     }
 
-    fn grant(&self, bytes: usize, slots: usize, from_peer: bool) -> Result<Option<Duration>> {
+    fn grant(&self, bytes: usize, slots: usize, from_peer: bool) -> Result<CreditTiming> {
         let mut counts = self.counts.lock().unwrap();
         if bytes == 0
             || slots == 0
@@ -246,9 +265,12 @@ impl Window {
         counts.slots += slots;
         self.ready.notify_waiters();
         Ok(if from_peer {
-            counts.udp_sample.take().map(|t| t.elapsed())
+            CreditTiming {
+                since_enqueue: counts.udp_sample.take().map(|t| t.elapsed()),
+                since_shortage: counts.shortage_sample.take().map(|t| t.elapsed()),
+            }
         } else {
-            None
+            CreditTiming::default()
         })
     }
 }
@@ -926,7 +948,10 @@ impl Sender {
         let mut credit = match self.state.window.reserve(data.len()) {
             Ok(credit) => credit,
             Err(shortage) => {
-                let cause = match shortage {
+                if shortage.first_rejection {
+                    metrics.udp_credit_stall_events.fetch_add(1, Ordering::Relaxed);
+                }
+                let cause = match shortage.cause {
                     CreditShortage::Bytes => &metrics.udp_credit_bytes,
                     CreditShortage::Slots => &metrics.udp_credit_slots,
                     CreditShortage::Both => &metrics.udp_credit_both,
@@ -1220,17 +1245,29 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
             if data.len() != 8 {
                 return Err("Invalid credit frame".into());
             }
-            let elapsed = state.window.grant(
+            let timing = state.window.grant(
                 u32::from_be_bytes(data[..4].try_into().unwrap()) as usize,
                 u32::from_be_bytes(data[4..].try_into().unwrap()) as usize,
                 true,
             )?;
-            if let Some(elapsed) = elapsed {
+            if let Some(elapsed) = timing.since_enqueue {
                 inner
                     .counters
                     .diagnostics
                     .udp_credit_return
                     .observe(elapsed);
+            }
+            if state.kind == FlowKind::Udp {
+                if let Some(elapsed) = timing.since_shortage {
+                    let metrics = &inner.counters.diagnostics;
+                    metrics.udp_credit_stall.observe(elapsed);
+                    *metrics.last_udp_credit_stall.lock().unwrap() = Some(diagnostics::UdpCreditStall {
+                        at_ms: diagnostics::unix_millis(), flow: id,
+                        elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
+                        credit_bytes: u32::from_be_bytes(data[..4].try_into().unwrap()) as usize,
+                        credit_slots: u32::from_be_bytes(data[4..].try_into().unwrap()) as usize,
+                    });
+                }
             }
         }
         Kind::Close => {

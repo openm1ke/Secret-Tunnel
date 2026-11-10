@@ -1376,9 +1376,13 @@ dependencies = [
 name = "secret-tunnel-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "russh",
  "secret-tunnel-mux",
+ "serde",
+ "serde_json",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

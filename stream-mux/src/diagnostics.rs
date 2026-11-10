@@ -37,9 +37,19 @@ pub struct TcpEvent {
     pub outcome: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UdpCreditStall {
+    pub at_ms: u64,
+    pub flow: u32,
+    pub elapsed_ms: u64,
+    pub credit_bytes: usize,
+    pub credit_slots: usize,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Diagnostics {
+    pub process_id: u32,
     pub at_ms: u64,
     pub bytes_tx: u64,
     pub bytes_rx: u64,
@@ -52,6 +62,9 @@ pub struct Diagnostics {
     pub udp_window_bytes: usize,
     pub udp_window_slots: usize,
     pub udp_credit_return: Delay,
+    pub udp_credit_stall_events: u64,
+    pub udp_credit_stall: Delay,
+    pub last_udp_credit_stall: Option<UdpCreditStall>,
     pub udp_receive_hold: Delay,
     pub udp_credit_queue: Delay,
     pub udp_credit_write: Delay,
@@ -114,6 +127,9 @@ pub(crate) struct Metrics {
     pub(crate) udp_tx_attempts: AtomicU64,
     pub(crate) udp_received: AtomicU64,
     pub(crate) udp_credit_return: Timing,
+    pub(crate) udp_credit_stall_events: AtomicU64,
+    pub(crate) udp_credit_stall: Timing,
+    pub(crate) last_udp_credit_stall: Mutex<Option<UdpCreditStall>>,
     pub(crate) udp_receive_hold: Timing,
     pub(crate) udp_credit_queue: Timing,
     pub(crate) udp_credit_write: Timing,
@@ -194,6 +210,7 @@ impl Metrics {
     pub(crate) fn snapshot(&self, bytes_tx: u64, bytes_rx: u64) -> Diagnostics {
         let tcp = self.tcp.lock().unwrap();
         Diagnostics {
+            process_id: std::process::id(),
             at_ms: unix_millis(),
             bytes_tx,
             bytes_rx,
@@ -206,6 +223,9 @@ impl Metrics {
             udp_window_bytes: 0,
             udp_window_slots: 0,
             udp_credit_return: self.udp_credit_return.snapshot(),
+            udp_credit_stall_events: self.udp_credit_stall_events.load(Relaxed),
+            udp_credit_stall: self.udp_credit_stall.snapshot(),
+            last_udp_credit_stall: self.last_udp_credit_stall.lock().unwrap().clone(),
             udp_receive_hold: self.udp_receive_hold.snapshot(),
             udp_credit_queue: self.udp_credit_queue.snapshot(),
             udp_credit_write: self.udp_credit_write.snapshot(),

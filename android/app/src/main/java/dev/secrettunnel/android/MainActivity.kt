@@ -33,6 +33,7 @@ class MainActivity:Activity() {
     private var serverSpinner:Spinner?=null
     private var proxyUdpReceive: UdpWindow? = null
     private var proxyUdpAgentReceive: UdpWindow? = null
+    private var proxySsh=SshSettings()
     private var formSnapshot=""
     private var formDraft:Bundle?=null
     private var heroTitle:TextView?=null
@@ -106,6 +107,7 @@ class MainActivity:Activity() {
             putInt("serverPosition",serverSpinner?.selectedItemPosition?:0)
             putString("udpReceive", proxyUdpReceive?.toJson()?.toString())
             putString("udpAgentReceive", proxyUdpAgentReceive?.toJson()?.toString())
+            putString("ssh",proxySsh.toJson().toString())
         })
         super.onSaveInstanceState(out)
     }
@@ -319,10 +321,12 @@ class MainActivity:Activity() {
         portField=field("Локальный порт",(proxy?.port?:1080).toString(),"1024–65535",1003,true)
         proxyUdpReceive = proxy?.udpReceive
         proxyUdpAgentReceive = proxy?.udpAgentReceive
+        proxySsh=proxy?.ssh?:SshSettings()
         val originalSignature=formSignature()
         restoreDraft()
         body.addView(label("Адрес: 127.0.0.1. Порт используется локальным SOCKS5-прокси и VPN выбранных приложений.",13,false,Palette.muted),spaced(14))
         body.addView(udpSettingsCard(), spaced(16))
+        body.addView(sshSettingsCard(), spaced(16))
         body.addView(button("Сохранить прокси",true){unlocked();saveProxyForm();navigate("proxies")},spaced(20))
         if(proxy!=null)body.addView(button("Удалить прокси",danger=true){unlocked();confirmDelete("Удалить прокси ${proxy.name}?"){store.deleteProxy(proxy.id);navigate("proxies")}},spaced(8))
         formSnapshot=originalSignature
@@ -352,11 +356,11 @@ class MainActivity:Activity() {
         val serverId=selectedServerInEditor() ?: error("Выберите сервер")
         require(store.server(serverId)!=null){"Этот сервер удалён. Откройте форму заново и выберите другой."}
         store.saveProxy(ProxyProfile(editingId,nameField?.text.toString().trim(),serverId,
-            portField?.text.toString().toIntOrNull()?:0,proxyUdpReceive,proxyUdpAgentReceive))
+            portField?.text.toString().toIntOrNull()?:0,proxyUdpReceive,proxyUdpAgentReceive,proxySsh))
         formSnapshot=formSignature()
     }
     private fun formSignature()=listOf(nameField?.text,hostField?.text,portField?.text,userField?.text,
-        serverSpinner?.selectedItemPosition,proxyUdpReceive,proxyUdpAgentReceive).joinToString("\u0000")
+        serverSpinner?.selectedItemPosition,proxyUdpReceive,proxyUdpAgentReceive,proxySsh).joinToString("\u0000")
     private fun restoreDraft(){
         formDraft?.let{d->
             nameField?.setText(d.getString("name"));hostField?.setText(d.getString("host"))
@@ -364,6 +368,7 @@ class MainActivity:Activity() {
             serverSpinner?.setSelection(d.getInt("serverPosition"))
             proxyUdpReceive = d.getString("udpReceive")?.let { UdpWindow.fromJson(JSONObject(it)) }
             proxyUdpAgentReceive = d.getString("udpAgentReceive")?.let { UdpWindow.fromJson(JSONObject(it)) }
+            proxySsh=d.getString("ssh")?.let { SshSettings.fromJson(JSONObject(it)) }?:proxySsh
         }
         formDraft=null
     }
@@ -389,6 +394,34 @@ class MainActivity:Activity() {
         windowButton("Отправка", proxyUdpAgentReceive) { proxyUdpAgentReceive = it }
         addView(label("Для изменения окна отправки нужен агент с поддержкой этой настройки.",
             12, false, Palette.muted), spaced(8))
+    }
+
+    private fun sshSettingsCard():LinearLayout=card().apply {
+        addView(label("Расширенные · SSH",16,true))
+        addView(label("Применяется ко всем серверам цепочки при следующем подключении.",12,false,Palette.muted),spaced(8))
+        val codes=listOf("auto","aes128_gcm","chacha20_poly1305")
+        val names=listOf("Авто","AES-128-GCM","ChaCha20-Poly1305")
+        fun cipherCaption()="Шифрование · ${names[codes.indexOf(proxySsh.cipher)]}"
+        lateinit var cipher:Button
+        cipher=button(cipherCaption()){
+            unlocked()
+            AlertDialog.Builder(this@MainActivity).setTitle("Шифрование SSH")
+                .setSingleChoiceItems(names.toTypedArray(),codes.indexOf(proxySsh.cipher)){dialog,index->
+                    proxySsh=proxySsh.copy(cipher=codes[index]);cipher.text=cipherCaption();dialog.dismiss()
+                }.setNegativeButton("Отмена",null).show()
+        }
+        addView(cipher,spaced(8))
+        fun queueCaption()="Очередь · ${if(proxySsh.smallQueue)"Уменьшенная · тест" else "Стандартная"}"
+        lateinit var queue:Button
+        queue=button(queueCaption()){
+            unlocked()
+            AlertDialog.Builder(this@MainActivity).setTitle("Очередь SSH")
+                .setSingleChoiceItems(arrayOf("Стандартная · 32 сообщения / 2 МиБ","Уменьшенная · 8 сообщений / 1 МиБ"),if(proxySsh.smallQueue)1 else 0){dialog,index->
+                    proxySsh=proxySsh.copy(smallQueue=index==1);queue.text=queueCaption();dialog.dismiss()
+                }.setNegativeButton("Отмена",null).show()
+        }
+        addView(queue,spaced(8))
+        addView(label("Уменьшенная очередь предназначена для сравнения задержек под нагрузкой. Она может ограничить скорость на соединениях с большим RTT. Сжатие выключено.",12,false,Palette.muted),spaced(8))
     }
 
     private fun udpWindowLabel(window: UdpWindow?): String =
@@ -505,6 +538,7 @@ class MainActivity:Activity() {
         lastStatus.optJSONObject("transport")?.let { t->
             append("Транспорт v3 · SSH-каналов: ${t.optInt("ssh_channels")}\n")
             TransportDiagnostics.windows(t)?.let { append("$it\n") }
+            t.optJSONObject("ssh")?.let { append(TransportDiagnostics.describeSsh(it)+"\n") }
             append("Соединения: ${t.optInt("active")} / ${t.optInt("limit")} · пик: ${t.optInt("peak")}\n")
             append("Очереди: приём ${t.optLong("receive_queue_bytes")} / ${t.optLong("receive_budget")} B; отправка ${t.optLong("send_queue_bytes")} / ${t.optLong("send_budget")} B\n")
             append("UDP отброшено: ${t.optLong("udp_drops")} · отказов по лимиту: ${t.optLong("rejected")} · ошибок протокола: ${t.optLong("protocol_errors")}\n\n")

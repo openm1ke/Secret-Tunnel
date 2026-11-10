@@ -4,7 +4,7 @@ use jni::{
     JNIEnv,
 };
 use secret_tunnel_core::embedded_ssh::{
-    self, EmbeddedOptions, EmbeddedProxy, EmbeddedServer, EmbeddedTunnelHandle, FlowWindow,
+    self, EmbeddedJump, EmbeddedOptions, EmbeddedProxy, EmbeddedServer, EmbeddedTunnelHandle, FlowWindow,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -15,12 +15,18 @@ use std::sync::{
 
 #[derive(Deserialize)]
 struct Config {
+    #[serde(default = "android_name")]
+    name: String,
     host: String,
     port: u16,
     user: String,
     key_path: String,
     host_key_sha256: String,
+    #[serde(default)]
     socks_port: u16,
+    #[serde(default)]
+    ssh_jumps: Vec<JumpConfig>,
+    check_agent: Option<bool>,
     #[serde(default)]
     device_key_path: String,
     #[serde(default)]
@@ -31,6 +37,50 @@ struct Config {
     udp_receive_window: Option<FlowWindow>,
     #[serde(default)]
     agent_udp_receive_window: Option<FlowWindow>,
+}
+
+fn android_name() -> String { "Android".into() }
+
+#[derive(Deserialize)]
+struct JumpConfig {
+    name: String,
+    host: String,
+    port: u16,
+    user: String,
+    key_path: String,
+    host_key_sha256: String,
+}
+
+#[derive(Deserialize)]
+struct ProbeConfig {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    ssh_jumps: Vec<JumpConfig>,
+}
+
+fn ssh_jumps(jumps: Vec<JumpConfig>) -> Result<Vec<EmbeddedJump>, String> {
+    if jumps.len() > embedded_ssh::MAX_SSH_JUMPS {
+        return Err("Слишком много промежуточных SSH-серверов".into());
+    }
+    jumps.into_iter().map(|jump| {
+        if jump.host.trim().is_empty() || jump.user.trim().is_empty() || jump.port == 0
+            || jump.key_path.is_empty() || jump.host_key_sha256.is_empty()
+        {
+            return Err(format!("Настройте адрес, ключ и отпечаток сервера «{}»", jump.name));
+        }
+        Ok(EmbeddedJump {
+            server: EmbeddedServer {
+                name: jump.name,
+                host: jump.host,
+                port: jump.port,
+                user: jump.user,
+                key_path: jump.key_path,
+                strict_host_key_checking: "yes".into(),
+            },
+            host_key_sha256: Some(jump.host_key_sha256),
+        })
+    }).collect()
 }
 #[derive(Default)]
 struct State {
@@ -68,15 +118,18 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
     {
         return Err("Укажите сервер, пользователя и порты 1–65535".into());
     }
-    // Build-time setting for comparisons using otherwise identical APKs.
-    let udp_receive_kib = option_env!("ST_ANDROID_UDP_RECEIVE_KIB")
-        .unwrap_or("192")
+    let jumps = ssh_jumps(cfg.ssh_jumps)?;
+    // Keep build-time overrides exact for comparisons using identical APKs.
+    let build_kib = option_env!("ST_ANDROID_UDP_RECEIVE_KIB");
+    let build_slots = option_env!("ST_ANDROID_UDP_RECEIVE_SLOTS");
+    let udp_receive_kib = build_kib
+        .unwrap_or("256")
         .parse::<usize>()
         .ok()
         .filter(|kib| (64..=1024).contains(kib))
         .ok_or("Некорректный размер окна UDP в сборке")?;
-    let udp_receive_slots = option_env!("ST_ANDROID_UDP_RECEIVE_SLOTS")
-        .unwrap_or("128")
+    let udp_receive_slots = build_slots
+        .unwrap_or("192")
         .parse()
         .map_err(|_| "Некорректный лимит UDP-слотов в сборке")?;
     {
@@ -111,7 +164,7 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
         });
         embedded_ssh::start_with_options_cancellable(
             EmbeddedServer {
-                name: "Android".into(),
+                name: cfg.name,
                 host: cfg.host,
                 port: cfg.port,
                 user: cfg.user,
@@ -127,11 +180,15 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                 host_key_sha256: Some(cfg.host_key_sha256),
                 observed_host_key: Some(observed()),
                 protect_socket: Some(protect),
+                jumps,
                 probe_ipv6: true,
                 udp_receive_window: Some(cfg.udp_receive_window.unwrap_or(FlowWindow {
                     bytes: udp_receive_kib * 1024,
                     slots: udp_receive_slots,
                 })),
+                cap_default_udp_receive_slots: cfg.udp_receive_window.is_none()
+                    && build_kib.is_none()
+                    && build_slots.is_none(),
                 agent_udp_receive_window: cfg.agent_udp_receive_window,
                 max_connections: if cfg.max_connections == 0 {
                     512
@@ -263,15 +320,15 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_trafficTotals(
 pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_probe(
     mut env: JNIEnv,
     _: JObject,
-    host: JString,
-    port: i32,
+    config: JString,
 ) -> jstring {
     let result = (|| -> Result<String, String> {
-        let host: String = env.get_string(&host).map_err(|e| e.to_string())?.into();
-        if host.trim().is_empty() || !(1..=65535).contains(&port) {
+        let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();
+        let cfg: ProbeConfig = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        if cfg.host.trim().is_empty() || cfg.port == 0 {
             return Err("Invalid server address or port".into());
         }
-        embedded_ssh::probe_server(&host, port as u16)
+        embedded_ssh::probe_server(&cfg.host, cfg.port, ssh_jumps(cfg.ssh_jumps)?)
     })();
     output(
         &mut env,
@@ -298,16 +355,21 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_checkServer(
         {
             return Err("Укажите сервер, ключ и подтверждённый отпечаток".into());
         }
-        embedded_ssh::diagnose_server(
+        embedded_ssh::diagnose_server_with_options(
             EmbeddedServer {
-                name: "Android".into(),
+                name: cfg.name,
                 host: cfg.host,
                 port: cfg.port,
                 user: cfg.user,
                 key_path: cfg.key_path,
                 strict_host_key_checking: "yes".into(),
             },
-            Some(cfg.host_key_sha256),
+            EmbeddedOptions {
+                host_key_sha256: Some(cfg.host_key_sha256),
+                jumps: ssh_jumps(cfg.ssh_jumps)?,
+                ..Default::default()
+            },
+            cfg.check_agent.unwrap_or(true),
         )
     })();
     output(
@@ -349,20 +411,21 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_registerKey(
         let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();
         let cfg: Config = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
         let public: String = env.get_string(&public).map_err(|e| e.to_string())?.into();
+        let jumps = ssh_jumps(cfg.ssh_jumps)?;
         let mut server = EmbeddedServer {
-            name: "Android".into(),
+            name: cfg.name,
             host: cfg.host,
             port: cfg.port,
             user: cfg.user,
             key_path: cfg.key_path,
             strict_host_key_checking: "yes".into(),
         };
-        embedded_ssh::register_device_key(server.clone(), cfg.host_key_sha256.clone(), public)?;
+        embedded_ssh::register_device_key(server.clone(), cfg.host_key_sha256.clone(), public, jumps.clone())?;
         if cfg.device_key_path.is_empty() {
             return Err("Missing device key verification path".into());
         }
         server.key_path = cfg.device_key_path;
-        embedded_ssh::verify_login(server, cfg.host_key_sha256)
+        embedded_ssh::verify_login(server, cfg.host_key_sha256, jumps)
     })();
     output(&mut env, result.err().unwrap_or_default())
 }

@@ -63,6 +63,8 @@ struct ServerProfile {
     user: String,
     key_path: String,
     #[serde(default)]
+    jump_server_id: Option<String>,
+    #[serde(default)]
     compression: bool,
     #[serde(default = "default_strict_host_key_checking")]
     strict_host_key_checking: String,
@@ -142,6 +144,7 @@ struct TunnelStatus {
     ssh_engine: String,
     server_id: String,
     server_name: String,
+    ssh_route: Vec<String>,
     proxy_id: String,
     proxy_name: String,
     proxy_host: String,
@@ -386,6 +389,7 @@ fn default_config() -> AppConfig {
             port: 22,
             user: "user".to_string(),
             key_path: "~/.ssh/id_ed25519".to_string(),
+            jump_server_id: None,
             compression: false,
             strict_host_key_checking: default_strict_host_key_checking(),
             connect_timeout: default_connect_timeout(),
@@ -557,6 +561,55 @@ fn validate_server(server: &ServerProfile) -> Result<(), String> {
         _ => return Err("StrictHostKeyChecking must be yes, accept-new, or no".to_string()),
     }
     Ok(())
+}
+
+fn server_jumps<'a>(config: &'a AppConfig, destination: &ServerProfile) -> Result<Vec<&'a ServerProfile>, String> {
+    let mut seen = std::collections::HashSet::from([destination.id.clone()]);
+    let mut next = destination.jump_server_id.as_deref();
+    let mut jumps = Vec::new();
+    while let Some(id) = next {
+        if !seen.insert(id.to_owned()) {
+            return Err("В цепочке SSH обнаружен цикл".into());
+        }
+        if jumps.len() == 3 {
+            return Err("В цепочке допустимо до трёх промежуточных серверов".into());
+        }
+        let hop = config.servers.iter().find(|server| server.id == id)
+            .ok_or_else(|| format!("Промежуточный SSH-сервер не найден: {id}"))?;
+        jumps.push(hop);
+        next = hop.jump_server_id.as_deref();
+    }
+    jumps.reverse();
+    Ok(jumps)
+}
+
+#[cfg(feature = "embedded-ssh")]
+fn embedded_server(profile: &ServerProfile) -> embedded_ssh::EmbeddedServer {
+    embedded_ssh::EmbeddedServer {
+        name: profile.name.clone(),
+        host: profile.host.clone(),
+        port: profile.port,
+        user: profile.user.clone(),
+        key_path: expand_home(&profile.key_path),
+        strict_host_key_checking: profile.strict_host_key_checking.clone(),
+    }
+}
+
+#[cfg(feature = "embedded-ssh")]
+fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<embedded_ssh::EmbeddedOptions, String> {
+    let profiles = server_jumps(config, destination)?;
+    if !profiles.is_empty() {
+        for profile in profiles.iter().copied().chain(std::iter::once(destination)) {
+            if profile.strict_host_key_checking == "no" {
+                return Err(format!("Для цепочки SSH включите проверку ключа сервера «{}»", profile.name));
+            }
+        }
+    }
+    let jumps = profiles.into_iter().map(|hop| {
+        validate_server(hop)?;
+        Ok(embedded_ssh::EmbeddedJump { server: embedded_server(hop), host_key_sha256: None })
+    }).collect::<Result<Vec<_>, String>>()?;
+    Ok(embedded_ssh::EmbeddedOptions { jumps, ..Default::default() })
 }
 
 fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
@@ -853,6 +906,7 @@ fn build_status(
             port: 22,
             user: String::new(),
             key_path: String::new(),
+            jump_server_id: None,
             compression: false,
             strict_host_key_checking: default_strict_host_key_checking(),
             connect_timeout: default_connect_timeout(),
@@ -882,15 +936,19 @@ fn build_status(
         }
     }
 
+    let ssh_route: Vec<String> = server_jumps(config, &server).ok().filter(|jumps| !jumps.is_empty())
+        .map(|jumps| jumps.into_iter().chain(std::iter::once(&server)).map(|hop| hop.name.clone()).collect())
+        .unwrap_or_default();
     TunnelStatus {
         state: state_name.to_string(),
         state_emoji: status_emoji(state_name),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         ssh_engine: runtime
             .map(TunnelRuntime::ssh_engine)
-            .unwrap_or_else(|| config.settings.ssh_engine.clone()),
+            .unwrap_or_else(|| if ssh_route.is_empty() { config.settings.ssh_engine.clone() } else { "embedded".into() }),
         server_id: server.id,
         server_name: server.name,
+        ssh_route,
         proxy_id: proxy.id,
         proxy_name: proxy.name,
         proxy_host: proxy.host,
@@ -925,6 +983,9 @@ fn save_server(server: ServerProfile) -> Result<AppConfig, String> {
         } else {
             config.servers.push(server.clone());
         }
+        for profile in &config.servers {
+            server_jumps(config, profile)?;
+        }
         if config.selected_server_id.is_empty() {
             config.selected_server_id = server.id;
         }
@@ -935,6 +996,9 @@ fn save_server(server: ServerProfile) -> Result<AppConfig, String> {
 #[tauri::command]
 fn delete_server(id: String) -> Result<AppConfig, String> {
     mutate_config(|config| {
+        if let Some(server) = config.servers.iter().find(|server| server.jump_server_id.as_deref() == Some(id.as_str())) {
+            return Err(format!("Сервер используется в цепочке «{}». Сначала измените её.", server.name));
+        }
         config.servers.retain(|server| server.id != id);
         if config.selected_server_id == id {
             config.selected_server_id = config
@@ -1039,23 +1103,17 @@ fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 #[tauri::command(async)]
 fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<String, String> {
     validate_server(&server)?;
-    if load_config()?.settings.ssh_engine == "embedded" {
+    let config = load_config()?;
+    if server.jump_server_id.is_some() || config.settings.ssh_engine == "embedded" {
         #[cfg(feature = "embedded-ssh")]
         {
             log_line(
                 &state.logs,
                 "Проверяем SSH, ключ и совместимость агента встроенным движком…",
             );
-            let result = embedded_ssh::diagnose_server(
-                embedded_ssh::EmbeddedServer {
-                    name: server.name,
-                    host: server.host,
-                    port: server.port,
-                    user: server.user,
-                    key_path: expand_home(&server.key_path),
-                    strict_host_key_checking: server.strict_host_key_checking,
-                },
-                None,
+            let is_relay = config.servers.iter().any(|profile| profile.jump_server_id.as_deref() == Some(server.id.as_str()));
+            let result = embedded_ssh::diagnose_server_with_options(
+                embedded_server(&server), embedded_route(&config, &server)?, !is_relay,
             );
             match &result {
                 Ok(message) => log_line(&state.logs, message),
@@ -1128,6 +1186,7 @@ fn start_tunnel(state: State<'_, AppState>) -> Result<String, String> {
     let server = selected_server(&config)?;
     let proxy = selected_proxy(&config)?;
     validate_server(&server)?;
+    server_jumps(&config, &server)?;
     validate_proxy(&proxy)?;
     validate_settings(&config.settings)?;
 
@@ -1178,8 +1237,10 @@ fn start_session_workers(app: tauri::AppHandle) {
                 if let Some(plan) = snapshot.plan {
                     if let (Ok(server), Ok(proxy)) = (selected_server(&plan), selected_proxy(&plan))
                     {
-                        let latency =
-                            tcp_latency_ms(&server.host, server.port, Duration::from_secs(2));
+                        let latency = server_jumps(&plan, &server).ok().and_then(|jumps| {
+                            let entry = jumps.first().copied().unwrap_or(&server);
+                            tcp_latency_ms(&entry.host, entry.port, Duration::from_secs(2))
+                        });
                         if state.control.current(snapshot.generation) {
                             *state.latency.lock().unwrap() = latency;
                         }
@@ -1281,7 +1342,8 @@ fn start_session_workers(app: tauri::AppHandle) {
                 let result = (|| {
                     let server = selected_server(&plan)?;
                     let proxy = selected_proxy(&plan)?;
-                    match plan.settings.ssh_engine.as_str() {
+                    let engine = if server.jump_server_id.is_some() { "embedded" } else { plan.settings.ssh_engine.as_str() };
+                    match engine {
                         "system" => {
                             start_system_ssh_tunnel(&state, plan.clone(), server, proxy, generation)
                         }
@@ -1350,7 +1412,7 @@ fn start_embedded_ssh_tunnel(
 #[cfg(feature = "embedded-ssh")]
 fn start_embedded_ssh_tunnel(
     state: &AppState,
-    _config: AppConfig,
+    config: AppConfig,
     server: ServerProfile,
     proxy: ProxyProfile,
     generation: u64,
@@ -1374,20 +1436,14 @@ fn start_embedded_ssh_tunnel(
         ),
     );
 
-    let handle = embedded_ssh::start_cancellable(
-        embedded_ssh::EmbeddedServer {
-            name: server.name.clone(),
-            host: server.host.clone(),
-            port: server.port,
-            user: server.user.clone(),
-            key_path: expand_home(&server.key_path),
-            strict_host_key_checking: server.strict_host_key_checking.clone(),
-        },
+    let handle = embedded_ssh::start_with_options_cancellable(
+        embedded_server(&server),
         embedded_ssh::EmbeddedProxy {
             host: proxy.host.clone(),
             port: proxy.port,
         },
         Arc::clone(&state.logs),
+        embedded_route(&config, &server)?,
         &|| !state.control.current(generation) || state.closing.load(Ordering::SeqCst),
     )?;
 

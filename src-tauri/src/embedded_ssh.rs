@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, ToSocketAddrs};
 
 #[cfg(test)]
@@ -36,6 +36,14 @@ pub struct EmbeddedProxy {
     pub port: u16,
 }
 
+pub const MAX_SSH_JUMPS: usize = 3;
+
+#[derive(Clone, Debug)]
+pub struct EmbeddedJump {
+    pub server: EmbeddedServer,
+    pub host_key_sha256: Option<String>,
+}
+
 /// Platform integration without changing desktop defaults. Pinning is mandatory
 /// in the Android adapter; an empty pin observes the host key but rejects it.
 #[derive(Clone, Default)]
@@ -43,10 +51,14 @@ pub struct EmbeddedOptions {
     pub host_key_sha256: Option<String>,
     pub observed_host_key: Option<Arc<std::sync::Mutex<Option<String>>>>,
     pub protect_socket: Option<Arc<dyn Fn(i32) -> bool + Send + Sync>>,
+    /// Ordered from the first reachable server to the last relay.
+    pub jumps: Vec<EmbeddedJump>,
     pub probe_ipv6: bool,
     pub max_connections: usize,
     /// Override the local UDP receive window without changing the peer's window.
     pub udp_receive_window: Option<FlowWindow>,
+    /// Allow the automatic local window to use a lower slot limit advertised by the agent.
+    pub cap_default_udp_receive_slots: bool,
     pub agent_udp_receive_window: Option<FlowWindow>,
 }
 
@@ -189,7 +201,23 @@ impl client::Handler for SshClient {
     }
 }
 
-type SharedSession = Arc<client::Handle<SshClient>>;
+struct SshRoute {
+    destination: client::Handle<SshClient>,
+    jumps: Vec<client::Handle<SshClient>>,
+}
+
+impl SshRoute {
+    async fn disconnect(&self) {
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            for session in std::iter::once(&self.destination).chain(self.jumps.iter().rev()) {
+                let _ = session
+                    .disconnect(russh::Disconnect::ByApplication, "", "English")
+                    .await;
+            }
+        })
+        .await;
+    }
+}
 
 #[cfg(test)]
 mod platform_tests {
@@ -521,6 +549,7 @@ async fn run_embedded_tunnel(
         tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
     let udp_receive_window = options.udp_receive_window;
+    let cap_default_udp_receive_slots = options.cap_default_udp_receive_slots;
     let agent_udp_receive_window = options.agent_udp_receive_window;
     let requested = if options.max_connections == 0 {
         1024
@@ -531,19 +560,21 @@ async fn run_embedded_tunnel(
     if max_connections < 32 {
         return Err("Not enough file descriptors for the tunnel".into());
     }
-    let session = tokio::time::timeout(
-        Duration::from_secs(15),
-        connect_ssh(&server, (server.host.as_str(), server.port), options),
-    )
+    let route_description = options.jumps.iter().map(|jump| jump.server.name.as_str())
+        .chain(std::iter::once(server.name.as_str())).collect::<Vec<_>>().join(" → ");
+    if !options.jumps.is_empty() {
+        super::log_line(&logs, format!("SSH-маршрут: {route_description}"));
+    }
+    let route = tokio::time::timeout(route_connect_timeout(&options), connect_route(&server, options))
     .await
-    .map_err(|_| "Embedded SSH connect/authentication timed out".to_string())??;
-    let session = Arc::new(session);
+    .map_err(|_| format!("Embedded SSH connect/authentication timed out: {route_description}"))??;
     super::log_line(&logs, "SSH и ключ проверены; проверяем серверный агент");
     let (transport, agent) = start_agent_transport(
-        &session,
+        &route.destination,
         max_connections,
         udp_receive_window,
         agent_udp_receive_window,
+        cap_default_udp_receive_slots,
     )
     .await?;
     super::log_line(&logs, agent.summary());
@@ -591,7 +622,7 @@ async fn run_embedded_tunnel(
     loop {
         if *stop.borrow() {
             transport.shutdown();
-            disconnect_ssh(&session).await;
+            route.disconnect().await;
             return Ok(());
         }
         tokio::select! {
@@ -612,7 +643,7 @@ async fn run_embedded_tunnel(
                     }
                 });
             }
-            _ = stop.changed() => { transport.shutdown(); disconnect_ssh(&session).await; return Ok(()); }
+            _ = stop.changed() => { transport.shutdown(); route.disconnect().await; return Ok(()); }
             _ = transport.closed() => return Err(transport.error().unwrap_or_else(|| "Transport stopped".into())),
         }
     }
@@ -672,8 +703,15 @@ async fn start_agent_transport(
     max_connections: usize,
     udp_receive_window: Option<FlowWindow>,
     agent_udp_receive_window: Option<FlowWindow>,
+    cap_default_udp_receive_slots: bool,
 ) -> Result<(Endpoint, AgentCapabilities), String> {
     let discovery = discover_agent(session).await?;
+    let udp_receive_window = udp_receive_window.map(|mut window| {
+        if cap_default_udp_receive_slots {
+            window.slots = window.slots.min(discovery.max_udp_slots);
+        }
+        window
+    });
     if agent_udp_receive_window.is_some() && (!discovery.flow_control || !discovery.udp_config) {
         return Err("AGENT_INCOMPATIBLE: Для настройки окна отправки UDP обновите серверный агент или выберите окно сервера по умолчанию.".into());
     }
@@ -731,35 +769,40 @@ async fn start_agent_transport(
 
 /// Authenticate and verify the data handshake without binding SOCKS or routes.
 pub fn diagnose_server(server: EmbeddedServer, pin: Option<String>) -> Result<String, String> {
+    diagnose_server_with_options(
+        server,
+        EmbeddedOptions { host_key_sha256: pin, ..Default::default() },
+        true,
+    )
+}
+
+pub fn diagnose_server_with_options(
+    server: EmbeddedServer,
+    options: EmbeddedOptions,
+    check_agent: bool,
+) -> Result<String, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
+    let timeout = route_connect_timeout(&options) + Duration::from_secs(15);
     runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(30), async {
-            let session = connect_ssh(
-                &server,
-                (server.host.as_str(), server.port),
-                EmbeddedOptions {
-                    host_key_sha256: pin,
-                    ..Default::default()
-                },
-            )
-            .await?;
-            let result = start_agent_transport(&session, 64, None, None).await;
-            let _ = session
-                .disconnect(russh::Disconnect::ByApplication, "", "English")
-                .await;
-            result.map(|(transport, discovery)| {
-                transport.shutdown();
-                format!(
-                    "SSH и ключ: OK. {}. Проверка STMUX003: OK; перехват не включался.",
-                    discovery.summary()
-                )
-            })
+        tokio::time::timeout(timeout, async {
+            let route = connect_route(&server, options).await?;
+            let result = if check_agent {
+                start_agent_transport(&route.destination, 64, None, None, false).await
+                    .map(|(transport, discovery)| {
+                        transport.shutdown();
+                        format!("SSH и ключ: OK. {}. Проверка STMUX003: OK.", discovery.summary())
+                    })
+            } else {
+                Ok("SSH и ключ: OK.".into())
+            };
+            route.disconnect().await;
+            result
         })
         .await
-        .map_err(|_| "Проверка SSH/агента не завершилась за 30 секунд".to_string())?
+        .map_err(|_| format!("Проверка SSH/агента не завершилась за {} с", timeout.as_secs()))?
     })
 }
 
@@ -768,20 +811,6 @@ async fn handshake<A: ToSocketAddrs>(
     addrs: A,
     options: EmbeddedOptions,
 ) -> Result<client::Handle<SshClient>, String> {
-    let config = Arc::new(client::Config {
-        nodelay: true,
-        channel_buffer_size: 32,
-        inactivity_timeout: Some(Duration::from_secs(30)),
-        keepalive_interval: Some(Duration::from_secs(15)),
-        keepalive_max: 3,
-        ..Default::default()
-    });
-    let handler = SshClient {
-        host: server.host.clone(),
-        port: server.port,
-        strict_host_key_checking: server.strict_host_key_checking.clone(),
-        options: options.clone(),
-    };
     // Create and protect the transport before connect: VPN routes must never
     // capture their own SSH connection. No extra transport connection is made.
     let mut connected = None;
@@ -820,16 +849,36 @@ async fn handshake<A: ToSocketAddrs>(
     }
     let stream = connected.ok_or(last_error)?;
     let _ = stream.set_nodelay(true);
-    let session = client::connect_stream(config, stream, handler)
-        .await
-        .map_err(|error| friendly_connect_error(server, error))?;
+    handshake_stream(server, stream, options).await
+}
 
-    Ok(session)
+async fn handshake_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    server: &EmbeddedServer,
+    stream: S,
+    options: EmbeddedOptions,
+) -> Result<client::Handle<SshClient>, String> {
+    let config = Arc::new(client::Config {
+        nodelay: true,
+        channel_buffer_size: 32,
+        inactivity_timeout: Some(Duration::from_secs(30)),
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 3,
+        ..Default::default()
+    });
+    let handler = SshClient {
+        host: server.host.clone(),
+        port: server.port,
+        strict_host_key_checking: server.strict_host_key_checking.clone(),
+        options,
+    };
+    client::connect_stream(config, stream, handler)
+        .await
+        .map_err(|error| friendly_connect_error(server, error))
 }
 
 /// Observe a host key without loading credentials or authenticating. The handler
 /// rejects the key: discovery must never implicitly establish trust.
-pub fn probe_server(host: &str, port: u16) -> Result<String, String> {
+pub fn probe_server(host: &str, port: u16, jumps: Vec<EmbeddedJump>) -> Result<String, String> {
     let observed = Arc::new(std::sync::Mutex::new(None));
     let server = EmbeddedServer {
         name: "Android".into(),
@@ -842,14 +891,12 @@ pub fn probe_server(host: &str, port: u16) -> Result<String, String> {
     let options = EmbeddedOptions {
         host_key_sha256: Some(String::new()),
         observed_host_key: Some(observed.clone()),
+        jumps,
         ..Default::default()
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let result = runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            handshake(&server, (host, port), options).await
-        })
-        .await
+        tokio::time::timeout(route_connect_timeout(&options), route_handshake(&server, options)).await
     });
     let seen = observed.lock().map_err(|e| e.to_string())?.clone();
     if let Some(pin) = seen {
@@ -857,30 +904,19 @@ pub fn probe_server(host: &str, port: u16) -> Result<String, String> {
     }
     Err(match result {
         Ok(Err(e)) => e,
-        _ => "SSH server did not present a key within 15 seconds".into(),
+        _ => "SSH server did not present a key before the connection timeout".into(),
     })
 }
 
-pub fn verify_login(server: EmbeddedServer, pin: String) -> Result<(), String> {
+pub fn verify_login(server: EmbeddedServer, pin: String, jumps: Vec<EmbeddedJump>) -> Result<(), String> {
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let options = EmbeddedOptions { host_key_sha256: Some(pin), jumps, ..Default::default() };
     runtime.block_on(async {
-        let session = tokio::time::timeout(
-            Duration::from_secs(15),
-            connect_ssh(
-                &server,
-                (server.host.as_str(), server.port),
-                EmbeddedOptions {
-                    host_key_sha256: Some(pin),
-                    ..Default::default()
-                },
-            ),
-        )
+        let route = tokio::time::timeout(route_connect_timeout(&options), connect_route(&server, options))
         .await
         .map_err(|_| "SSH authentication timed out".to_string())??;
-        session
-            .disconnect(russh::Disconnect::ByApplication, "", "English")
-            .await
-            .map_err(|e| e.to_string())
+        route.disconnect().await;
+        Ok(())
     })
 }
 
@@ -890,6 +926,7 @@ pub fn register_device_key(
     server: EmbeddedServer,
     pin: String,
     public_key: String,
+    jumps: Vec<EmbeddedJump>,
 ) -> Result<(), String> {
     if !public_key.starts_with("ssh-ed25519 ")
         || public_key.len() > 512
@@ -900,32 +937,46 @@ pub fn register_device_key(
         return Err("Invalid device public key".into());
     }
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let options = EmbeddedOptions { host_key_sha256: Some(pin), jumps, ..Default::default() };
+    let timeout = route_connect_timeout(&options) + Duration::from_secs(5);
     runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            let session = connect_ssh(&server, (server.host.as_str(), server.port),
-                EmbeddedOptions { host_key_sha256: Some(pin), ..Default::default() }).await?;
-            let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+        tokio::time::timeout(timeout, async {
+            let route = connect_route(&server, options).await?;
+            let mut channel = route.destination.channel_open_session().await.map_err(|e| e.to_string())?;
             let command = format!("set -eu; umask 077; mkdir -p \"$HOME/.ssh\"; touch \"$HOME/.ssh/authorized_keys\"; grep -qxF '{}' \"$HOME/.ssh/authorized_keys\" || printf '\\n%s\\n' '{}' >> \"$HOME/.ssh/authorized_keys\"", public_key, public_key);
             channel.exec(true, command).await.map_err(|e| e.to_string())?;
             let mut success = false;
             while let Some(message) = channel.wait().await {
                 if let russh::ChannelMsg::ExitStatus { exit_status } = message { success = exit_status == 0; }
             }
-            let _ = session.disconnect(russh::Disconnect::ByApplication, "", "English").await;
+            route.disconnect().await;
             if success { Ok(()) } else { Err("Could not add device key to authorized_keys".into()) }
         }).await.map_err(|_| "Device registration timed out".to_string())?
     })
 }
 
+#[cfg(test)]
 async fn connect_ssh<A: ToSocketAddrs>(
     server: &EmbeddedServer,
     addrs: A,
     options: EmbeddedOptions,
 ) -> Result<client::Handle<SshClient>, String> {
-    let key_pair = load_secret_key(&server.key_path, None)
-        .map_err(|error| friendly_key_error(&server.key_path, error))?;
+    let key_pair = load_identity(server)?;
     let mut session = handshake(server, addrs, options).await?;
+    authenticate_ssh(server, &mut session, key_pair).await?;
+    Ok(session)
+}
 
+fn load_identity(server: &EmbeddedServer) -> Result<ssh_key::PrivateKey, String> {
+    load_secret_key(&server.key_path, None)
+        .map_err(|error| friendly_key_error(&server.key_path, error))
+}
+
+async fn authenticate_ssh(
+    server: &EmbeddedServer,
+    session: &mut client::Handle<SshClient>,
+    key_pair: ssh_key::PrivateKey,
+) -> Result<(), String> {
     let hash = session
         .best_supported_rsa_hash()
         .await
@@ -946,13 +997,63 @@ async fn connect_ssh<A: ToSocketAddrs>(
         ));
     }
 
-    Ok(session)
+    Ok(())
 }
 
-async fn disconnect_ssh(session: &SharedSession) {
-    let _ = session
-        .disconnect(russh::Disconnect::ByApplication, "", "English")
-        .await;
+fn route_connect_timeout(options: &EmbeddedOptions) -> Duration {
+    Duration::from_secs(if options.jumps.is_empty() { 15 } else { 25 })
+}
+
+async fn handshake_via(
+    server: &EmbeddedServer,
+    options: EmbeddedOptions,
+    previous: Option<&client::Handle<SshClient>>,
+) -> Result<client::Handle<SshClient>, String> {
+    if let Some(previous) = previous {
+        let channel = previous.channel_open_direct_tcpip(&server.host, server.port.into(), "127.0.0.1", 0)
+            .await
+            .map_err(|error| format!("SSH-проброс до {}:{} отклонён или недоступен: {error}", server.host, server.port))?;
+        handshake_stream(server, channel.into_stream(), options).await
+    } else {
+        handshake(server, (server.host.as_str(), server.port), options).await
+    }
+}
+
+async fn route_handshake(server: &EmbeddedServer, mut options: EmbeddedOptions) -> Result<SshRoute, String> {
+    let jumps = std::mem::take(&mut options.jumps);
+    if jumps.len() > MAX_SSH_JUMPS {
+        return Err(format!("Допустимо не более {MAX_SSH_JUMPS} промежуточных SSH-серверов"));
+    }
+    let mut endpoints = std::collections::HashSet::from([(server.host.to_ascii_lowercase(), server.port)]);
+    for jump in &jumps {
+        if !endpoints.insert((jump.server.host.to_ascii_lowercase(), jump.server.port)) {
+            return Err("SSH-маршрут повторяет адрес сервера".into());
+        }
+    }
+    let mut sessions = Vec::with_capacity(jumps.len());
+    for (index, jump) in jumps.into_iter().enumerate() {
+        let hop_options = EmbeddedOptions {
+            host_key_sha256: jump.host_key_sha256,
+            protect_socket: options.protect_socket.clone(),
+            ..Default::default()
+        };
+        let result = async {
+            let identity = load_identity(&jump.server)?;
+            let mut session = handshake_via(&jump.server, hop_options, sessions.last()).await?;
+            authenticate_ssh(&jump.server, &mut session, identity).await?;
+            Ok::<_, String>(session)
+        }.await;
+        sessions.push(result.map_err(|error| format!("SSH-звено {} ({}): {error}", index + 1, jump.server.name))?);
+    }
+    let destination = handshake_via(server, options, sessions.last()).await?;
+    Ok(SshRoute { destination, jumps: sessions })
+}
+
+async fn connect_route(server: &EmbeddedServer, options: EmbeddedOptions) -> Result<SshRoute, String> {
+    let identity = load_identity(server)?;
+    let mut route = route_handshake(server, options).await?;
+    authenticate_ssh(server, &mut route.destination, identity).await?;
+    Ok(route)
 }
 
 async fn handle_socks_client(

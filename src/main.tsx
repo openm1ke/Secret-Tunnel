@@ -33,6 +33,7 @@ type ServerProfile = {
   port: number;
   user: string;
   key_path: string;
+  jump_server_id: string | null;
   compression: boolean;
   strict_host_key_checking: string;
   connect_timeout: number;
@@ -76,6 +77,7 @@ type TunnelStatus = {
   ssh_engine: string;
   server_id: string;
   server_name: string;
+  ssh_route: string[];
   proxy_id: string;
   proxy_name: string;
   proxy_host: string;
@@ -117,6 +119,7 @@ const emptyServer: ServerProfile = {
   port: 22,
   user: "",
   key_path: "~/.ssh/id_ed25519",
+  jump_server_id: null,
   compression: false,
   strict_host_key_checking: "yes",
   connect_timeout: 8,
@@ -158,6 +161,7 @@ const emptyStatus: TunnelStatus = {
   ssh_engine: "system",
   server_id: "",
   server_name: "",
+  ssh_route: [],
   proxy_id: "",
   proxy_name: "",
   proxy_host: "127.0.0.1",
@@ -220,6 +224,20 @@ function selectedServer(config: AppConfig) {
     config.servers[0] ??
     emptyServer
   );
+}
+
+function serverRouteLabel(server: ServerProfile, servers: ServerProfile[]) {
+  const route = [server.name];
+  const seen = new Set([server.id]);
+  let next = server.jump_server_id;
+  while (next) {
+    const hop = servers.find((item) => item.id === next);
+    if (!hop || seen.has(next) || route.length >= 4) return "Проверьте цепочку SSH";
+    seen.add(next);
+    route.unshift(hop.name);
+    next = hop.jump_server_id;
+  }
+  return route.join(" → ");
 }
 
 function selectedProxy(config: AppConfig) {
@@ -728,6 +746,7 @@ function App() {
                 </label>
               </div>
 
+              {status.ssh_route?.length > 1 && <div className="notice">{status.ssh_route.join(" → ")}</div>}
               <div className="statusGrid">
                 <div>
                   <span>Статус</span>
@@ -868,6 +887,16 @@ function App() {
                     <input value={serverDraft.user} onChange={(event) => updateServer("user", event.target.value)} placeholder="user" />
                   </label>
                   <label className="wide">
+                    Подключаться через SSH-сервер
+                    <select value={serverDraft.jump_server_id ?? ""} onChange={(event) => updateServer("jump_server_id", event.target.value || null)}>
+                      <option value="">Напрямую</option>
+                      {config.servers.filter((server) => server.id !== serverDraft.id).map((server) => (
+                        <option key={server.id} value={server.id}>{server.name}</option>
+                      ))}
+                    </select>
+                    {serverDraft.jump_server_id && <span>{serverRouteLabel(serverDraft, config.servers)} · Embedded SSH</span>}
+                  </label>
+                  <label className="wide">
                     SSH key
                     <div className="fileField">
                       <input value={serverDraft.key_path} onChange={(event) => updateServer("key_path", event.target.value)} placeholder="~/.ssh/id_ed25519" />
@@ -921,7 +950,9 @@ function App() {
                   </button>
                   <button disabled={busy !== null || !serverDraft.id} onClick={() => runAction("test", () => invoke<string>("test_server", { server: serverDraft }))}>
                     <Terminal size={16} />
-                    {config.settings.ssh_engine === "embedded" ? "Проверить SSH и агент" : "Проверить SSH"}
+                    {(serverDraft.jump_server_id || config.settings.ssh_engine === "embedded") &&
+                      !config.servers.some((profile) => profile.jump_server_id === serverDraft.id)
+                      ? "Проверить SSH и агент" : "Проверить SSH"}
                   </button>
                   <button disabled={busy !== null || !serverDraft.id || sessionActive} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_server", { id: serverDraft.id });

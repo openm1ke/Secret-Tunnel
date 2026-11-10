@@ -195,22 +195,15 @@ class TunnelVpnService : VpnService() {
     private fun connectSsh() {
         if (stopping.get()) return
         val current = session ?: error("Нет параметров сеанса")
-        val settings = SettingsStore(this,current.serverId)
-        val key = File(filesDir, "ssh-key.runtime")
-        try {
-            val bytes = settings.decryptKey()
-            try {
-                openFileOutput(key.name, MODE_PRIVATE).use { it.write(bytes) }
-            } finally { bytes.fill(0) }
-            val config = JSONObject().put("host", current.host).put("port", current.port).put("user", current.user)
-                .put("key_path", key.absolutePath).put("host_key_sha256", current.fingerprint).put("socks_port", current.socksPort)
+        SettingsStore(this).withSshConfig(current.route) { config ->
+            config.put("socks_port", current.socksPort)
                 .put("new_session", tun == null)
                 .put("max_connections", connectionBudget())
                 .put("udp_receive_window", current.udpReceive?.toJson())
                 .put("agent_udp_receive_window", current.udpAgentReceive?.toJson())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
-        } finally { key.delete() }
+        }
     }
     private fun notification(): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)

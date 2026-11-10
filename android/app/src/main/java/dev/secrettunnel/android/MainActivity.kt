@@ -155,6 +155,7 @@ class MainActivity:Activity() {
         val proxy=store.activeProxy;val server=proxy?.let{store.server(it.serverId)};val profile=card()
         profile.addView(label((proxy?.name?:"Профиль не выбран")+"  ›",16,true,Palette.accent))
         profile.addView(label(server?.let{"${it.name} · ${it.host.ifBlank{"адрес не указан"}}"}?:"Добавьте сервер и прокси",13,false,Palette.muted),spaced(4))
+        if (server?.jumpServerId != null) profile.addView(label(routeLabel(server.id),13,false,Palette.muted),spaced(5))
         profile.setOnClickListener{go("proxies")};profile.contentDescription="Выбрать профиль подключения";body.addView(profile,spaced(12))
         val metrics=row()
         fun metric(title:String,color:Int,down:Boolean):LinearLayout{
@@ -241,6 +242,7 @@ class MainActivity:Activity() {
         for(server in store.servers()){
             val scoped=SettingsStore(this,server.id);val card=card();card.addView(label(server.name,18,true))
             card.addView(label(if(server.host.isBlank())"Укажите адрес и пользователя" else "${server.user}@${server.host}:${server.port}",13,false,Palette.muted),spaced(6))
+            if (server.jumpServerId != null) card.addView(label(routeLabel(server.id),13,false,Palette.muted),spaced(6))
             card.addView(label(if(scoped.hasKey())"✓  Ключ доступа добавлен" else "○  Добавьте SSH-ключ",12,false,if(scoped.hasKey())Palette.accent else Palette.warning),spaced(12))
             card.addView(label(if(validPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,Palette.muted),spaced(6))
             card.addView(button("Настроить"){unlocked();editingId=server.id;navigate("serverEditor")},spaced(14));body.addView(card,spaced(12))
@@ -268,7 +270,25 @@ class MainActivity:Activity() {
         nameField=field("Название",server?.name.orEmpty(),"Например, Германия",1001)
         hostField=field("Адрес сервера",server?.host.orEmpty(),"IP или имя хоста",1002)
         portField=field("SSH-порт",(server?.port?:22).toString(),"22",1003,true)
-        userField=field("SSH-пользователь",server?.user.orEmpty(),"Имя пользователя",1004);val originalSignature=formSignature();restoreDraft()
+        userField=field("SSH-пользователь",server?.user.orEmpty(),"Имя пользователя",1004)
+        val servers = store.servers().filter { it.id != editingId }
+        body.addView(label("Подключаться через SSH-сервер",12,true,Palette.muted),spaced(16))
+        serverSpinner = serverPicker(listOf(null to "Напрямую") + servers.map { it.id to it.name }, server?.jumpServerId)
+            .apply { contentDescription = "Подключаться через SSH-сервер" }
+        val preview = label("",13,false,Palette.muted)
+        body.addView(preview,spaced(6))
+        serverSpinner?.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val hop = selectedServerInEditor()
+                val destination = nameField?.text.toString().ifBlank { "Конечный сервер" }
+                preview.text = if (hop == null) "Прямое подключение" else runCatching {
+                    val draft = ServerProfile(editingId, destination, "", 22, "", hop)
+                    resolveServerRoute(editingId, servers + draft).joinToString(" → ") { it.name }
+                }.getOrElse { it.message.orEmpty() }
+            }
+        }
+        val originalSignature=formSignature();restoreDraft()
         val scoped=SettingsStore(this,editingId);val keyCard=card();keyCard.addView(label("Доступ к серверу",17,true))
         keyCard.addView(label(if(scoped.hasKey())"SSH-ключ добавлен и зашифрован" else "Импортируйте разрешённый на сервере ключ без пароля",13,false,Palette.muted),spaced(10))
         keyCard.addView(button(if(scoped.hasKey())"Заменить SSH-ключ" else "Импортировать SSH-ключ"){
@@ -280,10 +300,11 @@ class MainActivity:Activity() {
         val trust=card();trust.addView(label("Подлинность сервера",17,true))
         trust.addView(label(if(validPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,Palette.muted).apply{setTextIsSelectable(true)},spaced(10))
         trust.addView(button("Проверить отпечаток"){unlocked();saveServerForm();verifyServer(editingId){toast("Сервер доступен, ключ сохранён");render()}},spaced(14))
-        trust.addView(button("Проверить SSH и агент"){
+        val isRelay = store.servers().any { it.jumpServerId == editingId }
+        trust.addView(button(if(isRelay) "Проверить SSH" else "Проверить SSH и агент"){
             unlocked();saveServerForm();val id=editingId
             require(SettingsStore(this,id).hasKey()){"Сначала импортируйте SSH-ключ"}
-            verifyServer(id){checkServerAgent(id)}
+            verifyServer(id){checkServerAgent(id, !isRelay)}
         },spaced(8));body.addView(trust,spaced(12))
         body.addView(button("Сохранить сервер",true){unlocked();saveServerForm();navigate("servers")},spaced(20))
         if(server!=null)body.addView(button("Удалить сервер",danger=true){unlocked();confirmDelete("Удалить сервер ${server.name}?"){store.deleteServer(server.id);navigate("servers")}},spaced(8))
@@ -294,12 +315,7 @@ class MainActivity:Activity() {
         heading(if(proxy==null)"Новый прокси" else "Настройки прокси","SOCKS5 · TCP и UDP через выбранный SSH-сервер")
         nameField=field("Название",proxy?.name.orEmpty(),"Например, Рабочий",1001)
         body.addView(label("SSH-сервер",12,true,Palette.muted),spaced(16))
-        serverSpinner=Spinner(this).apply{
-            adapter=object:ArrayAdapter<String>(this@MainActivity,android.R.layout.simple_spinner_item,servers.map{"${it.name} · ${it.host.ifBlank{"не настроен"}}"}){
-                override fun getView(position:Int,convertView:View?,parent:ViewGroup):View=super.getView(position,convertView,parent).apply{(this as TextView).setTextColor(Palette.text);textSize=15f}
-            }.apply{setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)}
-            tag=servers.map{it.id};setSelection(servers.indexOfFirst{it.id==proxy?.serverId}.coerceAtLeast(0));backgroundTintList=ColorStateList.valueOf(Palette.accent)
-        }.also{body.addView(it,LinearLayout.LayoutParams(-1,dp(56)))}
+        serverSpinner = serverPicker(servers.map { it.id to "${it.name} · ${it.host.ifBlank{"не настроен"}}" }, proxy?.serverId)
         portField=field("Локальный порт",(proxy?.port?:1080).toString(),"1024–65535",1003,true)
         proxyUdpReceive = proxy?.udpReceive
         proxyUdpAgentReceive = proxy?.udpAgentReceive
@@ -311,14 +327,29 @@ class MainActivity:Activity() {
         if(proxy!=null)body.addView(button("Удалить прокси",danger=true){unlocked();confirmDelete("Удалить прокси ${proxy.name}?"){store.deleteProxy(proxy.id);navigate("proxies")}},spaced(8))
         formSnapshot=originalSignature
     }
+    private fun serverPicker(choices: List<Pair<String?, String>>, selected: String?): Spinner = Spinner(this).apply {
+        adapter = object : ArrayAdapter<String>(this@MainActivity, android.R.layout.simple_spinner_item, choices.map { it.second }) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
+                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(Palette.text); textSize = 15f }
+        }.apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        tag = choices.map { it.first }
+        setSelection(choices.indexOfFirst { it.first == selected }.coerceAtLeast(0))
+        backgroundTintList = ColorStateList.valueOf(Palette.accent)
+    }.also { body.addView(it, LinearLayout.LayoutParams(-1, dp(56))) }
+
+    private fun selectedServerInEditor(): String? = (serverSpinner?.tag as? List<*>)
+        ?.getOrNull(serverSpinner?.selectedItemPosition ?: -1) as? String
+
+    private fun routeLabel(id: String): String = runCatching {
+        resolveServerRoute(id, store.servers()).joinToString(" → ") { it.name }
+    }.getOrElse { it.message.orEmpty() }
+
     private fun saveEditor(){unlocked();if(page=="serverEditor")saveServerForm()else saveProxyForm()}
     private fun saveServerForm(){
-        store.saveServer(ServerProfile(editingId,nameField?.text.toString().trim(),hostField?.text.toString().trim(),portField?.text.toString().toIntOrNull()?:0,userField?.text.toString().trim()));formSnapshot=formSignature()
+        store.saveServer(ServerProfile(editingId,nameField?.text.toString().trim(),hostField?.text.toString().trim(),portField?.text.toString().toIntOrNull()?:0,userField?.text.toString().trim(),selectedServerInEditor()));formSnapshot=formSignature()
     }
     private fun saveProxyForm(){
-        val ids=serverSpinner?.tag as? List<*> ?: emptyList<String>()
-        val index=serverSpinner?.selectedItemPosition?:-1
-        val serverId=ids.getOrNull(index) as? String ?: error("Выберите сервер")
+        val serverId=selectedServerInEditor() ?: error("Выберите сервер")
         require(store.server(serverId)!=null){"Этот сервер удалён. Откройте форму заново и выберите другой."}
         store.saveProxy(ProxyProfile(editingId,nameField?.text.toString().trim(),serverId,
             portField?.text.toString().toIntOrNull()?:0,proxyUdpReceive,proxyUdpAgentReceive))
@@ -510,63 +541,76 @@ class MainActivity:Activity() {
             editingId=server.id;navigate("serverEditor");toast("Заполните сервер и добавьте SSH-ключ");return
         }
         if(store.packages.isEmpty()){navigate("apps");toast("Выберите приложения для туннеля");return}
-        val session=store.snapshot();pendingProxy=store.activeProxyId
-        verifyServer(session.serverId){val permission=VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,103)else startTunnel()}
+        store.snapshot();pendingProxy=store.activeProxyId
+        verifyServer(server.id){val permission=VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,103)else startTunnel()}
     }
     private fun startTunnel(){require(pendingProxy==store.activeProxyId){"Профиль изменился. Подключитесь заново."};startForegroundService(Intent(this,TunnelVpnService::class.java))}
     private fun validPin(value:String)=Regex("SHA256:[A-Za-z0-9+/]{43}").matches(value)
     private fun verifyServer(id:String,after:()->Unit){
         unlocked();require(!pendingTrust){"Проверка уже выполняется"}
-        val server=store.server(id)?:error("Сервер не найден");require(server.host.isNotBlank()){"Укажите адрес сервера"}
-        val scoped=SettingsStore(this,id);val saved=scoped.fingerprint;checkingDetail="Получаем ключ SSH-сервера…";checking=true
+        fun verifyNext(index: Int) {
+            val route = store.route(id)
+            if (index == route.size) { after(); return }
+            if (index < route.lastIndex && validPin(route[index].fingerprint)) verifyNext(index + 1)
+            else verifyHost(route.take(index + 1)) { verifyNext(index + 1) }
+        }
+        verifyNext(0)
+    }
+    private fun verifyHost(route: List<SshEndpoint>, after: () -> Unit) {
+        val endpoint = route.last()
+        val server = endpoint.profile
+        val scoped=SettingsStore(this,server.id);val saved=endpoint.fingerprint
+        checkingDetail="Получаем ключ SSH-сервера «${server.name}»…";checking=true
         Thread{
-            val result=try{JSONObject(NativeBridge.probe(server.host,server.port))}catch(e:Exception){JSONObject().put("error",e.message)}
+            val result=try{store.withSshConfig(route, includeTargetKey=false) { JSONObject(NativeBridge.probe(it.toString())) }}
+                catch(e:Exception){JSONObject().put("error",e.message)}
             runOnUiThread{
                 checking=false;if(isFinishing||isDestroyed)return@runOnUiThread
-                val current=store.server(id);if(current==null||current.host!=server.host||current.port!=server.port)return@runOnUiThread
+                if(store.server(server.id)!=server)return@runOnUiThread
                 val pin=result.optString("fingerprint")
-                if(!validPin(pin)){message("Не удалось проверить сервер: "+result.optString("error"));return@runOnUiThread}
+                if(!validPin(pin)){message("Не удалось проверить сервер «${server.name}»: "+result.optString("error"));return@runOnUiThread}
                 fun proceed(){scoped.fingerprint=pin;attempt(after)}
                 if(saved==pin)proceed()else{
                     pendingTrust=true
                     AlertDialog.Builder(this).setTitle(if(validPin(saved))"Ключ сервера изменился" else "Доверять серверу?")
                         .setMessage("${server.host}:${server.port}\n\n$pin\n\n"+if(validPin(saved))"Сохранён другой ключ. Сверьте замену у администратора перед подтверждением." else "Сверьте отпечаток у администратора. После подтверждения приложение запомнит этот сервер.")
-                        .setNegativeButton("Отмена",null).setPositiveButton("Доверять"){_,_->proceed()}.setOnDismissListener{pendingTrust=false}.show()
+                        .setNegativeButton("Отмена",null).setPositiveButton("Доверять"){dialog,_->
+                            dialog.dismiss();pendingTrust=false;proceed()
+                        }.setOnDismissListener{pendingTrust=false}.show()
                 }
             }
         }.start()
     }
-    private fun checkServerAgent(id:String){
-        val server=store.server(id)?:error("Сервер не найден")
-        val scoped=SettingsStore(this,id);val pin=scoped.fingerprint
-        require(validPin(pin)){"Сначала подтвердите отпечаток сервера"}
-        checkingDetail="Проверяем SSH, ключ и серверный агент…";checking=true
+    private fun checkServerAgent(id:String, checkAgent:Boolean){
+        val route = store.route(id)
+        checkingDetail=if(checkAgent)"Проверяем SSH, ключ и серверный агент…" else "Проверяем SSH и ключ…"
+        checking=true
         Thread{
-            var runtime:java.io.File?=null
             val result=try{
-                runtime=java.io.File.createTempFile("agent-check-",".runtime",filesDir)
-                val bytes=scoped.decryptKey()
-                try{openFileOutput(runtime.name,MODE_PRIVATE).use{it.write(bytes)}}finally{bytes.fill(0)}
-                val config=JSONObject().put("host",server.host).put("port",server.port).put("user",server.user)
-                    .put("key_path",runtime.absolutePath).put("host_key_sha256",pin).put("socks_port",1080)
-                val response=JSONObject(NativeBridge.checkServer(config.toString()))
-                if(response.optBoolean("ok"))response.getString("summary") else friendlyError(response.optString("error","Не удалось проверить агент"))
-            }catch(error:Exception){error.message?:"Не удалось проверить SSH и агент"}finally{runtime?.delete()}
+                store.withSshConfig(route) { config ->
+                    config.put("check_agent",checkAgent)
+                    val response=JSONObject(NativeBridge.checkServer(config.toString()))
+                    if(response.optBoolean("ok"))response.getString("summary") else friendlyError(response.optString("error","Не удалось проверить SSH"))
+                }
+            }catch(error:Exception){error.message?:"Не удалось проверить SSH"}
             runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed)message(result)}
         }.start()
     }
     private fun enrollDevice(id:String){
-        val scoped=SettingsStore(this,id);val server=store.server(id)?:error("Сервер не найден");checking=true
+        val scoped=SettingsStore(this,id);val route=store.route(id);checking=true
         Thread{
-            val bootstrap=java.io.File(filesDir,"enrollment-key.runtime");val device=java.io.File(filesDir,"device-key.runtime");var bytes:ByteArray?=null
+            var device:java.io.File?=null;var bytes:ByteArray?=null
             val error=try{
                 val pair=JSONObject(NativeBridge.generateKey());require(!pair.has("error")){pair.optString("error")}
-                bytes=pair.getString("private").toByteArray(Charsets.UTF_8);openFileOutput(device.name,MODE_PRIVATE).use{it.write(bytes)}
-                val old=scoped.decryptKey();try{openFileOutput(bootstrap.name,MODE_PRIVATE).use{it.write(old)}}finally{old.fill(0)}
-                val config=JSONObject().put("host",server.host).put("port",server.port).put("user",server.user).put("key_path",bootstrap.absolutePath)
-                    .put("device_key_path",device.absolutePath).put("host_key_sha256",scoped.fingerprint).put("socks_port",1080)
-                val result=NativeBridge.registerKey(config.toString(),pair.getString("public"));require(result.isEmpty()){result};scoped.importKey(bytes);""
-            }catch(e:Exception){e.message?:"Не удалось зарегистрировать ключ"}finally{bytes?.fill(0);bootstrap.delete();device.delete()}
+                val file=java.io.File.createTempFile("ssh-device-",".runtime",cacheDir);device=file
+                val privateKey=pair.getString("private").toByteArray(Charsets.UTF_8);bytes=privateKey
+                file.writeBytes(privateKey)
+                store.withSshConfig(route) { config ->
+                    config.put("device_key_path",file.absolutePath)
+                    val result=NativeBridge.registerKey(config.toString(),pair.getString("public"));require(result.isEmpty()){result}
+                }
+                scoped.importKey(privateKey);""
+            }catch(e:Exception){e.message?:"Не удалось зарегистрировать ключ"}finally{bytes?.fill(0);device?.delete()}
             runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed){if(error.isEmpty()){render();message("Ключ телефона добавлен и проверен. Можно подключаться.")}else message(error)}}
         }.start()
     }

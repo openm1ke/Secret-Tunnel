@@ -8,6 +8,8 @@ use std::sync::Mutex;
 #[derive(Clone, Copy)]
 enum Mode {
     Current,
+    LimitedUdpSlots,
+    Relay(u16),
     OldAgent,
     NetworkDrop,
     Missing,
@@ -55,6 +57,28 @@ impl server::Handler for Handler {
         self.channels.remove(&id);
         Ok(())
     }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host: &str,
+        port: u32,
+        _: &str,
+        _: u32,
+        _: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let Mode::Relay(target) = self.mode else { return Ok(false) };
+        if port != u32::from(target) || !host.ends_with(".invalid") {
+            return Ok(false);
+        }
+        let Ok(mut socket) = tokio::net::TcpStream::connect(("127.0.0.1", target)).await else {
+            return Ok(false);
+        };
+        self.commands.lock().unwrap().push(format!("forward {host}:{port}"));
+        let mut stream = channel.into_stream();
+        tokio::spawn(async move { let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await; });
+        Ok(true)
+    }
     async fn exec_request(
         &mut self,
         id: ChannelId,
@@ -79,8 +103,11 @@ impl server::Handler for Handler {
                 _ => {
                     let mut caps = agent::Capabilities::current("0.1.0", 64);
                     caps.udp = !matches!(self.mode, Mode::NoUdp);
-                    caps.flow_control = matches!(self.mode, Mode::Current);
+                    caps.flow_control = matches!(self.mode, Mode::Current | Mode::LimitedUdpSlots);
                     caps.udp_config = matches!(self.mode, Mode::Current);
+                    if matches!(self.mode, Mode::LimitedUdpSlots) {
+                        caps.max_udp_slots = 128;
+                    }
                     (0, serde_json::to_vec(&caps).unwrap(), vec![])
                 }
             };
@@ -94,7 +121,7 @@ impl server::Handler for Handler {
             session.eof(id)?;
             session.close(id)?;
         } else {
-            let flow_control = matches!(self.mode, Mode::Current);
+            let flow_control = matches!(self.mode, Mode::Current | Mode::LimitedUdpSlots);
             let configured = flow_control && command == agent::UDP_CONFIG_COMMAND;
             assert_eq!(
                 command,
@@ -177,12 +204,15 @@ impl Drop for Fixture {
 async fn fixture(mode: Mode) -> Fixture {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     // Public fixed seeds are used only by this loopback fixture.
-    let host: ssh_key::PrivateKey = ssh_key::private::Ed25519Keypair::from_seed(&[44; 32]).into();
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut host_seed = [44; 32];
+    host_seed[..8].copy_from_slice(&id.to_be_bytes());
+    let host: ssh_key::PrivateKey = ssh_key::private::Ed25519Keypair::from_seed(&host_seed).into();
     let key: ssh_key::PrivateKey = ssh_key::private::Ed25519Keypair::from_seed(&[45; 32]).into();
     let path = std::env::temp_dir().join(format!(
         "st-preflight-{}-{}.key",
         std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
+        id
     ));
     std::fs::write(
         &path,
@@ -241,6 +271,48 @@ async fn fixture(mode: Mode) -> Fixture {
         commands,
     }
 }
+
+#[tokio::test]
+async fn ssh_chain_forwards_only_ssh_and_runs_tcp_udp_at_the_destination() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut exit = fixture(Mode::Current).await;
+        let mut middle = fixture(Mode::Relay(exit.server.port)).await;
+        let first = fixture(Mode::Relay(middle.server.port)).await;
+        exit.server.host = "exit.invalid".into();
+        middle.server.host = "middle.invalid".into();
+        exit.options.jumps = [&first, &middle].map(|fixture| EmbeddedJump {
+            server: fixture.server.clone(),
+            host_key_sha256: fixture.options.host_key_sha256.clone(),
+        }).into();
+        let route = connect_route(&exit.server, exit.options.clone()).await.unwrap();
+        let (transport, _) = start_agent_transport(&route.destination, 64, None, None, false).await.unwrap();
+        for kind in [FlowKind::Tcp, FlowKind::Udp] {
+            let mut flow = transport.open(kind, vec![]).await.unwrap();
+            flow.sender().send(b"through both jumps".to_vec()).await.unwrap();
+            assert_eq!(&*flow.recv().await.unwrap().unwrap(), b"through both jumps");
+        }
+        assert_eq!(*first.commands.lock().unwrap(), [format!("forward middle.invalid:{}", middle.server.port)]);
+        assert_eq!(*middle.commands.lock().unwrap(), [format!("forward exit.invalid:{}", exit.server.port)]);
+        assert_eq!(*exit.commands.lock().unwrap(), [agent::QUERY_COMMAND, agent::FLOW_CONTROL_COMMAND]);
+        transport.shutdown();
+        route.disconnect().await;
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_wrong_jump_fingerprint_prevents_the_forwarding_request() {
+    let exit = fixture(Mode::Current).await;
+    let relay = fixture(Mode::Relay(exit.server.port)).await;
+    let mut options = exit.options.clone();
+    options.jumps.push(EmbeddedJump {
+        server: relay.server.clone(),
+        host_key_sha256: exit.options.host_key_sha256.clone(),
+    });
+    let error = connect_route(&exit.server, options).await.err().unwrap();
+    assert!(error.contains("SSH-звено 1") && error.contains("host key"), "{error}");
+    assert!(relay.commands.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -272,6 +344,7 @@ async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
                 64,
                 udp_receive_window,
                 agent_udp_receive_window,
+                false,
             ).await.unwrap();
             assert_eq!(report.protocols, vec![3]);
             assert!(report.flow_control);
@@ -319,6 +392,37 @@ async fn discovery_and_tcp_udp_data_use_one_authenticated_ssh_connection() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn automatic_udp_window_uses_agent_limit_but_manual_window_requires_exact_slots() {
+    let window = FlowWindow {
+        bytes: 256 * 1024,
+        slots: 192,
+    };
+    for automatic in [true, false] {
+        let fixture = fixture(Mode::LimitedUdpSlots).await;
+        let session = connect_ssh(
+            &fixture.server,
+            (&*fixture.server.host, fixture.server.port),
+            fixture.options.clone(),
+        )
+        .await
+        .unwrap();
+        let result = start_agent_transport(&session, 64, Some(window), None, automatic).await;
+        if automatic {
+            let (transport, _) = result.unwrap();
+            let snapshot = transport.snapshot();
+            assert_eq!(snapshot.diagnostics.udp_window_bytes, window.bytes);
+            assert_eq!(snapshot.diagnostics.udp_window_slots, 128);
+            assert_eq!(snapshot.peer_udp_window, Some(secret_tunnel_mux::UDP_WINDOW));
+            transport.shutdown();
+        } else {
+            assert!(result.err().unwrap().starts_with("AGENT_INCOMPATIBLE:"));
+            assert_eq!(*fixture.commands.lock().unwrap(), [agent::QUERY_COMMAND]);
+        }
+    }
+}
+
 #[tokio::test]
 async fn agent_failures_are_distinct_and_do_not_start_the_data_channel() {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -338,7 +442,7 @@ async fn agent_failures_are_distinct_and_do_not_start_the_data_channel() {
             )
             .await
             .unwrap();
-            let result = start_agent_transport(&session, 64, None, None).await;
+            let result = start_agent_transport(&session, 64, None, None, false).await;
             let error = result.err().expect("Incompatible agent accepted");
             assert!(error.starts_with(code), "{error}");
             assert_eq!(fixture.commands.lock().unwrap().len(), 1);
@@ -394,7 +498,7 @@ async fn network_failure_during_handshake_is_not_an_agent_upgrade_error() {
     )
     .await
     .unwrap();
-    let error = start_agent_transport(&session, 64, None, None)
+    let error = start_agent_transport(&session, 64, None, None, false)
         .await
         .err()
         .expect("Closed channel accepted");

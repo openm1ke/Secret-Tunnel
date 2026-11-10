@@ -49,6 +49,8 @@ RTT TCP-соединения RU → FR имел медиану 45,95 мс и p95
 
 ## Локальные материалы
 
+Продолжение исследования: [шифрование, сжатие и задержки очередей SSH](SSH-CIPHERS-AND-LATENCY-2026-11-10.md).
+
 - `artifacts/ssh-chain/mobile/field-summary.json` — сводка интервалов и ресурсов.
 - `artifacts/ssh-chain/mobile/controlled-bursts.json` — контрольные TCP/UDP-передачи.
 - `artifacts/ssh-chain/mobile/feedback.json` — наблюдение пользователя.

@@ -55,7 +55,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
-      - run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
+      - name: Install musl-tools (optional)
+        # The agent has no C dependencies and Rust links musl self-contained,
+        # so a broken Ubuntu mirror must not fail the release.
+        run: |
+          for attempt in 1 2 3; do
+            sudo apt-get update -qq && sudo apt-get install -y musl-tools && exit 0
+            sleep 15
+          done
+          echo "::warning::musl-tools unavailable; building with Rust's self-contained musl"
       - run: cargo test --manifest-path session-control/Cargo.toml --locked
       - run: cargo test --manifest-path stream-mux/Cargo.toml --locked
       - run: cargo test --manifest-path udp-agent/Cargo.toml --locked

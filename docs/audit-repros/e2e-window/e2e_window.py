@@ -326,6 +326,8 @@ def main():
     parser.add_argument("--socks-port", type=int, default=1082)
     parser.add_argument("--one-way-ms", default="0,25,50,100")
     parser.add_argument("--mbit", type=float, default=0, help="rate limit of the link in each direction; 0 is unlimited")
+    parser.add_argument("--ssh-window-kib", type=int, default=0,
+                        help="client SSH channel receive window; 0 keeps the default (2048)")
     parser.add_argument("--voice", action="store_true",
                         help="run a 160-byte, 50/s UDP echo stream from 3 s before the load and report its round trips")
     parser.add_argument("--dns-lookups", type=int, default=0,
@@ -356,6 +358,8 @@ def main():
             "socks_port": args.socks_port,
             "seconds": 600,
         }
+        if args.ssh_window_kib:
+            config["ssh_tuning"] = {"channel_receive_window_bytes": args.ssh_window_kib * 1024}
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
             json.dump(config, handle)
         probe = subprocess.Popen([args.probe, handle.name, "--interactive"], stdin=subprocess.PIPE,

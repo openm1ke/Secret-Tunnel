@@ -199,7 +199,15 @@ fn start(raw: String) -> Result<(), String> {
             observed_host_key: Some(observed()),
             protect_socket: None,
             jumps,
-            ssh_tuning: cfg.ssh_tuning,
+            // The extension's memory limit is tens of MB: keep the 2 MiB SSH
+            // window here even though desktop and Android default to 4 MiB.
+            ssh_tuning: embedded_ssh::SshTuning {
+                channel_receive_window_bytes: cfg
+                    .ssh_tuning
+                    .channel_receive_window_bytes
+                    .min(2 * 1024 * 1024),
+                ..cfg.ssh_tuning
+            },
             probe_ipv6: false,
             // Extension memory is tight, so UDP uses the TCP window size. Agents built
             // before the receive budget was sized for the largest window still reserve

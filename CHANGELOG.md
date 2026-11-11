@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.10 — 2026-11-11
+
+- The server agent resolves names in UDP destinations outside the packet loop. A slow lookup no longer delays datagrams to known addresses in the same association, concurrent lookups of one name are merged and cached for 30 s, the waiting queue is bounded, and nothing waiting for a name is sent after the flow was closed.
+- The default SSH channel window is 4 MiB on desktop and Android (iOS keeps 2 MiB). It bounds the download of the whole session: 16 flows at 200 ms RTT went from 42.6 to 83 Mbit/s on the test bench. Profiles with the reduced queue keep 1 MiB.
+- Includes 0.3.9 (TCP budget follows queueing delay while UDP priority is active); its build was not published because a CI package mirror failed.
+
 ## 0.3.9 — 2026-11-11
 
 - The Balanced and Voice profiles no longer cap TCP at a fixed 96 or 64 KiB per round trip while UDP priority is active. The budget starts there, grows by about one TCP chunk per round trip while deliveries return near the path delay and halves when a queue builds up. On a 50 ms path, four downloads with a call running reached 157 instead of 15 Mbit/s; voice p95 stayed within 8% of the fixed budget on the shaped 5 and 2 Mbit/s routes. Apps that merely look like a call (reconnect bursts, latency probes, QUIC) now cost little. Requires the agent from this release for downloads.

@@ -55,7 +55,7 @@ data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, v
     fun toJson():JSONObject=JSONObject().put("cipher",cipher).put("smallQueue",smallQueue).put("qos",qos)
     fun toNativeJson():JSONObject=JSONObject().put("cipher",cipher)
         .put("channel_buffer_messages",if(smallQueue)8 else 32)
-        .put("channel_receive_window_bytes",if(smallQueue)1024*1024 else 2*1024*1024)
+        .put("channel_receive_window_bytes",if(smallQueue)1024*1024 else 4*1024*1024)
         .put("tcp_interactive_bytes", when (qos) {
             "voice" -> 64 * 1024
             "balanced" -> 96 * 1024

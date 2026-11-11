@@ -29,7 +29,9 @@ impl Default for SshTuning {
         Self {
             cipher: CipherPolicy::Auto,
             channel_buffer_messages: 32,
-            channel_receive_window_bytes: 2 * 1024 * 1024,
+            // Bounds the download of the whole session: 16 flows at 200 ms RTT
+            // reached 42.6 Mbit/s with 2 MiB and 83 Mbit/s with 4 MiB.
+            channel_receive_window_bytes: 4 * 1024 * 1024,
             tcp_interactive_bytes: Some(96 * 1024),
         }
     }

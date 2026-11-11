@@ -1,11 +1,11 @@
 # Changelog
 
-## 0.3.11 — 2026-11-11
+## 0.3.12 — 2026-11-11
 
-- The session TCP budget follows delivery delay all the time, not only during a call. It starts at 1 MiB, doubles per round trip until `Delivered` returns late, then drops to what the path carried without a queue and grows by a quarter per round trip; never below 256 KiB. Before, 8 MiB could wait in the agent and the SSH path: 16 downloads on an 80 Mbit/s link with 50 ms RTT raised a ping on another connection to 107 ms (1 MiB SSH window) or 174 ms (4 MiB). Now 59 ms. Throughput on a bottleneck link is 3–5% lower; without a bottleneck it is unchanged.
-- A flow with at most 32 KiB in flight draws on a separate 512 KiB reserve, so a ping reply, an API call or the start of a connection no longer waits for permits behind bulk downloads, also during a call.
-- The uncongested path delay the budget compares against is the lowest of the last 10–20 s, so a path that became slower is not throttled for the rest of the session. Diagnostics show it as `tcp_flight.path_delay_ms`; Android shows it in the log.
-- Profiles without a TCP budget (maximum throughput) are unchanged.
+- The session TCP budget follows delivery delay all the time, not only during a call. Once per round trip it compares the fastest `Delivered` of that round with the uncongested delay: it doubles while there is no queue (from 1 MiB), then grows by a quarter; a queue above max(base/4, 30 ms) shrinks it to leave max(base/8, 10 ms). Before, 8 MiB could wait in the agent and the SSH path. 16 downloads, 80 Mbit/s, 50 ms RTT: ping on another connection 107 → 82 ms with a 1 MiB SSH window; 16 uploads 174 → 72 ms; 200 ms route 369 → 268 ms; 10 Mbit/s with a call 164 → 81 ms. Throughput is unchanged or slightly higher.
+- After 5 s without an uncongested sample the budget is halved for two round trips so the kept queue drains and the delay estimate stays the path's own; that estimate is the lowest of the last 10–20 s, so a path that became slower is not throttled for the rest of the session. Diagnostics show it as `tcp_flight.path_delay_ms`; Android shows it in the log.
+- A flow with at most 32 KiB in flight draws on a separate 512 KiB reserve, so a ping reply, an API call or the start of a connection does not wait for permits behind bulk downloads, also during a call.
+- Profiles without a TCP budget (maximum throughput) are unchanged. 0.3.11 was a test build of a stricter variant that cost a phone 25–50% of its speed and was not published.
 
 ## 0.3.10 — 2026-11-11
 

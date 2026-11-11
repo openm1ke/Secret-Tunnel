@@ -2,15 +2,21 @@
 //! Permits return on peer wire receipt, not on acceptance by an SSH writer.
 //! Per-flow application-consumption credit remains a separate constraint.
 //!
-//! Without a call the budget keeps the path free of a standing queue. A fixed
-//! 8 MiB let sixteen downloads park 0.9 s of data in the agent and the SSH path
-//! on an 80 Mbit/s link, and a request on any other connection waited behind it
-//! (speed test loaded ping 109-188 ms on a 52 ms path). It starts at 1 MiB and
-//! doubles per round trip until `Delivered` comes back late, then drops to what
-//! the path carried without a queue, so the queue drains; it then grows by a
-//! quarter per round trip. The uncongested delay here is the lowest of the last
-//! 10-20 s, so a path that really became slower is not throttled for the rest
-//! of the session; the regular drains keep that estimate honest.
+//! Without a call the budget keeps the queue on the path short. A fixed 8 MiB
+//! let sixteen downloads park 0.9 s of data in the agent and the SSH path on an
+//! 80 Mbit/s link, and a request on any other connection waited behind it
+//! (speed test loaded ping 109-188 ms on a 52 ms path). It starts at 1 MiB and,
+//! once per round trip, compares the fastest `Delivered` of that round with the
+//! uncongested delay: it doubles while there is no queue, then grows by a
+//! quarter; a queue of more than max(base/4, 30 ms) shrinks it to leave
+//! max(base/8, 10 ms). Judging each sample instead cut the budget on every
+//! Wi-Fi delay spike: a phone uploaded 63 instead of 120 Mbit/s. Some queue is
+//! kept on purpose so the bottleneck never runs dry.
+//!
+//! The uncongested delay is the lowest of the last 10-20 s, so a path that
+//! really became slower is not throttled for the rest of the session. A kept
+//! queue would make that estimate creep upwards, so after 5 s without an
+//! uncongested sample the budget is halved for two round trips to drain it.
 //!
 //! A budget that is kept full makes its waiters queue, and permits are granted
 //! in order: a ping reply on an idle connection waited behind sixteen downloads
@@ -48,9 +54,15 @@ const MAX: usize = 8 * 1024 * 1024;
 /// Budget without a call: where it starts, and the least it shrinks to.
 const BULK_START: usize = 1024 * 1024;
 const BULK_FLOOR: usize = 256 * 1024;
-/// Queueing delay that ends growth without a call; an eighth of the path
-/// delay on long paths, so their jitter does not count as a queue.
-const BULK_QUEUE: Duration = Duration::from_millis(10);
+/// Queue a round may show and still grow, and the queue a cut leaves; an
+/// eighth of the path delay on long paths.
+const BULK_KEEP: Duration = Duration::from_millis(10);
+/// Queue that shrinks the budget; a quarter of the path delay on long paths.
+const BULK_CUT: Duration = Duration::from_millis(30);
+/// Shortest round judged at once, for paths of a few milliseconds.
+const ROUND: Duration = Duration::from_millis(20);
+/// Time without an uncongested sample after which the queue is drained.
+const DRAIN_AFTER: Duration = Duration::from_secs(5);
 /// A flow with at most this much in flight, the new bytes included, is light.
 const LIGHT_FLOW: usize = 2 * crate::TCP_CHUNK;
 /// Reserve shared by light flows, beside the budget.
@@ -185,6 +197,18 @@ impl Recent {
         self.previous.map_or(current, |previous| previous.min(current))
     }
 }
+/// Per-round state of the budget without a call.
+#[derive(Default)]
+struct Bulk {
+    round_start: Option<Instant>,
+    /// Fastest `Delivered` of the current round.
+    lowest: Option<Duration>,
+    /// Last sample within a few ms of the uncongested delay, or last drain.
+    fresh_at: Option<Instant>,
+    /// A drain in progress and the budget it returns to.
+    drain_until: Option<Instant>,
+    restore: usize,
+}
 struct Packet {
     payload: usize,
     permit: Permit,
@@ -213,6 +237,7 @@ struct State {
     recent: Recent,
     /// Doubling until the first queue, and again after a call.
     slow_start: bool,
+    bulk: Bulk,
 }
 pub(super) struct TcpFlight {
     available: Arc<Semaphore>,
@@ -248,6 +273,7 @@ impl TcpFlight {
                 reduced_at: None,
                 recent: Recent::default(),
                 slow_start: true,
+                bulk: Bulk::default(),
             }),
         })
     }
@@ -313,25 +339,57 @@ impl TcpFlight {
             }
         }
     }
-    /// Without a call: grow while `Delivered` shows no queue, drain one.
+    /// Without a call: once per round trip, follow the round's fastest sample.
     fn follow_bulk(&self, state: &mut State, base: Duration, sample: Duration, bytes: usize, now: Instant) {
         // Bytes in flight when this packet was acknowledged, itself included.
         let flight = (state.limit.saturating_sub(self.available.available_permits()) + bytes).min(state.limit);
-        if sample < base + (base / 8).max(BULK_QUEUE) {
+        let floor = BULK_FLOOR.min(self.normal);
+        let bulk = &mut state.bulk;
+        bulk.lowest = Some(bulk.lowest.map_or(sample, |lowest| lowest.min(sample)));
+        if sample <= base + (base / 16).max(Duration::from_millis(2)) {
+            bulk.fresh_at = Some(now);
+        }
+        let fresh_at = *bulk.fresh_at.get_or_insert(now);
+        if let Some(until) = bulk.drain_until {
+            if now < until {
+                return;
+            }
+            bulk.drain_until = None;
+            bulk.round_start = Some(now);
+            bulk.lowest = None;
+            let restore = bulk.restore.max(state.limit);
+            self.resize(state, restore);
+            return;
+        }
+        let started = *bulk.round_start.get_or_insert(now);
+        if now.saturating_duration_since(started) < base.max(ROUND) {
+            return;
+        }
+        let lowest = bulk.lowest.take().unwrap_or(sample);
+        bulk.round_start = Some(now);
+        let queue = lowest.saturating_sub(base);
+        let keep = (base / 8).max(BULK_KEEP);
+        if queue <= keep {
             // Only a budget that limits the sender earns more; an idle one
             // would otherwise reach 8 MiB and release it in one burst.
-            if bytes > 0 && flight >= state.limit / 2 {
-                let growth = if state.slow_start { bytes } else { bytes / 4 };
+            if flight >= state.limit / 2 {
+                let growth = if state.slow_start { flight } else { flight / 4 };
                 let limit = (state.limit + growth.max(1024)).min(self.normal);
                 self.resize(state, limit);
             }
-        } else if state.reduced_at.is_none_or(|at| now.duration_since(at) >= sample) {
-            // What the path carried in one uncongested round trip.
-            let drained = (flight as u128 * base.as_nanos() / sample.as_nanos().max(1)) as usize;
-            let limit = drained.clamp(BULK_FLOOR.min(self.normal), self.normal);
-            self.resize(state, limit.min(state.limit));
-            state.reduced_at = Some(now);
+        } else if queue > (base / 4).max(BULK_CUT) {
+            // Leave `keep` of queue: what the path carried, plus that much.
+            let target = (flight as u128 * (base + keep).as_nanos() / lowest.as_nanos().max(1)) as usize;
+            let limit = target.clamp(floor, self.normal).min(state.limit);
+            self.resize(state, limit);
             state.slow_start = false;
+        }
+        if now.saturating_duration_since(fresh_at) >= DRAIN_AFTER && state.limit > floor {
+            state.bulk.fresh_at = Some(now);
+            state.bulk.restore = state.limit;
+            state.bulk.drain_until = Some(now + base * 2 + ROUND);
+            let half = (state.limit / 2).max(floor);
+            self.resize(state, half);
         }
     }
     pub(super) fn tick(&self, now: Instant) {
@@ -342,6 +400,7 @@ impl TcpFlight {
             state.active_until = None;
             state.slow_start = true;
             state.reduced_at = None;
+            state.bulk = Bulk::default();
         }
     }
     /// Charge `payload` bytes of flow `id`.
@@ -646,10 +705,10 @@ mod tests {
         budget.tick(now + ms(100) + HOLD);
         assert_eq!(budget.snapshot().effective_bytes, floor);
         assert!(!budget.snapshot().interactive);
-        for index in 0..6 {
-            bulk_round(&budget, ms(50), now + HOLD + ms(200 + index)).await;
+        for index in 0..3 {
+            bulk_round(&budget, ms(50), now + HOLD + ms(200 + 60 * index)).await;
         }
-        assert_eq!(budget.snapshot().effective_bytes, 2 * floor);
+        assert_eq!(budget.snapshot().effective_bytes, 4 * floor);
     }
     /// One 16 KiB `Delivered` while the sender keeps the whole budget in flight.
     async fn bulk_round(budget: &Arc<TcpFlight>, rtt: Duration, now: Instant) {
@@ -662,40 +721,63 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn without_a_call_the_budget_doubles_until_a_queue_and_then_drains_it() {
-        let budget = TcpFlight::new(MAX, Some(96 * 1024));
+    async fn without_a_call_the_budget_follows_the_fastest_delivery_of_each_round() {
+        let normal = 4 * 1024 * 1024;
+        let budget = TcpFlight::new(normal, Some(96 * 1024));
         let ms = Duration::from_millis;
         let now = Instant::now();
         assert_eq!(budget.snapshot().effective_bytes, BULK_START);
-        // Slow start: one round trip of a full budget doubles it.
-        for index in 0..64 {
-            bulk_round(&budget, ms(50), now + ms(index)).await;
-        }
+        // Slow start: each round trip without a queue doubles a full budget.
+        bulk_round(&budget, ms(50), now).await;
+        bulk_round(&budget, ms(50), now + ms(50)).await;
         assert_eq!(budget.snapshot().effective_bytes, 2 * BULK_START);
-        // A queue: down to what the path carried without it, once per round trip.
-        bulk_round(&budget, ms(100), now + ms(100)).await;
-        assert_eq!(budget.snapshot().effective_bytes, BULK_START);
+        bulk_round(&budget, ms(50), now + ms(100)).await;
+        assert_eq!(budget.snapshot().effective_bytes, normal);
+        // A round whose fastest delivery is 50 ms late: keep 10 ms of queue.
         bulk_round(&budget, ms(100), now + ms(150)).await;
-        assert_eq!(budget.snapshot().effective_bytes, BULK_START);
-        // Then a quarter per round trip.
-        for index in 0..64 {
-            bulk_round(&budget, ms(50), now + ms(300 + index)).await;
-        }
-        assert_eq!(budget.snapshot().effective_bytes, BULK_START + BULK_START / 4);
-        // A delay that is part of the path, not queue, is under the threshold.
-        bulk_round(&budget, ms(59), now + ms(400)).await;
-        assert!(budget.snapshot().effective_bytes > BULK_START + BULK_START / 4);
-        // Never below the floor, never above the session budget.
-        for index in 0..10 {
-            bulk_round(&budget, ms(1000), now + ms(1000 + 1100 * index)).await;
+        let cut = normal * 60 / 100;
+        assert_eq!(budget.snapshot().effective_bytes, cut);
+        // 25 ms of queue is kept as it is.
+        bulk_round(&budget, ms(75), now + ms(210)).await;
+        assert_eq!(budget.snapshot().effective_bytes, cut);
+        // A spike within a round is jitter, not a queue: a quarter more.
+        bulk_round(&budget, ms(140), now + ms(230)).await;
+        bulk_round(&budget, ms(55), now + ms(270)).await;
+        assert_eq!(budget.snapshot().effective_bytes, cut + cut / 4);
+        // Never below the floor.
+        for index in 0..12 {
+            bulk_round(&budget, ms(1000), now + ms(400 + 60 * index)).await;
         }
         assert_eq!(budget.snapshot().effective_bytes, BULK_FLOOR);
         assert!(!budget.snapshot().interactive);
+        // Never above the session budget.
         let budget = TcpFlight::new(BULK_START + 65536, Some(96 * 1024));
-        for index in 0..64 {
-            bulk_round(&budget, ms(50), now + ms(index)).await;
-        }
+        bulk_round(&budget, ms(50), now).await;
+        bulk_round(&budget, ms(50), now + ms(50)).await;
         assert_eq!(budget.snapshot().effective_bytes, BULK_START + 65536);
+    }
+    #[tokio::test]
+    async fn a_kept_queue_is_drained_so_the_base_stays_the_paths_own() {
+        let normal = 4 * 1024 * 1024;
+        let budget = TcpFlight::new(normal, Some(96 * 1024));
+        let ms = Duration::from_millis;
+        let now = Instant::now();
+        for index in 0..3 {
+            bulk_round(&budget, ms(50), now + ms(50 * index)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, normal);
+        // 25 ms of queue for five seconds: no cut, but no uncongested sample.
+        for index in 0..50 {
+            bulk_round(&budget, ms(75), now + ms(150 + 100 * index)).await;
+            assert_eq!(budget.snapshot().effective_bytes, normal);
+        }
+        bulk_round(&budget, ms(75), now + ms(5150)).await;
+        assert_eq!(budget.snapshot().effective_bytes, normal / 2);
+        // Two round trips at half, then back.
+        bulk_round(&budget, ms(50), now + ms(5200)).await;
+        assert_eq!(budget.snapshot().effective_bytes, normal / 2);
+        bulk_round(&budget, ms(50), now + ms(5280)).await;
+        assert_eq!(budget.snapshot().effective_bytes, normal);
     }
     #[test]
     fn the_uncongested_delay_ages_so_a_slower_path_is_not_throttled_for_good() {

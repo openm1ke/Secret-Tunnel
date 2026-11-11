@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "secret-tunnel"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "libc",
  "plist",

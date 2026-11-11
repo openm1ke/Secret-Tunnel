@@ -8,8 +8,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 31400
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.14"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 31500
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.15"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }

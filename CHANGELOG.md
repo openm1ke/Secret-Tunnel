@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.15 — 2026-11-11
+
+- The TCP budget without a call decides on the delay its own bytes saw in each round trip, weighted by size, instead of the fastest delivery of the round. Ping replies and other light packets pass the writer's round robin at once; with 1 MiB per connection their fast deliveries hid the queue behind bulk flows, and on a phone 12–15% of a speed test's frames waited over 100 ms on the server (loaded ping about 100 ms). The cut threshold is now max(base/4, 50 ms). Bench, 80 Mbit/s and 50 ms: no frame waits over 100 ms (0.3.14: up to 70 per 8 s); 200 ms route, 16 downloads: 2 instead of 814, loaded ping 220 instead of 261 ms; throughput unchanged.
+- 0.3.14 (1 MiB window per connection) was not published; its change is part of this release.
+
 ## 0.3.14 — 2026-11-11
 
 - One TCP connection may have up to 1 MiB unacknowledged instead of 256 KiB, in both directions. A single connection carries at most `window / RTT`, so one download or upload was capped at 40 Mbit/s on a 50 ms path and 10 Mbit/s on a 200 ms path. Bench: 40 → 154 Mbit/s at 50 ms and 10 → 41 Mbit/s at 200 ms without a rate limit; 39 → 74 Mbit/s on an 80 Mbit/s link with a 50 ms path and the phone's 1 MiB SSH window. Sixteen connections and calls are unchanged. Each flow still grows into the window gradually, and the session budget keeps the queue short.

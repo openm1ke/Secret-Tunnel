@@ -8,10 +8,11 @@
 //! (speed test loaded ping 109-188 ms on a 52 ms path). It starts at 1 MiB and,
 //! once per round trip, compares the fastest `Delivered` of that round with the
 //! uncongested delay: it doubles while there is no queue, then grows by a
-//! quarter; a queue of more than max(base/4, 30 ms) shrinks it to leave
-//! max(base/8, 10 ms). Judging each sample instead cut the budget on every
+//! quarter; a queue of more than max(base/4, 40 ms) shrinks it to leave
+//! max(base/8, 20 ms). Judging each sample instead cut the budget on every
 //! Wi-Fi delay spike: a phone uploaded 63 instead of 120 Mbit/s. Some queue is
-//! kept on purpose so the bottleneck never runs dry.
+//! kept on purpose so the bottleneck never runs dry; with 10 ms a phone's
+//! uplink still dropped to 46-52 Mbit/s.
 //!
 //! The uncongested delay is the lowest of the last 10-20 s, so a path that
 //! really became slower is not throttled for the rest of the session. A kept
@@ -56,9 +57,9 @@ const BULK_START: usize = 1024 * 1024;
 const BULK_FLOOR: usize = 256 * 1024;
 /// Queue a round may show and still grow, and the queue a cut leaves; an
 /// eighth of the path delay on long paths.
-const BULK_KEEP: Duration = Duration::from_millis(10);
+const BULK_KEEP: Duration = Duration::from_millis(20);
 /// Queue that shrinks the budget; a quarter of the path delay on long paths.
-const BULK_CUT: Duration = Duration::from_millis(30);
+const BULK_CUT: Duration = Duration::from_millis(40);
 /// Shortest round judged at once, for paths of a few milliseconds.
 const ROUND: Duration = Duration::from_millis(20);
 /// Time without an uncongested sample after which the queue is drained.
@@ -733,9 +734,9 @@ mod tests {
         assert_eq!(budget.snapshot().effective_bytes, 2 * BULK_START);
         bulk_round(&budget, ms(50), now + ms(100)).await;
         assert_eq!(budget.snapshot().effective_bytes, normal);
-        // A round whose fastest delivery is 50 ms late: keep 10 ms of queue.
+        // A round whose fastest delivery is 50 ms late: keep 20 ms of queue.
         bulk_round(&budget, ms(100), now + ms(150)).await;
-        let cut = normal * 60 / 100;
+        let cut = normal * 70 / 100;
         assert_eq!(budget.snapshot().effective_bytes, cut);
         // 25 ms of queue is kept as it is.
         bulk_round(&budget, ms(75), now + ms(210)).await;

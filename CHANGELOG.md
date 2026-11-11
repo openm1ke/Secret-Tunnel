@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.13 — 2026-11-11
+
+- The TCP budget without a call keeps up to max(base/8, 20 ms) of queue and cuts above max(base/4, 40 ms), instead of 10 and 30 ms. With 10 ms a phone's uploads fell to 46–52 Mbit/s in two of three Speedtest runs. On the bench throughput is unchanged and the loaded ping is 97 ms in the phone-like case (82 ms in 0.3.12, 107 ms in 0.3.10).
+
 ## 0.3.12 — 2026-11-11
 
 - The session TCP budget follows delivery delay all the time, not only during a call. Once per round trip it compares the fastest `Delivered` of that round with the uncongested delay: it doubles while there is no queue (from 1 MiB), then grows by a quarter; a queue above max(base/4, 30 ms) shrinks it to leave max(base/8, 10 ms). Before, 8 MiB could wait in the agent and the SSH path. 16 downloads, 80 Mbit/s, 50 ms RTT: ping on another connection 107 → 82 ms with a 1 MiB SSH window; 16 uploads 174 → 72 ms; 200 ms route 369 → 268 ms; 10 Mbit/s with a call 164 → 81 ms. Throughput is unchanged or slightly higher.

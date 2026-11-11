@@ -4,6 +4,7 @@ pub mod agent;
 mod capacity;
 mod datagrams;
 mod diagnostics;
+mod elastic;
 mod heartbeat;
 mod scheduler;
 mod tcp_flight;
@@ -38,6 +39,8 @@ pub const FLOW_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RECEIVE_BUDGET: usize = 256 * 1024 * 1024;
 const BASE_FLOW_SLOT_LIMIT: usize = 128;
 pub const UDP_FLOW_SLOT_LIMIT: usize = 192;
+/// TCP receive window every STMUX003 endpoint accepts and starts sending within.
+pub const BASE_TCP_WINDOW: usize = 65536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FlowWindow {
@@ -59,6 +62,14 @@ pub const UDP_WINDOW: FlowWindow = FlowWindow {
     bytes: 131072,
     slots: BASE_FLOW_SLOT_LIMIT,
 };
+/// TCP receive window announced by production endpoints.
+///
+/// A sender may have at most one window unacknowledged, and credit returns only
+/// after the receiver's consumer took the bytes, so one TCP flow carries at most
+/// `window / RTT`: 64 KiB gives 10 Mbit/s at 50 ms and 2.6 Mbit/s at 200 ms on
+/// any link. Each side announces its own window in the handshake, so a peer with
+/// the 64 KiB default of [`Config`] interoperates and keeps its own direction.
+pub const TCP_RECEIVE_WINDOW: usize = 256 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowKind {
     Tcp,
@@ -85,7 +96,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_flows: 1024,
-            receive_window: 65536,
+            receive_window: BASE_TCP_WINDOW,
             receive_slots: 64,
             outbound_bytes: 8 * 1024 * 1024,
             udp_window: None,
@@ -99,7 +110,6 @@ impl Config {
         if !(1..=8192).contains(&self.max_flows)
             || !self.receive_for(FlowKind::Tcp).valid(FlowKind::Tcp)
             || !self.receive_for(FlowKind::Udp).valid(FlowKind::Udp)
-            || self.max_flows > MAX_RECEIVE_BUDGET / self.receive_window
             || self.max_receive_window() > self.max_flows * self.receive_window
             || !(65536..=64 * 1024 * 1024).contains(&self.outbound_bytes)
             || self.tcp_interactive_bytes.is_some_and(|bytes| {
@@ -125,6 +135,14 @@ impl Config {
     fn max_receive_window(&self) -> usize {
         self.receive_window
             .max(self.receive_for(FlowKind::Udp).bytes)
+    }
+
+    /// Flows this endpoint announces: every one of them may hold its largest
+    /// window without the session exceeding the hard receive cap. Larger windows
+    /// therefore lower the flow limit instead of failing or rejecting later.
+    fn admitted_flows(&self) -> usize {
+        self.max_flows
+            .min(MAX_RECEIVE_BUDGET / self.max_receive_window())
     }
 }
 
@@ -167,6 +185,10 @@ pub struct Snapshot {
     pub protocol_errors: u64,
     pub diagnostics: Diagnostics,
     pub peer_udp_window: Option<FlowWindow>,
+    /// TCP receive window this endpoint announced: bounds each incoming flow.
+    pub tcp_receive_window: usize,
+    /// TCP receive window of the peer: bounds each outgoing flow.
+    pub peer_tcp_window: usize,
     pub peer: Option<PeerSnapshot>,
 }
 #[derive(Debug, Clone, Default)]
@@ -203,6 +225,8 @@ struct WindowCredit {
     slots: usize,
     udp_sample: Option<Instant>,
     shortage_sample: Option<Instant>,
+    /// Present for a TCP flow whose peer window exceeds the baseline.
+    sending: Option<elastic::Sending>,
 }
 
 #[derive(Debug)]
@@ -224,7 +248,7 @@ struct CreditTiming {
 }
 
 impl Window {
-    fn new(window: FlowWindow) -> Arc<Self> {
+    fn new(window: FlowWindow, elastic: bool) -> Arc<Self> {
         let FlowWindow { bytes, slots } = window;
         Arc::new(Self {
             counts: Mutex::new(WindowCredit {
@@ -232,6 +256,7 @@ impl Window {
                 slots,
                 udp_sample: None,
                 shortage_sample: None,
+                sending: elastic.then(elastic::Sending::new),
             }),
             max: (bytes, slots),
             ready: Notify::new(),
@@ -239,7 +264,15 @@ impl Window {
     }
     fn reserve(self: &Arc<Self>, bytes: usize) -> std::result::Result<Reservation, WindowShortage> {
         let mut counts = self.counts.lock().unwrap();
-        let shortage = match (counts.bytes < bytes, counts.slots == 0) {
+        let counts = &mut *counts;
+        let now = Instant::now();
+        // An elastic flow may hold less than the peer's whole window in flight.
+        let in_flight = self.max.0 - counts.bytes;
+        let over_limit = counts
+            .sending
+            .as_mut()
+            .is_some_and(|sending| !sending.admits(in_flight, bytes, now));
+        let shortage = match (counts.bytes < bytes || over_limit, counts.slots == 0) {
             (true, true) => Some(CreditShortage::Both),
             (true, false) => Some(CreditShortage::Bytes),
             (false, true) => Some(CreditShortage::Slots),
@@ -252,6 +285,9 @@ impl Window {
         }
         counts.bytes -= bytes;
         counts.slots -= 1;
+        if let Some(sending) = &mut counts.sending {
+            sending.sent(bytes, now);
+        }
         Ok(Reservation {
             window: self.clone(),
             bytes,
@@ -266,7 +302,15 @@ impl Window {
             .get_or_insert_with(Instant::now);
     }
 
-    fn grant(&self, bytes: usize, slots: usize, from_peer: bool) -> Result<CreditTiming> {
+    /// Return credit: from the peer (timed against `path` for elastic flows)
+    /// or from a reservation that was never sent (`path` is `None`).
+    fn grant(
+        &self,
+        bytes: usize,
+        slots: usize,
+        from_peer: bool,
+        path: Option<&elastic::Path>,
+    ) -> Result<CreditTiming> {
         let mut counts = self.counts.lock().unwrap();
         if bytes == 0
             || slots == 0
@@ -277,6 +321,13 @@ impl Window {
         }
         counts.bytes += bytes;
         counts.slots += slots;
+        if let Some(sending) = &mut counts.sending {
+            let now = Instant::now();
+            match path {
+                Some(path) if from_peer => sending.credited(bytes, slots, self.max.0, path, now),
+                _ => sending.unsent(bytes, now),
+            }
+        }
         self.ready.notify_waiters();
         Ok(if from_peer {
             CreditTiming {
@@ -296,7 +347,7 @@ struct Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.window.grant(self.bytes, 1, false);
+            let _ = self.window.grant(self.bytes, 1, false, None);
         }
     }
 }
@@ -346,6 +397,8 @@ struct Inner {
     udp_error: Mutex<String>,
     heartbeat: Mutex<heartbeat::Heartbeat>,
     tcp_flight: Arc<tcp_flight::TcpFlight>,
+    /// Uncongested credit round trip of this transport, for elastic TCP flows.
+    path: elastic::Path,
 }
 impl Inner {
     fn fail(&self, error: impl Into<String>) {
@@ -388,6 +441,20 @@ impl Inner {
                 counters: self.counters.clone(),
             })
             .map_err(|_| "Multiplex writer stopped".to_owned())
+    }
+    /// Count a UDP datagram of `state` towards a voice-like run of that flow.
+    /// DNS never counts: a resolver that shares one flow is not a call either.
+    fn note_datagram(&self, state: &State, data: &[u8]) {
+        if !self.tcp_flight.enabled()
+            || data.len() > tcp_flight::SHORT_DATAGRAM
+            || tcp_flight::datagram_port(data) == Some(53)
+        {
+            return;
+        }
+        let now = Instant::now();
+        if state.short_run.lock().unwrap().note(now) {
+            self.tcp_flight.activate(now);
+        }
     }
     fn remove(&self, id: u32) {
         let removed = self.flows.lock().unwrap().remove(&id);
@@ -443,7 +510,11 @@ impl Inner {
             _receive_reservation: receive_reservation,
             _receive_slot_reservation: receive_slot_reservation,
             inner: Arc::downgrade(self),
-            window: Window::new(self.peer_limits.window(kind)),
+            window: {
+                let window = self.peer_limits.window(kind);
+                // UDP never waits for credit, and a baseline window has no room to grow.
+                Window::new(window, kind == FlowKind::Tcp && window.bytes > BASE_TCP_WINDOW)
+            },
             packets,
             opening: Mutex::new(opening),
             ready: AtomicBool::new(false),
@@ -454,6 +525,7 @@ impl Inner {
             received_slots: AtomicUsize::new(0),
             sent_eof: AtomicBool::new(false),
             peer_eof: AtomicBool::new(false),
+            short_run: Mutex::new(tcp_flight::ShortRun::new(Instant::now())),
         });
         flows.insert(id, state.clone());
         peak(&self.counters.active, &self.counters.peak, 1);
@@ -504,7 +576,7 @@ impl Endpoint {
                 &mut stream,
                 matches!(role, Role::Server),
                 wire::Limits {
-                    flows: config.max_flows,
+                    flows: config.admitted_flows(),
                     tcp: config.receive_for(FlowKind::Tcp),
                     udp: config.udp_window,
                 },
@@ -513,14 +585,17 @@ impl Endpoint {
         .await
         .map_err(|_| "Multiplex negotiation timed out".to_owned())?
         .map_err(|e| e.to_string())?;
-        let limit = config.max_flows.min(peer.flows);
-        // A large UDP window borrows from the same session-wide budget as TCP.
-        // The configured budget can fit at least one window of either kind.
-        let receive_budget = (limit * config.receive_window).max(config.max_receive_window());
+        let limit = config.admitted_flows().min(peer.flows);
+        // Every flow reserves its whole window for its lifetime, and idle UDP
+        // associations (one per DNS query behind a TUN adapter) live for tens of
+        // seconds. Size both budgets for the largest window, so the advertised
+        // flow limit is reachable with any TCP/UDP mix instead of rejecting new
+        // flows at a fraction of it. Buffers are still allocated on demand, and
+        // `admitted_flows` keeps the byte budget within its hard cap.
+        let largest_window = config.max_receive_window();
+        let receive_budget = limit * largest_window;
         let largest_window_slots = config.receive_slots.max(config.receive_for(FlowKind::Udp).slots);
-        // Enlarging a flow's UDP window shares the original session packet budget.
-        let receive_slot_budget =
-            (limit * largest_window_slots.min(BASE_FLOW_SLOT_LIMIT)).max(largest_window_slots);
+        let receive_slot_budget = limit * largest_window_slots;
         let (incoming_tx, incoming) = mpsc::channel(limit);
         let (data_tx, data_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
@@ -553,6 +628,7 @@ impl Endpoint {
             counters: Default::default(),
             peer_stats: Default::default(),
             udp_error: Default::default(),
+            path: Default::default(),
         });
         let (reader, writer) = tokio::io::split(stream);
         let read_inner = inner.clone();
@@ -616,6 +692,8 @@ impl Endpoint {
             protocol_errors: c.protocol_errors.load(Ordering::Relaxed),
             diagnostics,
             peer_udp_window: Some(self.inner.peer_limits.window(FlowKind::Udp)),
+            tcp_receive_window: self.inner.config.receive_window,
+            peer_tcp_window: self.inner.peer_limits.window(FlowKind::Tcp).bytes,
             peer: self.inner.peer_stats.lock().unwrap().clone(),
         }
     }
@@ -771,6 +849,8 @@ struct State {
     received_slots: AtomicUsize,
     sent_eof: AtomicBool,
     peer_eof: AtomicBool,
+    /// Short datagrams of this flow in both directions; see `tcp_flight`.
+    short_run: Mutex<tcp_flight::ShortRun>,
 }
 impl State {
     fn cancel(&self) {
@@ -981,9 +1061,7 @@ impl Sender {
             return Err("Flow closed".into());
         }
         let metrics = &inner.counters.diagnostics;
-        if data.len() <= 512 {
-            inner.tcp_flight.note_short(Instant::now());
-        }
+        inner.note_datagram(&self.state, &data);
         metrics.udp_tx_attempts.fetch_add(1, Ordering::Relaxed);
         let mut credit = match self.state.window.reserve(data.len()) {
             Ok(credit) => credit,
@@ -1085,8 +1163,8 @@ impl Sender {
         if self.state.outbound_closed.load(Ordering::Relaxed) {
             return Err("Flow closed".into());
         }
-        if credit && self.state.kind == FlowKind::Udp && data.len() <= 512 {
-            inner.tcp_flight.note_short(Instant::now());
+        if credit && self.state.kind == FlowKind::Udp {
+            inner.note_datagram(&self.state, &data);
         }
         let mut all_closed = inner.closed.subscribe();
         let mut flow_closed = self.state.closed.subscribe();
@@ -1346,6 +1424,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 u32::from_be_bytes(data[..4].try_into().unwrap()) as usize,
                 u32::from_be_bytes(data[4..].try_into().unwrap()) as usize,
                 true,
+                Some(&inner.path),
             )?;
             if let Some(elapsed) = timing.since_enqueue {
                 inner
@@ -1430,9 +1509,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 .bytes_rx
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
             if state.kind == FlowKind::Udp {
-                if data.len() <= 512 {
-                    inner.tcp_flight.note_short(Instant::now());
-                }
+                inner.note_datagram(&state, &data);
                 inner
                     .counters
                     .diagnostics

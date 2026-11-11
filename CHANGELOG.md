@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.7 — 2026-11-11
+
+- Fixed new connections being refused while the tunnel showed "Running". Idle UDP flows reserved larger windows than the session budget assumed, so Android ran out after 128 of its 512 flows. The budget now fits the advertised flow limit, DNS associations close 5 s after their reply, and refusals appear once per 10 s in the journal and as a counter in the Android status.
+- TCP connections can grow from a 64 KiB to a 256 KiB window while the path stays fast. One connection at 50 ms RTT now carries about 39 instead of 9.6 Mbit/s. Slow links keep 64 KiB, so voice latency is unchanged. Both the client and the agent from this release are needed; mixed versions keep 64 KiB.
+- The UDP priority budget now engages only for a sustained run of short datagrams on one flow, never for DNS. Page loads no longer cap concurrent TCP downloads for 15 s.
+- Added a native iOS/iPadOS 15+ client with a Packet Tunnel extension (device-wide, IPv4-only, built from source).
+- Independent audit with reproducible stands: [report](docs/CLAUDE-INDEPENDENT-AUDIT.md).
+
 ## 0.3.6 — 2026-11-10
 
 - Added per-session UDP priority in Embedded SSH. Balanced uses a 96 KiB TCP flight budget during sustained short UDP traffic, Voice uses 64 KiB, and Maximum speed disables the extra budget. The first two profiles require the bundled agent on the destination server.

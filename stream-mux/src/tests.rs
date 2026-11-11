@@ -251,15 +251,17 @@ async fn udp_window_is_separate_and_byte_credit_exhaustion_is_reported() {
 }
 
 #[tokio::test]
-async fn larger_udp_windows_share_the_original_session_budget() {
+async fn larger_udp_windows_do_not_reduce_the_advertised_flow_limit() {
     let (client, server) = pair(Config {
         max_flows: 4,
         udp_window: Some(UDP_WINDOW),
         ..Default::default()
     })
     .await;
+    // The budget fits the flow limit in the largest window, so idle UDP
+    // associations cannot starve later flows before the limit is reached.
     let mut flows = Vec::new();
-    for kind in [FlowKind::Udp, FlowKind::Tcp, FlowKind::Tcp] {
+    for kind in [FlowKind::Udp; 4] {
         let (opened, accepted) = tokio::join!(client.open(kind, vec![]), async {
             let flow = server.accept().await.unwrap().flow;
             flow.accept().unwrap();
@@ -267,24 +269,134 @@ async fn larger_udp_windows_share_the_original_session_budget() {
         });
         flows.push((opened.unwrap(), accepted));
     }
-    assert_eq!(server.snapshot().receive_budget, 4 * 65536);
-    assert_eq!(client.inner.receive_bytes.available_permits(), 0);
+    for endpoint in [&client, &server] {
+        assert_eq!(endpoint.snapshot().receive_budget, 4 * UDP_WINDOW.bytes);
+        assert_eq!(endpoint.inner.receive_bytes.available_permits(), 0);
+        assert_eq!(endpoint.snapshot().rejected, 0);
+    }
+    // Only the flow limit itself refuses the next flow.
     assert_eq!(
         client.open(FlowKind::Tcp, vec![]).await.err().unwrap(),
-        "Receive buffer budget reached"
+        "Connection capacity reached"
     );
     drop(flows.pop());
-    assert_eq!(client.inner.receive_bytes.available_permits(), 65536);
+    assert_eq!(
+        client.inner.receive_bytes.available_permits(),
+        UDP_WINDOW.bytes
+    );
     let (opened, _) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
         let flow = server.accept().await.unwrap().flow;
         flow.accept().unwrap();
         flow
     });
     assert!(opened.is_ok());
+    // A TCP flow still reserves only its own, smaller window.
+    assert_eq!(
+        client.inner.receive_bytes.available_permits(),
+        UDP_WINDOW.bytes - 65536
+    );
 }
 
 #[tokio::test]
-async fn asymmetric_udp_windows_limit_each_direction_and_keep_the_session_budget() {
+async fn larger_windows_lower_the_announced_flow_limit_to_keep_the_hard_cap() {
+    // 2048 flows x 256 KiB would be 512 MiB. The endpoint announces as many
+    // flows as fit the 256 MiB session cap, so its limit stays reachable.
+    let (client, server) = pair(Config {
+        max_flows: 2048,
+        udp_window: Some(FlowWindow {
+            bytes: 256 * 1024,
+            slots: UDP_FLOW_SLOT_LIMIT,
+        }),
+        ..Default::default()
+    })
+    .await;
+    for endpoint in [&client, &server] {
+        let snapshot = endpoint.snapshot();
+        assert_eq!(snapshot.limit, 1024);
+        assert_eq!(snapshot.receive_budget, 256 * 1024 * 1024);
+        assert_eq!(
+            endpoint.inner.receive_slots.available_permits(),
+            1024 * UDP_FLOW_SLOT_LIMIT
+        );
+    }
+    // The baseline window still admits every requested flow.
+    let (client, _server) = pair(Config {
+        max_flows: 2048,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(client.snapshot().limit, 2048);
+    assert_eq!(client.snapshot().receive_budget, 128 * 1024 * 1024);
+}
+
+#[tokio::test]
+async fn a_tcp_flow_earns_a_larger_peer_window_from_the_baseline() {
+    let (client, server) = pair(Config {
+        max_flows: 4,
+        receive_window: TCP_RECEIVE_WINDOW,
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(
+        client.inner.peer_limits.window(FlowKind::Tcp).bytes,
+        TCP_RECEIVE_WINDOW
+    );
+    let (flow, mut receiver) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    let flow = flow.unwrap();
+    let limit = |flow: &Flow| {
+        flow.state
+            .window
+            .counts
+            .lock()
+            .unwrap()
+            .sending
+            .as_ref()
+            .map(|sending| sending.limit)
+    };
+    let sender = flow.sender();
+    // The peer granted 256 KiB, yet the flow starts within the 64 KiB baseline.
+    assert_eq!(limit(&flow), Some(BASE_TCP_WINDOW));
+    for _ in 0..BASE_TCP_WINDOW / TCP_CHUNK {
+        sender.send(vec![1; TCP_CHUNK]).await.unwrap();
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), sender.send(vec![1; TCP_CHUNK]))
+            .await
+            .is_err(),
+        "sent beyond the baseline before earning it"
+    );
+    // A consumer that keeps up returns credit at once: the limit doubles per window.
+    let consumer = tokio::spawn(async move {
+        let mut received = 0;
+        while received < 64 * TCP_CHUNK {
+            received += receiver.recv().await.unwrap().unwrap().len();
+        }
+        receiver
+    });
+    for _ in BASE_TCP_WINDOW / TCP_CHUNK..64 {
+        sender.send(vec![1; TCP_CHUNK]).await.unwrap();
+    }
+    let _receiver = consumer.await.unwrap();
+    assert_eq!(limit(&flow), Some(TCP_RECEIVE_WINDOW));
+    assert_eq!(client.snapshot().protocol_errors, 0);
+    assert_eq!(server.snapshot().protocol_errors, 0);
+
+    // Against a baseline peer nothing is elastic and nothing changes.
+    let (client, server) = pair(Config::default()).await;
+    let (flow, _accepted) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    assert_eq!(limit(&flow.unwrap()), None);
+}
+
+#[tokio::test]
+async fn asymmetric_udp_windows_limit_each_direction_and_size_each_session_budget() {
     let client_config = Config {
         max_flows: 4,
         udp_window: Some(FlowWindow {
@@ -322,17 +434,26 @@ async fn asymmetric_udp_windows_limit_each_direction_and_keep_the_session_budget
         flow
     });
     let _tcp = (client_tcp.unwrap(), server_tcp);
-    assert_eq!(client.snapshot().receive_budget, 256 * 1024);
+    // Each side sizes its own budget for its own largest receive window.
+    assert_eq!(client.snapshot().receive_budget, 4 * 192 * 1024);
+    assert_eq!(server.snapshot().receive_budget, 4 * UDP_WINDOW.bytes);
     assert_eq!(
-        client.open(FlowKind::Tcp, vec![]).await.err().unwrap(),
-        "Receive buffer budget reached"
+        client.inner.receive_bytes.available_permits(),
+        4 * 192 * 1024 - 192 * 1024 - 65536
     );
+    let (another, _peer) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    assert!(another.is_ok());
+    assert_eq!(client.snapshot().rejected, 0);
     assert_eq!(client.snapshot().protocol_errors, 0);
     assert_eq!(server.snapshot().protocol_errors, 0);
 }
 
 #[tokio::test]
-async fn extended_udp_slot_windows_share_the_session_packet_budget() {
+async fn extended_udp_slot_windows_fit_the_flow_limit_in_the_packet_budget() {
     let (client, server) = pair(Config {
         max_flows: 2,
         udp_window: Some(FlowWindow {
@@ -342,27 +463,41 @@ async fn extended_udp_slot_windows_share_the_session_packet_budget() {
         ..Default::default()
     })
     .await;
-    let (udp, receiver) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
-        let flow = server.accept().await.unwrap().flow;
-        flow.accept().unwrap();
-        flow
-    });
-    let udp = udp.unwrap();
+    let mut flows = Vec::new();
+    for _ in 0..2 {
+        let (udp, receiver) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
+            let flow = server.accept().await.unwrap().flow;
+            flow.accept().unwrap();
+            flow
+        });
+        flows.push((udp.unwrap(), receiver));
+    }
+    assert_eq!(client.inner.receive_slots.available_permits(), 0);
+    assert_eq!(client.snapshot().diagnostics.receive_slot_rejections, 0);
     assert_eq!(
         client.open(FlowKind::Udp, vec![]).await.err().unwrap(),
-        "Receive packet budget reached"
+        "Connection capacity reached"
     );
-    assert_eq!(client.snapshot().diagnostics.receive_slot_rejections, 1);
-    assert_eq!(client.inner.receive_bytes.available_permits(), 64 * 1024);
+    flows.pop();
+    assert_eq!(
+        client.inner.receive_slots.available_permits(),
+        UDP_FLOW_SLOT_LIMIT
+    );
     let (tcp, peer) = tokio::join!(client.open(FlowKind::Tcp, vec![]), async {
         let flow = server.accept().await.unwrap().flow;
         flow.accept().unwrap();
         flow
     });
     let tcp = tcp.unwrap();
-    assert_eq!(client.inner.receive_slots.available_permits(), 0);
-    drop((udp, receiver, tcp, peer));
-    assert_eq!(client.inner.receive_slots.available_permits(), 256);
+    assert_eq!(
+        client.inner.receive_slots.available_permits(),
+        UDP_FLOW_SLOT_LIMIT - 64
+    );
+    drop((flows, tcp, peer));
+    assert_eq!(
+        client.inner.receive_slots.available_permits(),
+        2 * UDP_FLOW_SLOT_LIMIT
+    );
 }
 
 #[tokio::test]
@@ -497,6 +632,69 @@ fn echo_server(endpoint: Endpoint) -> tokio::task::JoinHandle<()> {
     })
 }
 
+/// A SOCKS5 UDP datagram to 192.0.2.1 as carried in a flow.
+fn datagram(port: u16, payload: usize) -> Vec<u8> {
+    let mut data = vec![0, 0, 0, 1, 192, 0, 2, 1];
+    data.extend_from_slice(&port.to_be_bytes());
+    data.resize(10 + payload, 7);
+    data
+}
+
+async fn udp_flow(client: &Endpoint, server: &Endpoint) -> (Flow, Flow) {
+    let (flow, accepted) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
+        let flow = server.accept().await.unwrap().flow;
+        flow.accept().unwrap();
+        flow
+    });
+    (flow.unwrap(), accepted)
+}
+
+#[tokio::test]
+async fn only_a_voice_like_run_on_one_flow_caps_tcp_and_dns_never_does() {
+    let (client, server) = pair(Config {
+        max_flows: 16,
+        udp_window: Some(UDP_WINDOW),
+        tcp_interactive_bytes: Some(96 * 1024),
+        ..Default::default()
+    })
+    .await;
+    let interactive = |endpoint: &Endpoint| endpoint.snapshot().diagnostics.tcp_flight.interactive;
+    // Six lookups behind a TUN adapter: a query and an answer on each of six flows.
+    let mut lookups = Vec::new();
+    for _ in 0..6 {
+        let (flow, mut accepted) = udp_flow(&client, &server).await;
+        assert!(flow.sender().try_send_datagram(datagram(53, 40)).unwrap());
+        let query = accepted.recv().await.unwrap().unwrap();
+        assert!(accepted.sender().try_send_datagram(query.to_vec()).unwrap());
+        lookups.push((flow, accepted));
+    }
+    // A resolver that shares one flow: twenty DNS datagrams in a burst.
+    let (resolver, mut resolver_peer) = udp_flow(&client, &server).await;
+    for _ in 0..20 {
+        assert!(resolver.sender().try_send_datagram(datagram(53, 40)).unwrap());
+        resolver_peer.recv().await.unwrap().unwrap();
+    }
+    // Large datagrams of a bulk UDP transfer do not count either.
+    let (bulk, mut bulk_peer) = udp_flow(&client, &server).await;
+    for _ in 0..20 {
+        assert!(bulk.sender().try_send_datagram(datagram(443, 1200)).unwrap());
+        bulk_peer.recv().await.unwrap().unwrap();
+    }
+    assert!(!interactive(&client) && !interactive(&server));
+    // A call: twelve short datagrams on one flow reach both ends.
+    let (voice, mut voice_peer) = udp_flow(&client, &server).await;
+    for index in 0..12 {
+        assert_eq!(interactive(&client), false, "after {index} datagrams");
+        assert!(voice.sender().try_send_datagram(datagram(50_000, 160)).unwrap());
+        voice_peer.recv().await.unwrap().unwrap();
+    }
+    assert!(interactive(&client) && interactive(&server));
+    assert_eq!(
+        server.snapshot().diagnostics.tcp_flight.effective_bytes,
+        96 * 1024
+    );
+}
+
 #[tokio::test]
 async fn slow_receiver_does_not_block_an_independent_flow() {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -508,10 +706,8 @@ async fn slow_receiver_does_not_block_an_independent_flow() {
                 ..Default::default()
             };
             let (client, server) = pair(config).await;
-            for _ in 0..12 {
-                client.inner.tcp_flight.note_short(Instant::now());
-                server.inner.tcp_flight.note_short(Instant::now());
-            }
+            client.inner.tcp_flight.activate(Instant::now());
+            server.inner.tcp_flight.activate(Instant::now());
             let serving = echo_server(server.clone());
             let slow = client.open(FlowKind::Tcp, b"slow".to_vec()).await.unwrap();
             let sender = slow.sender();

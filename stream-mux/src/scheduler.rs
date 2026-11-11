@@ -1,10 +1,9 @@
 //! Per-flow FIFO with bounded preference for short datagrams and flow setup.
 //! The existing byte/message permits remain attached to queued frames.
-use crate::{Kind, Queued};
+use crate::{tcp_flight::SHORT_DATAGRAM, Kind, Queued};
 use std::collections::{HashMap, VecDeque};
 
 const INTERACTIVE_BURST: usize = 8;
-const SHORT_DATAGRAM: usize = 512;
 
 pub(super) fn interactive(frame: &Queued) -> bool {
     frame.frame.kind != Kind::Data || (frame.udp_data && frame.frame.data.len() <= SHORT_DATAGRAM)

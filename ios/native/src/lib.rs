@@ -201,18 +201,18 @@ fn start(raw: String) -> Result<(), String> {
             jumps,
             ssh_tuning: cfg.ssh_tuning,
             probe_ipv6: false,
-            // The mux budget is max_connections × TCP window (64 KiB). A UDP window larger
-            // than that lets lingering DNS flows exhaust the budget and reject every new
-            // flow ("Receive buffer budget reached"), so keep UDP at the TCP window size.
+            // Extension memory is tight, so UDP uses the TCP window size. Agents built
+            // before the receive budget was sized for the largest window still reserve
+            // 128 KiB per UDP flow out of `limit × 64 KiB`; see max_connections below.
             udp_receive_window: Some(FlowWindow {
                 bytes: 64 * 1024,
                 slots: 64,
             }),
             cap_default_udp_receive_slots: true,
             agent_udp_receive_window: None,
-            // The mux receive budget is max_connections × 64 KiB of accounting (not
-            // preallocated memory). Flows closed by the server keep their reservation
-            // until the local side closes, so a small cap rejects new flows under load.
+            // The receive budget is accounting, not preallocated memory. With an agent
+            // older than the budget fix, half of this limit is usable for UDP flows, so
+            // a small cap made it reject new flows during page loads on the device.
             max_connections: if cfg.max_connections == 0 {
                 1024
             } else {

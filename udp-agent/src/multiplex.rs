@@ -61,16 +61,16 @@ pub enum Mode {
     Qos,
 }
 
-pub fn run(mode: Mode) -> io::Result<()> {
+pub fn run(mode: Mode, elastic_tcp: bool) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let result = runtime.block_on(serve(mode));
+    let result = runtime.block_on(serve(mode, elastic_tcp));
     // Stdin reads run on a blocking worker. An expired handshake can leave one
     // waiting for input, so this short-lived agent exits without joining it.
     runtime.shutdown_background();
     result
 }
 
-async fn serve(mode: Mode) -> io::Result<()> {
+async fn serve(mode: Mode, elastic_tcp: bool) -> io::Result<()> {
     let limit = capacity();
     if limit < 32 {
         return Err(io::Error::other(
@@ -112,6 +112,13 @@ async fn serve(mode: Mode) -> io::Result<()> {
         Role::Server,
         Config {
             max_flows: limit,
+            // The agent's receive window bounds the upload rate of each connection.
+            // Only a client that grows its sending gradually gets the larger one.
+            receive_window: if elastic_tcp {
+                secret_tunnel_mux::TCP_RECEIVE_WINDOW
+            } else {
+                secret_tunnel_mux::BASE_TCP_WINDOW
+            },
             udp_window,
             tcp_interactive_bytes: qos.map(|settings| settings.tcp_interactive_bytes),
             ..Default::default()

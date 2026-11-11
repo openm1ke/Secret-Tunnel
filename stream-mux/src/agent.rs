@@ -35,6 +35,24 @@ pub struct Capabilities {
     pub heartbeat: bool,
     #[serde(default)]
     pub qos: bool,
+    /// The agent grows TCP sending inside a peer window above the baseline and
+    /// accepts [`ELASTIC_TCP_FLAG`] to announce a larger window of its own.
+    #[serde(default)]
+    pub elastic_tcp: bool,
+}
+
+/// Appended to a stdio command by a client that also sends elastically. Without
+/// it the agent keeps the baseline window: an older client would fill a larger
+/// one at once and queue megabytes ahead of voice on a slow link.
+pub const ELASTIC_TCP_FLAG: &str = "--elastic-tcp";
+
+/// The stdio command for an agent, with the elastic flag when both ends support it.
+pub fn command(base: &str, elastic_tcp: bool) -> String {
+    if elastic_tcp {
+        format!("{base} {ELASTIC_TCP_FLAG}")
+    } else {
+        base.to_owned()
+    }
 }
 
 fn legacy_udp_slot_limit() -> usize {
@@ -58,6 +76,7 @@ impl Capabilities {
             udp_config: false,
             heartbeat: true,
             qos: false,
+            elastic_tcp: false,
         }
     }
     pub fn validate(&self) -> Result<(), String> {

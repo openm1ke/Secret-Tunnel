@@ -59,6 +59,10 @@ class TunnelVpnService : VpnService() {
     private var engineIpv6:Boolean?=null
     private var engineCapacity=0
     private var session:TunnelSession?=null
+    // Flows refused by either multiplexer end in the current SSH session.
+    private var reportedRejections=0L
+    private fun readyDetail()="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"+
+        if(reportedRejections>0)" · отказов по лимиту: $reportedRejections" else ""
     private val monitor = object:Runnable {
         override fun run(){
             if(stopping.get()||!active||worker.isShutdown)return
@@ -78,6 +82,10 @@ class TunnelVpnService : VpnService() {
                     val status=JSONObject(NativeBridge.status())
                     if (status.optBoolean("running")) {
                         status.optJSONObject("transport")?.let { diagnostics.sample(SystemClock.elapsedRealtime(), it) }
+                        // Refused flows leave SSH healthy, so "Работает" alone would hide them.
+                        val transport=status.optJSONObject("transport")
+                        val rejected=(transport?.optLong("rejected")?:0L)+(transport?.optJSONObject("server")?.optLong("rejected")?:0L)
+                        if(phase=="Работает"&&rejected!=reportedRejections){reportedRejections=rejected;detail=readyDetail();notifyState()}
                     }
                     val newNetwork=moved&&recoveryNetworkHandle!=underlying.currentHandle()
                     when(if(newNetwork)RecoveryPolicy.Action.RECONNECT_SSH else recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running")&&!moved,TProxyIsRunning())){
@@ -173,7 +181,8 @@ class TunnelVpnService : VpnService() {
         when(underlying.action(SystemClock.elapsedRealtime())){
             UnderlyingNetworkTracker.Action.OFFLINE->{phase="Ожидание сети";detail="VPN включён. Ждём доступную сеть для SSH."}
             UnderlyingNetworkTracker.Action.WAIT,UnderlyingNetworkTracker.Action.RECONNECT->{phase="Смена сети";detail="VPN включён. Переподключаем SSH."}
-            else->{phase="Работает";detail="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"}
+            // A new SSH session starts its refusal counters from zero.
+            else->{phase="Работает";reportedRejections=0;detail=readyDetail()}
         }
         notifyState()
     }

@@ -8,6 +8,8 @@ use std::sync::Mutex;
 #[derive(Clone, Copy)]
 enum Mode {
     Current,
+    /// Like `Current`, and announces elastic TCP sending.
+    ElasticTcp,
     LimitedUdpSlots,
     Relay(u16),
     OldAgent,
@@ -103,9 +105,11 @@ impl server::Handler for Handler {
                 _ => {
                     let mut caps = agent::Capabilities::current("0.1.0", 64);
                     caps.udp = !matches!(self.mode, Mode::NoUdp);
-                    caps.flow_control = matches!(self.mode, Mode::Current | Mode::LimitedUdpSlots);
-                    caps.udp_config = matches!(self.mode, Mode::Current);
-                    caps.qos = matches!(self.mode, Mode::Current);
+                    let current = matches!(self.mode, Mode::Current | Mode::ElasticTcp);
+                    caps.flow_control = current || matches!(self.mode, Mode::LimitedUdpSlots);
+                    caps.udp_config = current;
+                    caps.qos = current;
+                    caps.elastic_tcp = matches!(self.mode, Mode::ElasticTcp);
                     if matches!(self.mode, Mode::LimitedUdpSlots) {
                         caps.max_udp_slots = 128;
                     }
@@ -122,8 +126,14 @@ impl server::Handler for Handler {
             session.eof(id)?;
             session.close(id)?;
         } else {
-            let flow_control = matches!(self.mode, Mode::Current | Mode::LimitedUdpSlots);
-            let qos = matches!(self.mode, Mode::Current) && command == agent::QOS_COMMAND;
+            // The elastic flag reaches only an agent that announced the capability.
+            let flagged = command.strip_suffix(agent::ELASTIC_TCP_FLAG).map(str::trim_end);
+            let elastic_tcp = flagged.is_some();
+            assert_eq!(elastic_tcp, matches!(self.mode, Mode::ElasticTcp));
+            let command = flagged.unwrap_or(command);
+            let current = matches!(self.mode, Mode::Current | Mode::ElasticTcp);
+            let flow_control = current || matches!(self.mode, Mode::LimitedUdpSlots);
+            let qos = current && command == agent::QOS_COMMAND;
             let configured = flow_control && command == agent::UDP_CONFIG_COMMAND;
             assert_eq!(
                 command,
@@ -162,6 +172,11 @@ impl server::Handler for Handler {
                         Role::Server,
                         MuxConfig {
                             max_flows: 64,
+                            receive_window: if elastic_tcp {
+                                secret_tunnel_mux::TCP_RECEIVE_WINDOW
+                            } else {
+                                secret_tunnel_mux::BASE_TCP_WINDOW
+                            },
                             udp_window,
                             tcp_interactive_bytes: settings
                                 .map(|settings| settings.tcp_interactive_bytes),
@@ -670,6 +685,66 @@ async fn negotiated_qos_budgets_keep_tcp_streaming_with_short_udp_active() {
             assert_eq!(received, 262144);
             tcp.finish().await.unwrap();
             assert_eq!(transport.snapshot().diagnostics.tcp_flight.held_bytes, 0);
+            transport.shutdown();
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "", "English")
+                .await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn elastic_tcp_windows_need_an_agent_that_announces_them() {
+    use secret_tunnel_mux::{BASE_TCP_WINDOW, TCP_RECEIVE_WINDOW};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (mode, window) in [(Mode::ElasticTcp, TCP_RECEIVE_WINDOW), (Mode::Current, BASE_TCP_WINDOW)] {
+            let elastic = window == TCP_RECEIVE_WINDOW;
+            let fixture = fixture(mode).await;
+            let session = connect_ssh(
+                &fixture.server,
+                (&*fixture.server.host, fixture.server.port),
+                fixture.options.clone(),
+            )
+            .await
+            .unwrap();
+            let (transport, report) = start_agent_transport(&session, 64, None, None, false)
+                .await
+                .unwrap();
+            assert_eq!(report.elastic_tcp, elastic);
+            // Both directions agree: a larger window is never announced to, or
+            // by, an end that would fill it at once.
+            let snapshot = transport.snapshot();
+            assert_eq!(snapshot.tcp_receive_window, window);
+            assert_eq!(snapshot.peer_tcp_window, window);
+            assert_eq!(
+                *fixture.commands.lock().unwrap(),
+                [
+                    agent::QUERY_COMMAND.to_owned(),
+                    agent::command(agent::FLOW_CONTROL_COMMAND, elastic)
+                ]
+            );
+            // More than one window of TCP still round-trips intact through SSH.
+            let mut flow = transport.open(FlowKind::Tcp, vec![]).await.unwrap();
+            let sender = flow.sender();
+            let total = 3 * TCP_RECEIVE_WINDOW;
+            let upload = tokio::spawn(async move {
+                for index in 0..total / secret_tunnel_mux::TCP_CHUNK {
+                    sender
+                        .send(vec![index as u8; secret_tunnel_mux::TCP_CHUNK])
+                        .await
+                        .unwrap();
+                }
+            });
+            let mut received = 0;
+            while received < total {
+                let packet = flow.recv().await.unwrap().unwrap();
+                assert!(packet.iter().all(|byte| *byte == packet[0]));
+                received += packet.len();
+            }
+            upload.await.unwrap();
+            assert_eq!(transport.snapshot().protocol_errors, 0);
             transport.shutdown();
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "", "English")

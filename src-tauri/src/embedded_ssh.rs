@@ -639,6 +639,7 @@ async fn run_embedded_tunnel(
     };
     let buffers = DatagramBuffers::default();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
+    let capacity = Arc::new(CapacityRejections::default());
     let _ = ready.send((ipv6_supported, transport.clone(), agent, route.outer_tcp.clone(), ssh_tuning));
     let mut tcp_tick = tokio::time::interval(Duration::from_secs(5));
     tcp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -665,10 +666,13 @@ async fn run_embedded_tunnel(
                 };
                 let transport = transport.clone();
                 let counters = counters.clone(); let logs = logs.clone(); let buffers = buffers.clone();
+                let capacity = capacity.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers).await {
-                        if !secret_tunnel_mux::is_flow_cancellation(&error) {
+                        if CapacityRejections::is_capacity(&error) {
+                            capacity.note(&logs, &error);
+                        } else if !secret_tunnel_mux::is_flow_cancellation(&error) {
                             super::log_line(&logs, format!("SOCKS connection: {error}"));
                         }
                     }
@@ -676,6 +680,49 @@ async fn run_embedded_tunnel(
             }
             _ = stop.changed() => { transport.shutdown(); route.disconnect().await; return Ok(()); }
             _ = transport.closed() => return Err(transport.error().unwrap_or_else(|| "Transport stopped".into())),
+        }
+    }
+}
+
+/// The transport refuses new flows in bursts of hundreds once a session budget
+/// is exhausted. Name the cause once per interval instead of filling the bounded
+/// log with identical lines; the tunnel itself keeps running.
+#[derive(Default)]
+struct CapacityRejections {
+    total: AtomicU64,
+    reported_at_ms: AtomicU64,
+}
+
+impl CapacityRejections {
+    const REPORT_INTERVAL_MS: u64 = 10_000;
+
+    /// Reasons produced by either multiplexer endpoint when it cannot admit a flow.
+    fn is_capacity(error: &str) -> bool {
+        matches!(
+            error,
+            "Receive buffer budget reached"
+                | "Receive packet budget reached"
+                | "Connection capacity reached"
+                | "Accept queue capacity reached"
+        )
+    }
+
+    fn note(&self, logs: &Arc<std::sync::Mutex<Vec<String>>>, error: &str) {
+        let total = self.total.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = secret_tunnel_mux::unix_millis();
+        let reported = self.reported_at_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(reported) >= Self::REPORT_INTERVAL_MS
+            && self
+                .reported_at_ms
+                .compare_exchange(reported, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            super::log_line(
+                logs,
+                format!(
+                    "Туннель отклоняет новые соединения: достигнут предел потоков сеанса ({error}). Отказов с начала сеанса: {total}"
+                ),
+            );
         }
     }
 }
@@ -792,7 +839,13 @@ async fn start_agent_transport_qos(
         } else {
             agent::START_COMMAND
         };
-        channel.exec(true, command).await.map_err(|e| e.to_string())?;
+        // Both ends must grow TCP sending gradually before either announces a
+        // window above the baseline; an older agent keeps the 64 KiB behaviour.
+        let elastic_tcp = discovery.elastic_tcp;
+        channel
+            .exec(true, agent::command(command, elastic_tcp))
+            .await
+            .map_err(|e| e.to_string())?;
         let mut stream = channel.into_stream();
         if let Some(bytes) = tcp_interactive_bytes {
             agent::write_session_settings(&mut stream,agent::SessionSettings {
@@ -805,6 +858,12 @@ async fn start_agent_transport_qos(
         }
         let transport = Endpoint::start(stream, Role::Client, MuxConfig {
             max_flows: max_connections,
+            // Our receive window bounds the download rate of each connection.
+            receive_window: if elastic_tcp {
+                secret_tunnel_mux::TCP_RECEIVE_WINDOW
+            } else {
+                secret_tunnel_mux::BASE_TCP_WINDOW
+            },
             heartbeat_initiator: discovery.heartbeat,
             tcp_interactive_bytes,
             udp_window: discovery
@@ -1166,6 +1225,7 @@ async fn handle_socks_client(
             transport,
             counters,
             buffers,
+            DNS_IDLE,
         )
         .await;
     }
@@ -1329,6 +1389,27 @@ async fn read_socks5_request(stream: &mut TcpStream) -> Result<SocksRequest, Str
     })
 }
 
+/// Idle limits for an association whose every datagram went to port 53.
+///
+/// A DNS exchange ends within milliseconds, yet a TUN adapter keeps the SOCKS
+/// association for its own idle timeout (60 s in hev-socks5-tunnel) and each
+/// resolver query opens a new one. Every association holds a flow and a whole
+/// receive window on both ends, so a burst of lookups could exhaust the session.
+/// Closing a quiet DNS association early returns those; the adapter transparently
+/// opens a new association for a later datagram from the same socket.
+#[derive(Clone, Copy)]
+struct DnsIdle {
+    /// After at least one reply was relayed back.
+    answered: Duration,
+    /// While no reply has arrived: covers resolver retransmissions.
+    unanswered: Duration,
+}
+
+const DNS_IDLE: DnsIdle = DnsIdle {
+    answered: Duration::from_secs(5),
+    unanswered: Duration::from_secs(15),
+};
+
 async fn relay_udp_association(
     mut control: TcpStream,
     peer: std::net::SocketAddr,
@@ -1336,6 +1417,7 @@ async fn relay_udp_association(
     transport: Endpoint,
     counters: Arc<TrafficCounters>,
     buffers: DatagramBuffers,
+    dns_idle: DnsIdle,
 ) -> Result<(), String> {
     let mut flow = match transport.open(FlowKind::Udp, Vec::new()).await {
         Ok(flow) => flow,
@@ -1359,14 +1441,28 @@ async fn relay_udp_association(
     } else {
         Some(std::net::SocketAddr::new(peer.ip(), requested_port))
     };
+    // True while every datagram of this association went to port 53.
+    let mut dns_only = true;
+    let mut sent = false;
+    let mut answered = false;
+    let mut last_activity = tokio::time::Instant::now();
     loop {
+        let dns_deadline = last_activity + if answered { dns_idle.answered } else { dns_idle.unanswered };
         tokio::select! {
             _ = control.read(&mut control_buffer) => return Ok(()),
+            // Returning closes the control connection, which ends the association (RFC 1928).
+            _ = tokio::time::sleep_until(dns_deadline), if dns_only && sent => return Ok(()),
             received = buffers.recv(&socket) => {
                 let (packet, source) = received.map_err(|e| e.to_string())?;
                 if source.ip() != peer.ip() || endpoint.is_some_and(|expected| expected != source) { continue; }
-                let payload = match udp_protocol::parse_packet(&packet) { Ok(packet) => packet.payload.len(), Err(_) => continue };
+                let (payload, port) = match udp_protocol::parse_packet(&packet) {
+                    Ok(packet) => (packet.payload.len(), packet.address.port()),
+                    Err(_) => continue,
+                };
                 endpoint = Some(source);
+                dns_only &= port == 53;
+                sent = true;
+                last_activity = tokio::time::Instant::now();
                 if sender.try_send_datagram(packet)? { counters.add_tx(payload as u64); }
             }
             received = flow.recv() => {
@@ -1376,6 +1472,8 @@ async fn relay_udp_association(
                     let parsed = udp_protocol::parse_packet(&packet).map_err(|e| e.to_string())?;
                     counters.add_rx(parsed.payload.len() as u64);
                 }
+                answered = true;
+                last_activity = tokio::time::Instant::now();
                 drop(packet);
             }
         }
@@ -1387,4 +1485,157 @@ async fn write_socks5_reply(stream: &mut TcpStream, status: u8) -> Result<(), St
         .write_all(&[0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod udp_association_tests {
+    use super::*;
+    use secret_tunnel_mux::UDP_WINDOW;
+    use std::net::SocketAddr;
+    use tokio::net::{TcpListener, UdpSocket};
+
+    const FAST: DnsIdle = DnsIdle {
+        answered: Duration::from_millis(200),
+        unanswered: Duration::from_millis(600),
+    };
+
+    struct Association {
+        transport: Endpoint,
+        app_control: TcpStream,
+        app_udp: UdpSocket,
+        relay: SocketAddr,
+        task: tokio::task::JoinHandle<Result<(), String>>,
+    }
+
+    /// A real multiplexer pair in memory whose server side echoes datagrams
+    /// (or stays silent), and one SOCKS UDP association over loopback sockets.
+    async fn association(dns_idle: DnsIdle, echo: bool) -> Association {
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let config = MuxConfig {
+            max_flows: 8,
+            udp_window: Some(UDP_WINDOW),
+            ..Default::default()
+        };
+        let (transport, server) = tokio::join!(
+            Endpoint::start(a, Role::Client, config.clone()),
+            Endpoint::start(b, Role::Server, config)
+        );
+        let (transport, server) = (transport.unwrap(), server.unwrap());
+        tokio::spawn(async move {
+            while let Some(incoming) = server.accept().await {
+                tokio::spawn(async move {
+                    let mut flow = incoming.flow;
+                    flow.accept().unwrap();
+                    let sender = flow.sender();
+                    while let Ok(Some(packet)) = flow.recv().await {
+                        if echo {
+                            let _ = sender.try_send_datagram(packet.to_vec());
+                        }
+                    }
+                });
+            }
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut app_control = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (proxy_control, peer) = listener.accept().await.unwrap();
+        let task = tokio::spawn(relay_udp_association(
+            proxy_control,
+            peer,
+            0,
+            transport.clone(),
+            Arc::new(TrafficCounters::default()),
+            DatagramBuffers::default(),
+            dns_idle,
+        ));
+        let mut reply = [0_u8; 10];
+        app_control.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[..4], [5, 0, 0, 1]);
+        let relay = SocketAddr::from(([127, 0, 0, 1], u16::from_be_bytes([reply[8], reply[9]])));
+        let app_udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        Association { transport, app_control, app_udp, relay, task }
+    }
+
+    async fn exchange(association: &Association, port: u16) {
+        let packet = udp_protocol::encode_packet(([1, 1, 1, 1], port).into(), b"query").unwrap();
+        association.app_udp.send_to(&packet, association.relay).await.unwrap();
+        let mut buffer = [0_u8; 128];
+        let (count, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            association.app_udp.recv_from(&mut buffer),
+        )
+        .await
+        .expect("echo through the multiplexer")
+        .unwrap();
+        assert_eq!(&buffer[..count], &packet[..]);
+    }
+
+    #[tokio::test]
+    async fn an_answered_dns_association_closes_early_and_frees_its_flow() {
+        let mut association = association(FAST, true).await;
+        exchange(&association, 53).await;
+        assert_eq!(association.transport.snapshot().active, 1);
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut association.task)
+            .await
+            .expect("DNS association must end after its idle limit");
+        assert_eq!(result.unwrap(), Ok(()));
+        // The adapter sees the association end as its control connection closing.
+        let mut byte = [0_u8; 1];
+        assert_eq!(association.app_control.read(&mut byte).await.unwrap(), 0);
+        assert_eq!(association.transport.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_dns_association_waits_for_the_longer_limit() {
+        let mut association = association(FAST, false).await;
+        let packet = udp_protocol::encode_packet(([1, 1, 1, 1], 53).into(), b"query").unwrap();
+        association.app_udp.send_to(&packet, association.relay).await.unwrap();
+        // No reply yet: a resolver may still retransmit on this socket.
+        tokio::time::sleep(FAST.answered * 2).await;
+        assert!(!association.task.is_finished(), "closed before the unanswered limit");
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut association.task)
+            .await
+            .expect("unanswered DNS association must still end");
+        assert_eq!(result.unwrap(), Ok(()));
+        assert_eq!(association.transport.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn other_udp_associations_follow_only_their_control_connection() {
+        for ports in [vec![443], vec![53, 443]] {
+            let mut association = association(FAST, true).await;
+            for port in ports {
+                exchange(&association, port).await;
+            }
+            tokio::time::sleep(FAST.unanswered * 2).await;
+            assert!(!association.task.is_finished(), "non-DNS association closed on idle");
+            assert_eq!(association.transport.snapshot().active, 1);
+            drop(association.app_control);
+            let result = tokio::time::timeout(Duration::from_secs(2), &mut association.task)
+                .await
+                .unwrap();
+            assert_eq!(result.unwrap(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn capacity_rejections_are_recognised_and_reported_once_per_interval() {
+        for reason in [
+            "Receive buffer budget reached",
+            "Receive packet budget reached",
+            "Connection capacity reached",
+            "Accept queue capacity reached",
+        ] {
+            assert!(CapacityRejections::is_capacity(reason));
+        }
+        assert!(!CapacityRejections::is_capacity("TCP connect timeout"));
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rejections = CapacityRejections::default();
+        for _ in 0..500 {
+            rejections.note(&logs, "Receive buffer budget reached");
+        }
+        let logs = logs.lock().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("Receive buffer budget reached"));
+        assert_eq!(rejections.total.load(Ordering::Relaxed), 500);
+    }
 }

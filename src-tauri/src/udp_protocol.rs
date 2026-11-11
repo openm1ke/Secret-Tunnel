@@ -18,6 +18,16 @@ pub enum PacketAddress<'a> {
     Domain(&'a str, u16),
 }
 
+impl PacketAddress<'_> {
+    #[allow(dead_code)] // Used by the client relay; the server agent matches on the address.
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::Socket(address) => address.port(),
+            Self::Domain(_, port) => *port,
+        }
+    }
+}
+
 pub struct ParsedPacket<'a> {
     #[allow(dead_code)]
     // The desktop relay needs only payload length; the server uses the destination.

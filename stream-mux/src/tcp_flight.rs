@@ -1,6 +1,10 @@
-//! Session-wide TCP credit budget while short UDP is active.
+//! Session-wide TCP credit budget while a voice-like UDP flow is active.
 //! Permits return on peer wire receipt, not on acceptance by an SSH writer.
 //! Per-flow application-consumption credit remains a separate constraint.
+//!
+//! "Voice-like" is a run of short datagrams on one flow. Counting them per
+//! session let six DNS lookups (twelve short datagrams on a dozen flows) cap all
+//! TCP for the whole hold time on every page load.
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,6 +20,45 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 const MAX: usize = 8 * 1024 * 1024;
 const DETECTION: Duration = Duration::from_millis(500);
 const HOLD: Duration = Duration::from_secs(15);
+/// Short datagrams one flow needs within `DETECTION` to activate the budget.
+const SHORT_RUN: usize = 12;
+/// An encoded datagram up to this size counts as short.
+pub(super) const SHORT_DATAGRAM: usize = 512;
+
+/// Short datagrams sent and received on one flow.
+pub(super) struct ShortRun {
+    since: Instant,
+    count: usize,
+}
+impl ShortRun {
+    pub(super) fn new(now: Instant) -> Self {
+        Self { since: now, count: 0 }
+    }
+    /// Count one short datagram; true while the flow keeps a voice-like rate.
+    pub(super) fn note(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.since) > DETECTION {
+            self.since = now;
+            self.count = 0;
+        }
+        self.count += 1;
+        self.count >= SHORT_RUN
+    }
+}
+
+/// Port of a datagram in the SOCKS5 UDP form STMUX003 flows carry: destination
+/// when sent by the client, source when relayed back by the agent.
+pub(super) fn datagram_port(data: &[u8]) -> Option<u16> {
+    if data.get(..3) != Some(&[0, 0, 0]) {
+        return None;
+    }
+    let offset = match *data.get(3)? {
+        1 => 8,
+        4 => 20,
+        3 => 5 + usize::from(*data.get(4)?),
+        _ => return None,
+    };
+    Some(u16::from_be_bytes([*data.get(offset)?, *data.get(offset + 1)?]))
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,8 +77,6 @@ struct State {
     limit: usize,
     debt: usize,
     held: HashMap<u32, VecDeque<Packet>>,
-    short_since: Instant,
-    short_count: usize,
     active_until: Option<Instant>,
 }
 pub(super) struct TcpFlight {
@@ -60,8 +101,6 @@ impl TcpFlight {
                 limit: normal,
                 debt: 0,
                 held: HashMap::new(),
-                short_since: Instant::now(),
-                short_count: 0,
                 active_until: None,
             }),
         })
@@ -78,20 +117,16 @@ impl TcpFlight {
         }
         state.limit = limit;
     }
-    pub(super) fn note_short(&self, now: Instant) {
-        if self.target.is_none() {
-            return;
-        }
+    /// Whether a TCP budget was negotiated for this session at all.
+    pub(super) fn enabled(&self) -> bool {
+        self.target.is_some()
+    }
+    /// A flow carries a voice-like run: cap TCP and (re)start the hold time.
+    pub(super) fn activate(&self, now: Instant) {
+        let Some(target) = self.target else { return };
         let mut state = self.state.lock().unwrap();
-        if now.duration_since(state.short_since) > DETECTION {
-            state.short_since = now;
-            state.short_count = 0;
-        }
-        state.short_count += 1;
-        if state.short_count >= 12 {
-            state.active_until = Some(now + HOLD);
-            self.resize(&mut state, self.target.unwrap().min(self.normal));
-        }
+        state.active_until = Some(now + HOLD);
+        self.resize(&mut state, target.min(self.normal));
     }
     pub(super) fn tick(&self, now: Instant) {
         let mut state = self.state.lock().unwrap();
@@ -225,17 +260,25 @@ impl Drop for Reservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// One flow's short datagrams, as `Inner::note_datagram` feeds them.
+    fn note_short(budget: &TcpFlight, run: &mut ShortRun, now: Instant) {
+        if run.note(now) {
+            budget.activate(now);
+        }
+    }
     fn activate(budget: &TcpFlight, now: Instant) {
-        for _ in 0..12 {
-            budget.note_short(now);
+        let mut run = ShortRun::new(now);
+        for _ in 0..SHORT_RUN {
+            note_short(budget, &mut run, now);
         }
     }
     #[test]
     fn isolated_datagrams_do_not_activate_and_short_gaps_do_not_release_bulk() {
         let budget = TcpFlight::new(MAX, Some(65536));
         let now = Instant::now();
+        let mut run = ShortRun::new(now);
         for i in 0..20 {
-            budget.note_short(now + Duration::from_secs(i));
+            note_short(&budget, &mut run, now + Duration::from_secs(i));
         }
         assert!(!budget.snapshot().interactive);
         let now = now + Duration::from_secs(21);
@@ -246,6 +289,48 @@ mod tests {
         budget.tick(now + HOLD);
         assert!(!budget.snapshot().interactive);
         assert_eq!(budget.snapshot().effective_bytes, MAX);
+    }
+    #[test]
+    fn a_run_is_counted_per_flow_and_needs_twelve_within_the_window() {
+        let budget = TcpFlight::new(MAX, Some(65536));
+        let now = Instant::now();
+        // Six lookups: twelve short datagrams, but two on each of six flows.
+        for _ in 0..6 {
+            let mut run = ShortRun::new(now);
+            note_short(&budget, &mut run, now);
+            note_short(&budget, &mut run, now + Duration::from_millis(40));
+        }
+        assert!(!budget.snapshot().interactive);
+        // Eleven on one flow are not enough; the twelfth is, within 500 ms.
+        let mut run = ShortRun::new(now);
+        for index in 0..11 {
+            note_short(&budget, &mut run, now + Duration::from_millis(20 * index));
+        }
+        assert!(!budget.snapshot().interactive);
+        note_short(&budget, &mut run, now + Duration::from_millis(240));
+        assert!(budget.snapshot().interactive);
+        // Without a negotiated budget nothing activates.
+        let disabled = TcpFlight::new(MAX, None);
+        assert!(!disabled.enabled());
+        activate(&disabled, now);
+        assert!(!disabled.snapshot().interactive);
+    }
+    #[test]
+    fn the_datagram_port_is_read_from_every_address_form() {
+        let ipv4 = [0, 0, 0, 1, 1, 1, 1, 1, 0, 53, 9, 9];
+        assert_eq!(datagram_port(&ipv4), Some(53));
+        let mut ipv6 = vec![0, 0, 0, 4];
+        ipv6.extend_from_slice(&[0x20; 16]);
+        ipv6.extend_from_slice(&[0x01, 0xbb, 7]);
+        assert_eq!(datagram_port(&ipv6), Some(443));
+        let mut domain = vec![0, 0, 0, 3, 11];
+        domain.extend_from_slice(b"example.com");
+        domain.extend_from_slice(&[0, 53]);
+        assert_eq!(datagram_port(&domain), Some(53));
+        // Truncated, fragmented or foreign payloads have no port.
+        for invalid in [&[][..], &[0, 0, 0, 1, 1, 1, 1], &[0, 0, 1, 1, 1, 1, 1, 1, 0, 53], &[0, 0, 0, 9, 0, 0]] {
+            assert_eq!(datagram_port(invalid), None);
+        }
     }
     #[tokio::test]
     async fn shrink_waits_for_peer_credit_and_graceful_retirement_does_not_refund_early() {

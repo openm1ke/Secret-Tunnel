@@ -1,0 +1,9 @@
+[package]
+name = "audit-mux-window-budget"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+secret-tunnel-mux = { path = "../../../stream-mux" }
+tokio = { version = "1", features = ["io-util", "rt", "macros", "time", "sync"] }

@@ -1199,7 +1199,7 @@ function App() {
                 <label>
                   Очередь SSH
                   <select value={settingsDraft.ssh_tuning?.channel_buffer_messages === 8 ? "small" : "default"} onChange={(event) => updateSettings("ssh_tuning", {...defaultSshTuning,...settingsDraft.ssh_tuning,channel_buffer_messages:event.target.value === "small" ? 8 : 32,channel_receive_window_bytes:event.target.value === "small" ? 1048576 : 4194304})}>
-                    <option value="default">Стандартная · 32 сообщения / 2 МиБ</option>
+                    <option value="default">Стандартная · 32 сообщения / 4 МиБ</option>
                     <option value="small">Уменьшенная · 8 сообщений / 1 МиБ · тест</option>
                   </select>
                 </label>

@@ -416,7 +416,7 @@ class MainActivity:Activity() {
         queue=button(queueCaption()){
             unlocked()
             AlertDialog.Builder(this@MainActivity).setTitle("Очередь SSH")
-                .setSingleChoiceItems(arrayOf("Стандартная · 32 сообщения / 2 МиБ","Уменьшенная · 8 сообщений / 1 МиБ"),if(proxySsh.smallQueue)1 else 0){dialog,index->
+                .setSingleChoiceItems(arrayOf("Стандартная · 32 сообщения / 4 МиБ","Уменьшенная · 8 сообщений / 1 МиБ"),if(proxySsh.smallQueue)1 else 0){dialog,index->
                     proxySsh=proxySsh.copy(smallQueue=index==1);queue.text=queueCaption();dialog.dismiss()
                 }.setNegativeButton("Отмена",null).show()
         }

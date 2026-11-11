@@ -444,15 +444,13 @@ impl Inner {
     }
     /// Count a UDP datagram of `state` towards a voice-like run of that flow.
     /// DNS never counts: a resolver that shares one flow is not a call either.
+    /// Large datagrams count only towards the flow's volume, see `tcp_flight`.
     fn note_datagram(&self, state: &State, data: &[u8]) {
-        if !self.tcp_flight.enabled()
-            || data.len() > tcp_flight::SHORT_DATAGRAM
-            || tcp_flight::datagram_port(data) == Some(53)
-        {
+        if !self.tcp_flight.enabled() || tcp_flight::datagram_port(data) == Some(53) {
             return;
         }
         let now = Instant::now();
-        if state.short_run.lock().unwrap().note(now) {
+        if state.short_run.lock().unwrap().note(now, data.len()) {
             self.tcp_flight.activate(now);
         }
     }

@@ -25,23 +25,58 @@ const SHORT_RUN: usize = 12;
 /// An encoded datagram up to this size counts as short.
 pub(super) const SHORT_DATAGRAM: usize = 512;
 
-/// Short datagrams sent and received on one flow.
+/// Bytes one flow may carry within `DETECTION` and still look like a call.
+///
+/// A QUIC download sends short ACKs too, enough to reach `SHORT_RUN`, but they
+/// travel with megabytes of full-size datagrams. A call stays far below this:
+/// voice is tens of kbit/s and a video call a few Mbit/s, while 384 KiB per
+/// 500 ms is 6.3 Mbit/s.
+const BULK_BYTES: usize = 384 * 1024;
+/// Full-size datagrams allowed per short one within a window. A video call
+/// sends about three video packets per voice packet; a QUIC download sends
+/// eight or more data packets per ACK, at any rate.
+const BULK_RATIO: usize = 4;
+
+/// Datagrams sent and received on one flow within the current window.
 pub(super) struct ShortRun {
     since: Instant,
     count: usize,
+    large: usize,
+    bytes: usize,
+    /// Bytes of the previous window, so a sustained download stays bulk while
+    /// a new window has only begun.
+    previous_bytes: usize,
 }
 impl ShortRun {
     pub(super) fn new(now: Instant) -> Self {
-        Self { since: now, count: 0 }
+        Self { since: now, count: 0, large: 0, bytes: 0, previous_bytes: 0 }
     }
-    /// Count one short datagram; true while the flow keeps a voice-like rate.
-    pub(super) fn note(&mut self, now: Instant) -> bool {
-        if now.duration_since(self.since) > DETECTION {
+    /// Count one datagram of `len` bytes; true while the flow keeps a run of
+    /// short datagrams at a call-like volume.
+    pub(super) fn note(&mut self, now: Instant, len: usize) -> bool {
+        let mut elapsed = now.duration_since(self.since);
+        if elapsed > DETECTION {
+            self.previous_bytes = if elapsed > DETECTION * 2 { 0 } else { self.bytes };
             self.since = now;
             self.count = 0;
+            self.large = 0;
+            self.bytes = 0;
+            elapsed = Duration::ZERO;
+        }
+        self.bytes += len;
+        if len > SHORT_DATAGRAM {
+            self.large += 1;
+            return false;
         }
         self.count += 1;
+        // Compare rates, not totals: a download reaches twelve ACKs within tens
+        // of milliseconds of a window, long before it accumulates its volume.
+        let span = elapsed.max(DETECTION / 5).as_micros();
+        let allowed = BULK_BYTES as u128 * span / DETECTION.as_micros();
         self.count >= SHORT_RUN
+            && self.large <= self.count * BULK_RATIO
+            && self.previous_bytes <= BULK_BYTES
+            && self.bytes as u128 <= allowed
     }
 }
 
@@ -262,7 +297,7 @@ mod tests {
     use super::*;
     /// One flow's short datagrams, as `Inner::note_datagram` feeds them.
     fn note_short(budget: &TcpFlight, run: &mut ShortRun, now: Instant) {
-        if run.note(now) {
+        if run.note(now, 160) {
             budget.activate(now);
         }
     }
@@ -314,6 +349,36 @@ mod tests {
         assert!(!disabled.enabled());
         activate(&disabled, now);
         assert!(!disabled.snapshot().interactive);
+    }
+    #[test]
+    fn short_acks_of_a_bulk_download_do_not_look_like_a_call() {
+        let budget = TcpFlight::new(MAX, Some(65536));
+        let now = Instant::now();
+        // QUIC with an ACK every eighth 1200-byte datagram, slow to fast.
+        for mbit in [1u64, 2, 5, 20] {
+            let gap = Duration::from_micros(1200 * 8 / mbit);
+            let mut run = ShortRun::new(now);
+            for index in 0..(2_000_000 / gap.as_micros() as u64) {
+                let at = now + gap * index as u32;
+                if run.note(at, 1200) {
+                    budget.activate(at);
+                }
+                if index % 8 == 7 && run.note(at, 60) {
+                    budget.activate(at);
+                }
+            }
+            assert!(!budget.snapshot().interactive, "{mbit} Mbit/s QUIC looked like a call");
+        }
+        // A video call: 50 voice packets and 150 video packets per second each way.
+        let mut run = ShortRun::new(now);
+        for index in 0..100u64 {
+            let at = now + Duration::from_millis(5 * index);
+            let len = if index % 4 == 0 { 160 } else { 1200 };
+            if run.note(at, len) {
+                budget.activate(at);
+            }
+        }
+        assert!(budget.snapshot().interactive);
     }
     #[test]
     fn the_datagram_port_is_read_from_every_address_form() {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.8 — 2026-11-11
+
+- QUIC downloads no longer switch on the UDP priority budget. Their short ACKs looked like a call on a phone scrolling Instagram, which capped parallel TCP downloads. A flow now counts as a call only while it carries less than about 6 Mbit/s; voice and ordinary video calls still qualify. Requires the agent from this release on the server for downloads.
+
 ## 0.3.7 — 2026-11-11
 
 - Fixed new connections being refused while the tunnel showed "Running". Idle UDP flows reserved larger windows than the session budget assumed, so Android ran out after 128 of its 512 flows. The budget now fits the advertised flow limit, DNS associations close 5 s after their reply, and refusals appear once per 10 s in the journal and as a counter in the Android status.

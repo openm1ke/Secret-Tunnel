@@ -618,7 +618,15 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
         .map(|value| serde_json::from_value::<embedded_ssh::SshTuning>(value.clone()).map_err(|e| e.to_string()))
         .transpose()?.unwrap_or_default();
     ssh_tuning.validate()?;
-    Ok(embedded_ssh::EmbeddedOptions { jumps, ssh_tuning, ..Default::default() })
+    Ok(embedded_ssh::EmbeddedOptions {
+        jumps,
+        ssh_tuning,
+        // QUIC downloads need room for bursts: 128 datagrams per flow capped one
+        // at 25 Mbit/s on a 50 ms path. Older agents lower the slots to theirs.
+        udp_receive_window: Some(secret_tunnel_mux::FlowWindow { bytes: 1024 * 1024, slots: 512 }),
+        cap_default_udp_receive_slots: true,
+        ..Default::default()
+    })
 }
 
 fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {

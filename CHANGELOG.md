@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.16 — 2026-11-11
+
+- A UDP flow may have up to 512 datagrams unacknowledged instead of 192, and Android and desktop clients ask for a 1 MiB / 512-datagram downlink window by default (was 256 KiB / 192 and 128 KiB / 128). Credit returns once the app took a datagram, so 192 capped one QUIC download at 37 Mbit/s on a 50 ms path and dropped every burst beyond it: a phone lost 6.1% of its downlink datagrams (4 076 of 67 035) in an hour of normal use. Bench, phone-like window, 50 ms: a 40 Mbit/s stream lost 15–25% and a 60 Mbit/s one 45–62%; now 0–0.04%. Voice p95 with a parallel UDP and TCP download 70 → 74 ms.
+- Agents announce the new limit in `max_udp_slots`; clients stay within the agent's limit, so mixed versions keep working with 192. The Android UDP window setting accepts up to 512 slots.
+
 ## 0.3.15 — 2026-11-11
 
 - The TCP budget without a call decides on the delay its own bytes saw in each round trip, weighted by size, instead of the fastest delivery of the round. Ping replies and other light packets pass the writer's round robin at once; with 1 MiB per connection their fast deliveries hid the queue behind bulk flows, and on a phone 12–15% of a speed test's frames waited over 100 ms on the server (loaded ping about 100 ms). The cut threshold is now max(base/4, 50 ms). Bench, 80 Mbit/s and 50 ms: no frame waits over 100 ms (0.3.14: up to 70 per 8 s); 200 ms route, 16 downloads: 2 instead of 814, loaded ping 220 instead of 261 ms; throughput unchanged.

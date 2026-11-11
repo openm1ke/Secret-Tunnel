@@ -251,6 +251,78 @@ class Voice:
         self.control.close()
 
 
+class UdpDownload:
+    """1200-byte datagrams from a loopback source to the client through a SOCKS
+    UDP association, sent in bursts like a QUIC server without pacing; reports
+    what arrived. The source answers the client's start datagram, so it sends to
+    the agent's socket for this association."""
+
+    SIZE = 1200
+
+    def __init__(self, socks_port, mbit, burst):
+        self.source = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.source.bind(("127.0.0.1", 0))
+        self.source.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 << 20)
+        self.control = socket.create_connection(("127.0.0.1", socks_port), timeout=10)
+        self.control.sendall(b"\x05\x01\x00")
+        assert self.control.recv(2) == b"\x05\x00"
+        self.control.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+        reply = b""
+        while len(reply) < 10:
+            reply += self.control.recv(10 - len(reply))
+        assert reply[1] == 0, "UDP ASSOCIATE refused"
+        relay = (socket.inet_ntoa(reply[4:8]), int.from_bytes(reply[8:10], "big"))
+        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+        self.udp.settimeout(0.2)
+        header = b"\x00\x00\x00\x01" + socket.inet_aton("127.0.0.1") + self.source.getsockname()[1].to_bytes(2, "big")
+        self.udp.sendto(header + b"start", relay)
+        _, self.peer = self.source.recvfrom(64)
+        self.interval = burst * self.SIZE * 8 / (mbit * 1e6)
+        self.burst = burst
+        self.sent = self.received = 0
+        self.counting = False
+        self.stop = threading.Event()
+        threading.Thread(target=self._send, daemon=True).start()
+        threading.Thread(target=self._receive, daemon=True).start()
+
+    def _send(self):
+        payload = bytes(self.SIZE)
+        due = time.monotonic()
+        while not self.stop.is_set():
+            for _ in range(self.burst):
+                self.source.sendto(payload, self.peer)
+                if self.counting:
+                    self.sent += 1
+            due += self.interval
+            time.sleep(max(0.0, due - time.monotonic()))
+
+    def _receive(self):
+        while not self.stop.is_set():
+            try:
+                self.udp.recvfrom(2048)
+            except OSError:
+                continue
+            if self.counting:
+                self.received += 1
+
+    def window(self):
+        self.sent = self.received = 0
+        self.counting = True
+
+    def result(self, elapsed):
+        self.counting = False
+        time.sleep(0.5)
+        lost = max(0, self.sent - self.received)
+        return {"sent": self.sent, "received": self.received,
+                "loss_percent": round(100 * lost / max(1, self.sent), 2),
+                "mbit_s": round(self.received * self.SIZE * 8 / 1e6 / elapsed, 1)}
+
+    def close(self):
+        self.stop.set()
+        self.control.close()
+
+
 class TcpPing:
     """16-byte request every 100 ms on its own SOCKS TCP flow to a loopback
     echo, like a speed test's loaded latency or an app's API call during a
@@ -324,7 +396,7 @@ def cpu_seconds(pids):
     return total
 
 
-def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None, ping=None):
+def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None, ping=None, udp=None):
     counted = [0]
     lock = threading.Lock()
     stop = threading.Event()
@@ -366,6 +438,8 @@ def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None
         voice.window()
     if ping:
         ping.window()
+    if udp:
+        udp.window()
     before, started = total(), time.monotonic()
     time.sleep(seconds)
     elapsed = time.monotonic() - started
@@ -395,6 +469,11 @@ def main():
                         help="client SSH channel receive window; 0 keeps the default (2048)")
     parser.add_argument("--voice", action="store_true",
                         help="run a 160-byte, 50/s UDP echo stream from 3 s before the load and report its round trips")
+    parser.add_argument("--udp-download", type=float, default=0,
+                        help="also receive 1200-byte UDP datagrams at this rate in Mbit/s, sent in bursts")
+    parser.add_argument("--udp-window", default="",
+                        help="client UDP receive window as KIB/SLOTS, for example 256/192 like the phone")
+    parser.add_argument("--udp-burst", type=int, default=32, help="datagrams per burst for --udp-download")
     parser.add_argument("--tcp-ping", action="store_true",
                         help="report round trips of 16-byte requests every 100 ms on a separate TCP flow")
     parser.add_argument("--dns-lookups", type=int, default=0,
@@ -425,6 +504,9 @@ def main():
             "socks_port": args.socks_port,
             "seconds": 600,
         }
+        if args.udp_window:
+            kib, slots = (int(part) for part in args.udp_window.split("/"))
+            config["udp_receive_window"] = {"bytes": kib * 1024, "slots": slots}
         if args.ssh_window_kib:
             config["ssh_tuning"] = {"channel_receive_window_bytes": args.ssh_window_kib * 1024}
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -465,9 +547,10 @@ def main():
                     if voice:
                         time.sleep(3)
                     ping = TcpPing(args.socks_port) if args.tcp_ping else None
+                    udp = UdpDownload(args.socks_port, args.udp_download, args.udp_burst) if args.udp_download else None
                     first = len(samples)
                     amount, elapsed = measure(args.socks_port, endpoints, flows, direction,
-                                              args.warmup, args.seconds, voice, ping)
+                                              args.warmup, args.seconds, voice, ping, udp)
                     window = [sample for sample in samples[first:] if sample.get("server")]
                     stop_dns.set()
                     cpu = {name: round(cpu_seconds(group) - cpu_before[name], 2) for name, group in pids.items()}
@@ -484,6 +567,9 @@ def main():
                     if ping:
                         row["tcp_ping"] = ping.result()
                         ping.close()
+                    if udp:
+                        row["udp_download"] = udp.result(elapsed)
+                        udp.close()
                     # Frames of the downloading side waiting in its multiplexer.
                     side = "server" if direction == "download" else "client"
                     queue = [sample[side]["bulk_data_queue"] for sample in window if sample.get(side)]

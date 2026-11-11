@@ -43,7 +43,12 @@ pub const FLOW_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 /// a full `TCP_RECEIVE_WINDOW`.
 const MAX_RECEIVE_BUDGET: usize = 1024 * 1024 * 1024;
 const BASE_FLOW_SLOT_LIMIT: usize = 128;
-pub const UDP_FLOW_SLOT_LIMIT: usize = 192;
+/// Datagrams one UDP flow may have unacknowledged. Credit returns once the
+/// receiving app took a datagram, so a flow carries at most `slots / RTT`
+/// datagrams and drops the rest: 192 capped a QUIC download at 37 Mbit/s on a
+/// 50 ms path, and a phone lost 6% of its downlink datagrams. Agents announce
+/// their own limit (`max_udp_slots`), and clients stay within it.
+pub const UDP_FLOW_SLOT_LIMIT: usize = 512;
 /// TCP receive window every STMUX003 endpoint accepts and starts sending within.
 pub const BASE_TCP_WINDOW: usize = 65536;
 

@@ -260,7 +260,7 @@ mod tests {
         let mut bad_magic = frame.clone();
         bad_magic[0] = b'X';
         assert!(read_udp_window_request(&mut bad_magic.as_slice()).await.is_err());
-        frame[12..].copy_from_slice(&193u32.to_be_bytes());
+        frame[12..].copy_from_slice(&(crate::UDP_FLOW_SLOT_LIMIT as u32 + 1).to_be_bytes());
         assert!(read_udp_window_request(&mut frame.as_slice()).await.is_err());
     }
 

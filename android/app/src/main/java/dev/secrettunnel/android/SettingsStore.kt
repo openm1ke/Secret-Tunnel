@@ -34,7 +34,7 @@ internal fun resolveServerRoute(id: String, servers: List<ServerProfile>): List<
 data class UdpWindow(val kib: Int, val slots: Int) {
     init {
         require(kib in 64..1024) { "Размер окна UDP должен быть от 64 до 1024 КиБ" }
-        require(slots in 4..192) { "Число слотов UDP должно быть от 4 до 192" }
+        require(slots in 4..512) { "Число слотов UDP должно быть от 4 до 512" }
     }
 
     fun toJson(): JSONObject = JSONObject().put("bytes", kib * 1024).put("slots", slots)

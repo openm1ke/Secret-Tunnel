@@ -125,13 +125,13 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
     let build_kib = option_env!("ST_ANDROID_UDP_RECEIVE_KIB");
     let build_slots = option_env!("ST_ANDROID_UDP_RECEIVE_SLOTS");
     let udp_receive_kib = build_kib
-        .unwrap_or("256")
+        .unwrap_or("1024")
         .parse::<usize>()
         .ok()
         .filter(|kib| (64..=1024).contains(kib))
         .ok_or("Некорректный размер окна UDP в сборке")?;
     let udp_receive_slots = build_slots
-        .unwrap_or("192")
+        .unwrap_or("512")
         .parse()
         .map_err(|_| "Некорректный лимит UDP-слотов в сборке")?;
     {

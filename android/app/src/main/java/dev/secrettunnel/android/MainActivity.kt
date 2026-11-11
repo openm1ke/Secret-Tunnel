@@ -441,7 +441,7 @@ class MainActivity:Activity() {
         window?.let { "${it.kib} КиБ / ${it.slots} сл." } ?: "По умолчанию"
 
     private fun chooseUdpWindow(title: String, current: UdpWindow?, save: (UdpWindow?) -> Unit) {
-        val presets = listOf(null, UdpWindow(192, 192), UdpWindow(256, 192))
+        val presets = listOf(null, UdpWindow(256, 192), UdpWindow(1024, 512))
         val options = (presets.map(::udpWindowLabel) + "Вручную").toTypedArray()
         val selected = presets.indexOf(current).let { if (it < 0) presets.size else it }
         AlertDialog.Builder(this).setTitle("UDP · $title")
@@ -466,7 +466,7 @@ class MainActivity:Activity() {
             }
         }
         val kib = number("Окно, КиБ (64–1024)", current?.kib ?: 192)
-        val slots = number("Слоты (4–192)", current?.slots ?: 192)
+        val slots = number("Слоты (4–512)", current?.slots ?: 512)
         val dialog = AlertDialog.Builder(this).setTitle("UDP · $title")
             .setView(form).setNegativeButton("Отмена", null)
             .setPositiveButton("Применить", null).create()
@@ -476,7 +476,7 @@ class MainActivity:Activity() {
                 val slotsValue = slots.text.toString().toIntOrNull()
                 when {
                     bytesValue == null || bytesValue !in 64..1024 -> kib.error = "Введите от 64 до 1024 КиБ"
-                    slotsValue == null || slotsValue !in 4..192 -> slots.error = "Введите от 4 до 192 слотов"
+                    slotsValue == null || slotsValue !in 4..512 -> slots.error = "Введите от 4 до 512 слотов"
                     else -> {
                         save(UdpWindow(bytesValue, slotsValue))
                         dialog.dismiss()

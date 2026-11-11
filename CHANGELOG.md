@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.17 — 2026-11-11
+
+- The apps and the server agent share one version number: agent 0.3.17 is the one built with the 0.3.17 apps (the agent was 0.3.13 next to app 0.3.16). `scripts/set-version.py X.Y.Z` writes it to every version file, including the Android versionCode, and the release workflow refuses a tag that any of them does not match (`--check`).
+- The standard SSH queue is labelled 4 MiB in the Android and desktop settings; its window changed in 0.3.10.
+- `scripts/deploy-agent.sh user@host [ssh options]` builds the Linux agent locally and installs it without the release workflow.
+
 ## 0.3.16 — 2026-11-11
 
 - A UDP flow may have up to 512 datagrams unacknowledged instead of 192, and Android and desktop clients ask for a 1 MiB / 512-datagram downlink window by default (was 256 KiB / 192 and 128 KiB / 128). Credit returns once the app took a datagram, so 192 capped one QUIC download at 37 Mbit/s on a 50 ms path and dropped every burst beyond it: a phone lost 6.1% of its downlink datagrams (4 076 of 67 035) in an hour of normal use. Bench, phone-like window, 50 ms: a 40 Mbit/s stream lost 15–25% and a 60 Mbit/s one 45–62%; now 0–0.04%. Voice p95 with a parallel UDP and TCP download 70 → 74 ms.

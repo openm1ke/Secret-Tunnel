@@ -180,6 +180,77 @@ def dns_bursts(socks_port, lookups, stop, answered):
         stop.wait(2)
 
 
+class Voice:
+    """160-byte UDP datagrams at 50/s through a SOCKS UDP association to a
+    loopback echo, like the team's voice stand; records round trips in ms."""
+
+    def __init__(self, socks_port):
+        self.echo = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.echo.bind(("127.0.0.1", 0))
+        threading.Thread(target=self._echo, daemon=True).start()
+        self.control = socket.create_connection(("127.0.0.1", socks_port), timeout=10)
+        self.control.sendall(b"\x05\x01\x00")
+        assert self.control.recv(2) == b"\x05\x00"
+        self.control.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+        reply = b""
+        while len(reply) < 10:
+            reply += self.control.recv(10 - len(reply))
+        assert reply[1] == 0, "UDP ASSOCIATE refused"
+        self.relay = (socket.inet_ntoa(reply[4:8]), int.from_bytes(reply[8:10], "big"))
+        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp.settimeout(0.2)
+        self.header = b"\x00\x00\x00\x01" + socket.inet_aton("127.0.0.1") + self.echo.getsockname()[1].to_bytes(2, "big")
+        self.sent, self.rtts, self.recording = {}, [], False
+        self.stop = threading.Event()
+        threading.Thread(target=self._send, daemon=True).start()
+        threading.Thread(target=self._receive, daemon=True).start()
+
+    def _echo(self):
+        while True:
+            data, peer = self.echo.recvfrom(2048)
+            self.echo.sendto(data, peer)
+
+    def _send(self):
+        sequence = 0
+        while not self.stop.is_set():
+            sequence += 1
+            self.sent[sequence] = (time.monotonic(), self.recording)
+            payload = sequence.to_bytes(4, "big") + bytes(156)
+            self.udp.sendto(self.header + payload, self.relay)
+            time.sleep(0.02)
+
+    def _receive(self):
+        while not self.stop.is_set():
+            try:
+                data, _ = self.udp.recvfrom(2048)
+            except OSError:
+                continue
+            sequence = int.from_bytes(data[10:14], "big")
+            sent = self.sent.pop(sequence, None)
+            if sent and sent[1]:
+                self.rtts.append((time.monotonic() - sent[0]) * 1000)
+
+    def window(self):
+        self.rtts, self.recording = [], True
+        sent_before = len([1 for _, recording in self.sent.values() if recording])
+        return sent_before
+
+    def result(self):
+        self.recording = False
+        values = sorted(self.rtts)
+        late = len([1 for _, recording in self.sent.values() if recording])
+        if not values:
+            return {"received": 0, "missing": late}
+        return {"received": len(values), "missing": late,
+                "p50_ms": round(values[len(values) // 2], 1),
+                "p95_ms": round(values[max(0, int(len(values) * 0.95) - 1)], 1),
+                "within_150ms": len([v for v in values if v <= 150])}
+
+    def close(self):
+        self.stop.set()
+        self.control.close()
+
+
 def cpu_seconds(pids):
     total = 0.0
     for pid in pids:
@@ -190,7 +261,7 @@ def cpu_seconds(pids):
     return total
 
 
-def measure(socks_port, endpoints, flows, direction, warmup, seconds):
+def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None):
     counted = [0]
     lock = threading.Lock()
     stop = threading.Event()
@@ -228,6 +299,8 @@ def measure(socks_port, endpoints, flows, direction, warmup, seconds):
             return endpoints.received
 
     time.sleep(warmup)
+    if voice:
+        voice.window()
     before, started = total(), time.monotonic()
     time.sleep(seconds)
     elapsed = time.monotonic() - started
@@ -253,6 +326,8 @@ def main():
     parser.add_argument("--socks-port", type=int, default=1082)
     parser.add_argument("--one-way-ms", default="0,25,50,100")
     parser.add_argument("--mbit", type=float, default=0, help="rate limit of the link in each direction; 0 is unlimited")
+    parser.add_argument("--voice", action="store_true",
+                        help="run a 160-byte, 50/s UDP echo stream from 3 s before the load and report its round trips")
     parser.add_argument("--dns-lookups", type=int, default=0,
                         help="during each measurement resolve this many names at once every 2 s (real queries to 1.1.1.1)")
     parser.add_argument("--flows", default="1,4")
@@ -309,8 +384,11 @@ def main():
                     if args.dns_lookups:
                         threading.Thread(target=dns_bursts, daemon=True,
                                          args=(args.socks_port, args.dns_lookups, stop_dns, answered)).start()
+                    voice = Voice(args.socks_port) if args.voice else None
+                    if voice:
+                        time.sleep(3)
                     amount, elapsed = measure(args.socks_port, endpoints, flows, direction,
-                                              args.warmup, args.seconds)
+                                              args.warmup, args.seconds, voice)
                     stop_dns.set()
                     cpu = {name: round(cpu_seconds(group) - cpu_before[name], 2) for name, group in pids.items()}
                     row = {
@@ -319,6 +397,10 @@ def main():
                         "law_64k_mbit_s": round(65536 * 8 / 1e6 / (delay_ms * 2 / 1000) * flows, 2) if delay_ms else None,
                         "cpu_seconds_incl_warmup": cpu,
                     }
+                    if voice:
+                        time.sleep(0.5)
+                        row["voice"] = voice.result()
+                        voice.close()
                     if args.dns_lookups:
                         row["dns_lookups_per_burst"] = args.dns_lookups
                         row["dns_answered"] = f"{sum(answered)}/{len(answered)}"

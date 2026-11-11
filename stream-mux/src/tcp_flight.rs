@@ -5,6 +5,17 @@
 //! "Voice-like" is a run of short datagrams on one flow. Counting them per
 //! session let six DNS lookups (twelve short datagrams on a dozen flows) cap all
 //! TCP for the whole hold time on every page load.
+//!
+//! While active, the budget follows queueing delay instead of staying at the
+//! configured size. It starts there, so a call is protected at once as before,
+//! grows by about one TCP chunk per round trip while `Delivered` returns near
+//! the uncongested path delay and halves when a queue builds up, never below
+//! the configured size. Growth is additive because the delay signal arrives a
+//! round trip late: doubling overran a 2 Mbit/s, 300 ms path before the queue
+//! showed and doubled voice p95. A fixed 96 KiB
+//! capped every download at 96 KiB per round trip (14.8 Mbit/s at 53 ms) and
+//! held small TCP messages, such as an app's own pings, behind it; apps that
+//! merely look like a call (reconnect bursts, latency probes) triggered that.
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -36,6 +47,25 @@ const BULK_BYTES: usize = 384 * 1024;
 /// sends about three video packets per voice packet; a QUIC download sends
 /// eight or more data packets per ACK, at any rate.
 const BULK_RATIO: usize = 4;
+
+/// One `Delivered` round trip against the uncongested path while active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delay {
+    /// Essentially no queue: the budget may grow.
+    Clear,
+    Hold,
+    /// A queue that would delay voice: halve the budget.
+    Queued,
+}
+fn delay(base: Duration, sample: Duration) -> Delay {
+    if sample <= base + (base / 8).max(Duration::from_millis(10)) {
+        Delay::Clear
+    } else if sample >= base + (base / 4).max(Duration::from_millis(30)) {
+        Delay::Queued
+    } else {
+        Delay::Hold
+    }
+}
 
 /// Datagrams sent and received on one flow within the current window.
 pub(super) struct ShortRun {
@@ -107,12 +137,17 @@ pub struct TcpFlightSnapshot {
 struct Packet {
     payload: usize,
     permit: OwnedSemaphorePermit,
+    sent_at: Instant,
 }
 struct State {
     limit: usize,
     debt: usize,
     held: HashMap<u32, VecDeque<Packet>>,
     active_until: Option<Instant>,
+    /// Lowest `Delivered` round trip of the session; see `elastic::Path` for
+    /// why it never ages.
+    base: Option<Duration>,
+    reduced_at: Option<Instant>,
 }
 pub(super) struct TcpFlight {
     available: Arc<Semaphore>,
@@ -137,6 +172,8 @@ impl TcpFlight {
                 debt: 0,
                 held: HashMap::new(),
                 active_until: None,
+                base: None,
+                reduced_at: None,
             }),
         })
     }
@@ -156,12 +193,45 @@ impl TcpFlight {
     pub(super) fn enabled(&self) -> bool {
         self.target.is_some()
     }
+    fn floor(&self) -> usize {
+        self.target.unwrap_or(self.normal).min(self.normal)
+    }
     /// A flow carries a voice-like run: cap TCP and (re)start the hold time.
+    /// A run that continues keeps the budget the delay has earned meanwhile.
     pub(super) fn activate(&self, now: Instant) {
-        let Some(target) = self.target else { return };
+        if self.target.is_none() {
+            return;
+        }
         let mut state = self.state.lock().unwrap();
-        state.active_until = Some(now + HOLD);
-        self.resize(&mut state, target.min(self.normal));
+        if state.active_until.replace(now + HOLD).is_none() {
+            state.reduced_at = None;
+            self.resize(&mut state, self.floor());
+        }
+    }
+    /// Adapt the active budget to one `Delivered` round trip of `bytes`.
+    fn follow_delay(&self, state: &mut State, sample: Duration, bytes: usize, now: Instant) {
+        let base = state.base.map_or(sample, |known| known.min(sample));
+        state.base = Some(base);
+        if state.active_until.is_none() {
+            return;
+        }
+        match delay(base, sample) {
+            // Additive: `bytes` of a full limit add one TCP chunk.
+            Delay::Clear => {
+                let growth = (bytes * crate::TCP_CHUNK / state.limit.max(1)).max(1024);
+                let limit = (state.limit + growth).min(self.normal);
+                self.resize(state, limit);
+            }
+            Delay::Hold => {}
+            // Packets sent before a reduction still report the old queue.
+            Delay::Queued => {
+                if state.reduced_at.is_none_or(|at| now.duration_since(at) >= sample) {
+                    let limit = (state.limit / 2).max(self.floor());
+                    self.resize(state, limit);
+                    state.reduced_at = Some(now);
+                }
+            }
+        }
     }
     pub(super) fn tick(&self, now: Instant) {
         let mut state = self.state.lock().unwrap();
@@ -207,14 +277,20 @@ impl TcpFlight {
         }
         let mut returned = Vec::with_capacity(slots);
         let packets = state.held.get_mut(&id).unwrap();
+        let sent_at = packets.front().map(|packet| packet.sent_at);
         for _ in 0..slots {
             returned.push(packets.pop_front().unwrap().permit);
         }
         if packets.is_empty() {
             state.held.remove(&id);
         }
+        let charged = returned.iter().map(|permit| permit.num_permits()).sum();
         for permit in returned {
             self.give_back(&mut state, permit);
+        }
+        if let Some(sent_at) = sent_at {
+            let now = Instant::now();
+            self.follow_delay(&mut state, now.duration_since(sent_at), charged, now);
         }
         Ok(())
     }
@@ -271,6 +347,7 @@ impl Reservation {
         state.held.entry(id).or_default().push_back(Packet {
             payload: self.payload,
             permit: self.permit.take().unwrap(),
+            sent_at: Instant::now(),
         });
         let result = send();
         if result.is_err() {
@@ -381,6 +458,66 @@ mod tests {
         assert!(budget.snapshot().interactive);
     }
     #[test]
+    fn delay_thresholds_scale_with_the_path() {
+        let ms = Duration::from_millis;
+        assert_eq!(delay(ms(50), ms(60)), Delay::Clear);
+        assert_eq!(delay(ms(50), ms(61)), Delay::Hold);
+        assert_eq!(delay(ms(50), ms(80)), Delay::Queued);
+        assert_eq!(delay(ms(300), ms(337)), Delay::Clear);
+        assert_eq!(delay(ms(300), ms(374)), Delay::Hold);
+        assert_eq!(delay(ms(300), ms(375)), Delay::Queued);
+    }
+    /// Send and acknowledge one packet of `size` on flow `id`, `rtt` later.
+    async fn round(budget: &Arc<TcpFlight>, id: u32, size: usize, start: Instant, rtt: Duration) {
+        let closed = AtomicBool::new(false);
+        budget.reserve(size).await.unwrap().commit(id, &closed, || Ok(())).unwrap();
+        // Model the round trip by back-dating the send time.
+        budget.state.lock().unwrap().held.get_mut(&id).unwrap().back_mut().unwrap().sent_at = start;
+        let mut state = budget.state.lock().unwrap();
+        let packet = state.held.get_mut(&id).unwrap().pop_front().unwrap();
+        if state.held[&id].is_empty() {
+            state.held.remove(&id);
+        }
+        let charged = packet.permit.num_permits();
+        budget.give_back(&mut state, packet.permit);
+        budget.follow_delay(&mut state, rtt, charged, start + rtt);
+    }
+    #[tokio::test]
+    async fn an_active_budget_grows_on_a_clear_path_and_shrinks_to_the_floor_on_a_queue() {
+        let floor = 96 * 1024;
+        let budget = TcpFlight::new(MAX, Some(floor));
+        let ms = Duration::from_millis;
+        let now = Instant::now();
+        // Inactive: samples set the path base and leave the budget alone.
+        round(&budget, 1, 16384, now, ms(50)).await;
+        assert_eq!(budget.snapshot().effective_bytes, MAX);
+        // Activation starts at the configured size, as the fixed budget did.
+        budget.activate(now);
+        assert_eq!(budget.snapshot().effective_bytes, floor);
+        // Fast delivery: one round trip of a full limit adds about one chunk.
+        for index in 0..64 {
+            round(&budget, 1, 16384, now + ms(index), ms(52)).await;
+        }
+        let grown = budget.snapshot().effective_bytes;
+        assert!(grown > floor + 6 * 16384 && grown < floor + 64 * 16384, "grew to {grown}");
+        // A continuing call does not reset what the delay has earned.
+        budget.activate(now + ms(100));
+        assert_eq!(budget.snapshot().effective_bytes, grown);
+        // A queue halves it, at most once per round trip, never below the floor.
+        round(&budget, 1, 16384, now + ms(200), ms(150)).await;
+        assert_eq!(budget.snapshot().effective_bytes, grown / 2);
+        round(&budget, 1, 16384, now + ms(201), ms(150)).await;
+        assert_eq!(budget.snapshot().effective_bytes, grown / 2);
+        for index in 0..10 {
+            round(&budget, 1, 16384, now + ms(500 + 200 * index), ms(150)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, floor);
+        // Expiry returns the session budget, as before.
+        budget.tick(now + ms(100) + HOLD);
+        assert_eq!(budget.snapshot().effective_bytes, MAX);
+        assert!(!budget.snapshot().interactive);
+    }
+    #[test]
     fn the_datagram_port_is_read_from_every_address_form() {
         let ipv4 = [0, 0, 0, 1, 1, 1, 1, 1, 0, 53, 9, 9];
         assert_eq!(datagram_port(&ipv4), Some(53));
@@ -410,6 +547,16 @@ mod tests {
                 .unwrap();
         }
         activate(&budget, Instant::now());
+        {
+            // Deliveries report a standing queue, so the active budget stays at
+            // its floor and only peer credit releases the excess.
+            let mut state = budget.state.lock().unwrap();
+            state.base = Some(Duration::from_millis(50));
+            let sent_at = Instant::now() - Duration::from_millis(300);
+            for packet in state.held.values_mut().flatten() {
+                packet.sent_at = sent_at;
+            }
+        }
         budget.retire(0, &closed, false);
         assert_eq!(budget.snapshot().held_bytes, 262144);
         assert!(budget.acknowledge(0, 1, 1).is_err());

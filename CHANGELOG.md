@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.9 — 2026-11-11
+
+- The Balanced and Voice profiles no longer cap TCP at a fixed 96 or 64 KiB per round trip while UDP priority is active. The budget starts there, grows by about one TCP chunk per round trip while deliveries return near the path delay and halves when a queue builds up. On a 50 ms path, four downloads with a call running reached 157 instead of 15 Mbit/s; voice p95 stayed within 8% of the fixed budget on the shaped 5 and 2 Mbit/s routes. Apps that merely look like a call (reconnect bursts, latency probes, QUIC) now cost little. Requires the agent from this release for downloads.
+
 ## 0.3.8 — 2026-11-11
 
 - QUIC downloads no longer switch on the UDP priority budget. Their short ACKs looked like a call on a phone scrolling Instagram, which capped parallel TCP downloads. A flow now counts as a call only while it carries less than about 6 Mbit/s; voice and ordinary video calls still qualify. Requires the agent from this release on the server for downloads.

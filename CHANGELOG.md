@@ -2,7 +2,7 @@
 
 ## 0.3.13 — 2026-11-11
 
-- The TCP budget without a call keeps up to max(base/8, 20 ms) of queue and cuts above max(base/4, 40 ms), instead of 10 and 30 ms. With 10 ms a phone's uploads fell to 46–52 Mbit/s in two of three Speedtest runs. On the bench throughput is unchanged and the loaded ping is 97 ms in the phone-like case (82 ms in 0.3.12, 107 ms in 0.3.10).
+- The TCP budget without a call keeps up to max(base/8, 20 ms) of queue and cuts above max(base/4, 40 ms), instead of 10 and 30 ms. With 10 ms a phone's uploads fell to 46–52 Mbit/s in two of three Speedtest runs. On the bench throughput is unchanged and the loaded ping is 97 ms in the phone-like case (82 ms in 0.3.12, 107 ms in 0.3.10). On the phone the uplink is now limited by per-flow windows instead of the budget; download 61–77 Mbit/s, loaded ping 55–101 ms (0.3.10: 77–188).
 
 ## 0.3.12 — 2026-11-11
 

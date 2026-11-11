@@ -299,10 +299,11 @@ async fn larger_udp_windows_do_not_reduce_the_advertised_flow_limit() {
 
 #[tokio::test]
 async fn larger_windows_lower_the_announced_flow_limit_to_keep_the_hard_cap() {
-    // 2048 flows x 256 KiB would be 512 MiB. The endpoint announces as many
-    // flows as fit the 256 MiB session cap, so its limit stays reachable.
+    // 2048 flows x 1 MiB would be 2 GiB. The endpoint announces as many flows
+    // as fit the 1 GiB session cap, so its limit stays reachable.
     let (client, server) = pair(Config {
         max_flows: 2048,
+        receive_window: TCP_RECEIVE_WINDOW,
         udp_window: Some(FlowWindow {
             bytes: 256 * 1024,
             slots: UDP_FLOW_SLOT_LIMIT,
@@ -313,7 +314,7 @@ async fn larger_windows_lower_the_announced_flow_limit_to_keep_the_hard_cap() {
     for endpoint in [&client, &server] {
         let snapshot = endpoint.snapshot();
         assert_eq!(snapshot.limit, 1024);
-        assert_eq!(snapshot.receive_budget, 256 * 1024 * 1024);
+        assert_eq!(snapshot.receive_budget, 1024 * 1024 * 1024);
         assert_eq!(
             endpoint.inner.receive_slots.available_permits(),
             1024 * UDP_FLOW_SLOT_LIMIT

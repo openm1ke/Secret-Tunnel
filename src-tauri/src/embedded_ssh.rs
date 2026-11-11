@@ -596,6 +596,7 @@ async fn run_embedded_tunnel(
         agent_udp_receive_window,
         cap_default_udp_receive_slots,
         tcp_interactive_bytes,
+        ssh_tuning.tcp_receive_window_bytes,
     )
     .await?;
     super::log_line(&logs, agent.summary());
@@ -791,6 +792,7 @@ async fn start_agent_transport(
         agent_udp_receive_window,
         cap_default_udp_receive_slots,
         None,
+        secret_tunnel_mux::TCP_RECEIVE_WINDOW,
     )
     .await
 }
@@ -802,6 +804,7 @@ async fn start_agent_transport_qos(
     agent_udp_receive_window: Option<FlowWindow>,
     cap_default_udp_receive_slots: bool,
     tcp_interactive_bytes: Option<usize>,
+    tcp_receive_window: usize,
 ) -> Result<(Endpoint, AgentCapabilities), String> {
     let discovery = discover_agent(session).await?;
     if tcp_interactive_bytes.is_some() && !discovery.qos {
@@ -860,7 +863,7 @@ async fn start_agent_transport_qos(
             max_flows: max_connections,
             // Our receive window bounds the download rate of each connection.
             receive_window: if elastic_tcp {
-                secret_tunnel_mux::TCP_RECEIVE_WINDOW
+                tcp_receive_window
             } else {
                 secret_tunnel_mux::BASE_TCP_WINDOW
             },
@@ -908,6 +911,7 @@ pub fn diagnose_server_with_options(
         .map_err(|e| e.to_string())?;
     let timeout = route_connect_timeout(&options) + Duration::from_secs(15);
     let tcp_interactive_bytes = options.ssh_tuning.tcp_interactive_bytes;
+    let tcp_receive_window = options.ssh_tuning.tcp_receive_window_bytes;
     runtime.block_on(async {
         tokio::time::timeout(timeout, async {
             let route = connect_route(&server, options).await?;
@@ -919,6 +923,7 @@ pub fn diagnose_server_with_options(
                     None,
                     false,
                     tcp_interactive_bytes,
+                    tcp_receive_window,
                 )
                 .await
                 .map(|(transport, discovery)| {

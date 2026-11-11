@@ -206,6 +206,9 @@ fn start(raw: String) -> Result<(), String> {
                     .ssh_tuning
                     .channel_receive_window_bytes
                     .min(2 * 1024 * 1024),
+                // A stalled consumer may hold one window per flow inside the
+                // extension's ~50 MB memory limit.
+                tcp_receive_window_bytes: cfg.ssh_tuning.tcp_receive_window_bytes.min(256 * 1024),
                 ..cfg.ssh_tuning
             },
             probe_ipv6: false,

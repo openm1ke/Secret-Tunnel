@@ -22,6 +22,9 @@ pub struct SshTuning {
     pub channel_buffer_messages: usize,
     pub channel_receive_window_bytes: u32,
     pub tcp_interactive_bytes: Option<usize>,
+    /// TCP receive window of each flow announced to an elastic agent; bounds
+    /// the download rate of a single connection to `window / RTT`.
+    pub tcp_receive_window_bytes: usize,
 }
 
 impl Default for SshTuning {
@@ -33,6 +36,8 @@ impl Default for SshTuning {
             // reached 42.6 Mbit/s with 2 MiB and 83 Mbit/s with 4 MiB.
             channel_receive_window_bytes: 4 * 1024 * 1024,
             tcp_interactive_bytes: Some(96 * 1024),
+            // One download at 200 ms RTT: 10 Mbit/s with 256 KiB, 42 with 1 MiB.
+            tcp_receive_window_bytes: 1024 * 1024,
         }
     }
 }
@@ -44,6 +49,7 @@ impl SshTuning {
             || self.tcp_interactive_bytes.is_some_and(|bytes| {
                 !(64 * 1024..=8 * 1024 * 1024).contains(&bytes) || bytes % 1024 != 0
             })
+            || !(64 * 1024..=1024 * 1024).contains(&self.tcp_receive_window_bytes)
         {
             return Err("Некорректные пределы очереди или окна SSH".into());
         }
@@ -337,12 +343,19 @@ mod tests {
         assert!(serde_json::from_str::<SshTuning>(r#"{"cipher":"none"}"#).is_err());
         let tuning: SshTuning = serde_json::from_str(r#"{"channel_buffer_messages":0}"#).unwrap();
         assert!(tuning.validate().is_err());
+        // Saved settings without the field get the default 1 MiB window.
+        let tuning: SshTuning = serde_json::from_str(r#"{"channel_buffer_messages":8}"#).unwrap();
+        assert_eq!(tuning.tcp_receive_window_bytes, 1024 * 1024);
+        tuning.validate().unwrap();
+        let tuning: SshTuning = serde_json::from_str(r#"{"tcp_receive_window_bytes":2097152}"#).unwrap();
+        assert!(tuning.validate().is_err());
         let mut config = russh::client::Config::default();
         let tuning = SshTuning {
             cipher: CipherPolicy::Aes128Gcm,
             channel_buffer_messages: 8,
             channel_receive_window_bytes: 1024 * 1024,
             tcp_interactive_bytes: None,
+            ..Default::default()
         };
         tuning.validate().unwrap();
         tuning.configure(&mut config);

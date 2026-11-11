@@ -359,6 +359,7 @@ async fn forced_cipher_and_small_queue_apply_to_every_ssh_hop() {
             channel_buffer_messages: 8,
             channel_receive_window_bytes: 1024 * 1024,
             tcp_interactive_bytes: None,
+            ..Default::default()
         };
         exit.options.jumps.push(EmbeddedJump {
             server: relay.server.clone(),
@@ -654,6 +655,7 @@ async fn negotiated_qos_budgets_keep_tcp_streaming_with_short_udp_active() {
                 None,
                 false,
                 Some(budget),
+                secret_tunnel_mux::TCP_RECEIVE_WINDOW,
             )
             .await
             .unwrap();

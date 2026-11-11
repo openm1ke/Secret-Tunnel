@@ -36,7 +36,12 @@ pub use wire::{Kind, MAX_PAYLOAD, TCP_CHUNK};
 pub type Result<T> = std::result::Result<T, String>;
 pub const TCP_DESTINATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub const FLOW_OPEN_TIMEOUT: Duration = Duration::from_secs(12);
-const MAX_RECEIVE_BUDGET: usize = 256 * 1024 * 1024;
+/// Receive bytes one session may promise its peer across all flows.
+///
+/// Accounting, not allocation: buffers grow only while a local consumer leaves
+/// data unread, at most one window per flow. Sized so 1024 flows can each hold
+/// a full `TCP_RECEIVE_WINDOW`.
+const MAX_RECEIVE_BUDGET: usize = 1024 * 1024 * 1024;
 const BASE_FLOW_SLOT_LIMIT: usize = 128;
 pub const UDP_FLOW_SLOT_LIMIT: usize = 192;
 /// TCP receive window every STMUX003 endpoint accepts and starts sending within.
@@ -67,9 +72,13 @@ pub const UDP_WINDOW: FlowWindow = FlowWindow {
 /// A sender may have at most one window unacknowledged, and credit returns only
 /// after the receiver's consumer took the bytes, so one TCP flow carries at most
 /// `window / RTT`: 64 KiB gives 10 Mbit/s at 50 ms and 2.6 Mbit/s at 200 ms on
-/// any link. Each side announces its own window in the handshake, so a peer with
-/// the 64 KiB default of [`Config`] interoperates and keeps its own direction.
-pub const TCP_RECEIVE_WINDOW: usize = 256 * 1024;
+/// any link, 256 KiB 42 and 10 Mbit/s, 1 MiB 168 and 42 Mbit/s. Each side
+/// announces its own window in the handshake, so a peer with the 64 KiB default
+/// of [`Config`] interoperates and keeps its own direction. Senders grow into it
+/// per flow (`elastic`), and the session budget (`tcp_flight`) keeps the sum of
+/// all flows from building a queue, so a larger window costs latency only when
+/// a single connection really is the bottleneck's only user.
+pub const TCP_RECEIVE_WINDOW: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlowKind {
     Tcp,

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.14 — 2026-11-11
+
+- One TCP connection may have up to 1 MiB unacknowledged instead of 256 KiB, in both directions. A single connection carries at most `window / RTT`, so one download or upload was capped at 40 Mbit/s on a 50 ms path and 10 Mbit/s on a 200 ms path. Bench: 40 → 154 Mbit/s at 50 ms and 10 → 41 Mbit/s at 200 ms without a rate limit; 39 → 74 Mbit/s on an 80 Mbit/s link with a 50 ms path and the phone's 1 MiB SSH window. Sixteen connections and calls are unchanged. Each flow still grows into the window gradually, and the session budget keeps the queue short.
+- The session receive cap is 1 GiB of promised buffer instead of 256 MiB, so 1024 connections still fit; memory is used only while a local app leaves data unread.
+- iOS keeps 256 KiB per connection because of the Network Extension memory limit. The window is `tcp_receive_window_bytes` in the SSH tuning (64 KiB–1 MiB).
+- Needs the agent from this release for uploads; downloads use the client's window with any elastic agent.
+
 ## 0.3.13 — 2026-11-11
 
 - The TCP budget without a call keeps up to max(base/8, 20 ms) of queue and cuts above max(base/4, 40 ms), instead of 10 and 30 ms. With 10 ms a phone's uploads fell to 46–52 Mbit/s in two of three Speedtest runs. On the bench throughput is unchanged and the loaded ping is 97 ms in the phone-like case (82 ms in 0.3.12, 107 ms in 0.3.10). On the phone the uplink is now limited by per-flow windows instead of the budget; download 61–77 Mbit/s, loaded ping 55–101 ms (0.3.10: 77–188).

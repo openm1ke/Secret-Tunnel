@@ -1189,7 +1189,7 @@ impl Sender {
                 && self.state.kind == FlowKind::Tcp
                 && inner.config.tcp_interactive_bytes.is_some()
             {
-                Some(inner.tcp_flight.reserve(data.len()).await?)
+                Some(inner.tcp_flight.reserve(self.state.id, data.len()).await?)
             } else {
                 None
             };

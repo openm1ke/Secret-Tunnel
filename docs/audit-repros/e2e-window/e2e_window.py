@@ -251,6 +251,69 @@ class Voice:
         self.control.close()
 
 
+class TcpPing:
+    """16-byte request every 100 ms on its own SOCKS TCP flow to a loopback
+    echo, like a speed test's loaded latency or an app's API call during a
+    download; records round trips in ms."""
+
+    def __init__(self, socks_port):
+        server = socket.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(4)
+        threading.Thread(target=self._echo, args=(server,), daemon=True).start()
+        self.client = socks_connect(socks_port, server.getsockname()[1])
+        self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.rtts, self.recording = [], False
+        self.stop = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _echo(self, server):
+        client, _ = server.accept()
+        client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        with client:
+            try:
+                while True:
+                    data = client.recv(64)
+                    if not data:
+                        return
+                    client.sendall(data)
+            except OSError:
+                pass
+
+    def _run(self):
+        while not self.stop.is_set():
+            started = time.monotonic()
+            try:
+                self.client.sendall(bytes(16))
+                got = 0
+                while got < 16:
+                    data = self.client.recv(16 - got)
+                    if not data:
+                        return
+                    got += len(data)
+            except OSError:
+                return
+            if self.recording:
+                self.rtts.append((time.monotonic() - started) * 1000)
+            time.sleep(max(0.0, 0.1 - (time.monotonic() - started)))
+
+    def window(self):
+        self.rtts, self.recording = [], True
+
+    def result(self):
+        self.recording = False
+        values = sorted(self.rtts)
+        if not values:
+            return {"received": 0}
+        return {"received": len(values), "p50_ms": round(values[len(values) // 2], 1),
+                "p95_ms": round(values[max(0, int(len(values) * 0.95) - 1)], 1),
+                "max_ms": round(values[-1], 1)}
+
+    def close(self):
+        self.stop.set()
+        self.client.close()
+
+
 def cpu_seconds(pids):
     total = 0.0
     for pid in pids:
@@ -261,7 +324,7 @@ def cpu_seconds(pids):
     return total
 
 
-def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None):
+def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None, ping=None):
     counted = [0]
     lock = threading.Lock()
     stop = threading.Event()
@@ -301,6 +364,8 @@ def measure(socks_port, endpoints, flows, direction, warmup, seconds, voice=None
     time.sleep(warmup)
     if voice:
         voice.window()
+    if ping:
+        ping.window()
     before, started = total(), time.monotonic()
     time.sleep(seconds)
     elapsed = time.monotonic() - started
@@ -330,6 +395,8 @@ def main():
                         help="client SSH channel receive window; 0 keeps the default (2048)")
     parser.add_argument("--voice", action="store_true",
                         help="run a 160-byte, 50/s UDP echo stream from 3 s before the load and report its round trips")
+    parser.add_argument("--tcp-ping", action="store_true",
+                        help="report round trips of 16-byte requests every 100 ms on a separate TCP flow")
     parser.add_argument("--dns-lookups", type=int, default=0,
                         help="during each measurement resolve this many names at once every 2 s (real queries to 1.1.1.1)")
     parser.add_argument("--flows", default="1,4")
@@ -368,7 +435,13 @@ def main():
             ready = probe.stdout.readline()
             assert ready.startswith("READY"), ready
             # The probe prints one SAMPLE line per second; keep its pipe drained.
-            threading.Thread(target=lambda: [None for _ in probe.stdout], daemon=True).start()
+            samples = []
+
+            def drain():
+                for line in probe.stdout:
+                    if line.startswith("SAMPLE "):
+                        samples.append(json.loads(line[7:]))
+            threading.Thread(target=drain, daemon=True).start()
             for direction in args.directions.split(","):
                 for flows in [int(value) for value in args.flows.split(",")]:
                     agents = subprocess.run(["pgrep", "-f", "secret-tunnel-agent --stdio-v3"],
@@ -391,8 +464,11 @@ def main():
                     voice = Voice(args.socks_port) if args.voice else None
                     if voice:
                         time.sleep(3)
+                    ping = TcpPing(args.socks_port) if args.tcp_ping else None
+                    first = len(samples)
                     amount, elapsed = measure(args.socks_port, endpoints, flows, direction,
-                                              args.warmup, args.seconds, voice)
+                                              args.warmup, args.seconds, voice, ping)
+                    window = [sample for sample in samples[first:] if sample.get("server")]
                     stop_dns.set()
                     cpu = {name: round(cpu_seconds(group) - cpu_before[name], 2) for name, group in pids.items()}
                     row = {
@@ -405,6 +481,20 @@ def main():
                         time.sleep(0.5)
                         row["voice"] = voice.result()
                         voice.close()
+                    if ping:
+                        row["tcp_ping"] = ping.result()
+                        ping.close()
+                    # Frames of the downloading side waiting in its multiplexer.
+                    side = "server" if direction == "download" else "client"
+                    queue = [sample[side]["bulk_data_queue"] for sample in window if sample.get(side)]
+                    if len(queue) >= 2:
+                        frames = queue[-1]["samples"] - queue[0]["samples"]
+                        late = queue[-1]["over_100_ms"] - queue[0]["over_100_ms"]
+                        row["mux_queue_over_100ms"] = f"{late}/{frames}"
+                        row["mux_budget_kib"] = sorted({sample[side]["tcp_flight"]["effective_bytes"] // 1024
+                                                        for sample in window if sample.get(side)})
+                        row["mux_path_delay_ms"] = sorted({sample[side]["tcp_flight"].get("path_delay_ms")
+                                                           for sample in window if sample.get(side)} - {None})
                     if args.dns_lookups:
                         row["dns_lookups_per_burst"] = args.dns_lookups
                         row["dns_answered"] = f"{sum(answered)}/{len(answered)}"

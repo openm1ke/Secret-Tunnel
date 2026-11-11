@@ -68,7 +68,9 @@ internal object TransportDiagnostics {
         metrics.optJSONObject("tcp_flight")?.let { flight ->
             if(!flight.isNull("configured_bytes")){
                 append("Приоритет UDP: ${if(flight.optBoolean("interactive"))"активен" else "ожидание"}\n")
-                append("TCP: учтено ${flight.optLong("held_bytes")} Б · бюджет ${flight.optLong("effective_bytes")} Б · при UDP ${flight.optLong("configured_bytes")} Б\n")
+                append("TCP: учтено ${flight.optLong("held_bytes")} Б · бюджет ${flight.optLong("effective_bytes")} Б · при UDP ${flight.optLong("configured_bytes")} Б")
+                if (flight.has("path_delay_ms") && !flight.isNull("path_delay_ms")) append(" · путь ${flight.optLong("path_delay_ms")} мс")
+                append("\n")
             }else append("Приоритет UDP: без дополнительного бюджета TCP\n")
         }
         metrics.optJSONObject("last_udp_credit_stall")?.let {

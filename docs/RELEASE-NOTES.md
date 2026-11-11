@@ -1,9 +1,8 @@
-Secret Tunnel v0.3.10 keeps downloads fast during calls and on long routes.
+Secret Tunnel v0.3.11 keeps the tunnel responsive while something downloads.
 
-- **No more 14 Mbit/s cap with the Balanced profile.** While UDP priority is active, the TCP budget now follows queueing delay instead of a fixed 96 KiB per round trip. On the test bench, four downloads with a call running reached 157 instead of 15 Mbit/s on a free 50 ms path; voice latency on the shaped 5 and 2 Mbit/s routes stayed within 8%.
-- **Faster downloads on long routes.** The SSH channel window is now 4 MiB on desktop and Android. Sixteen downloads at 200 ms RTT went from 42.6 to 83 Mbit/s.
-- **DNS no longer stalls UDP.** The server agent resolves names in UDP destinations without holding back datagrams to known addresses, merges and caches lookups, and never sends a waiting datagram after the flow was closed.
+- **Low latency under load.** The tunnel no longer parks up to a second of download data in front of everything else. On the test bench, with sixteen downloads on an 80 Mbit/s link and 50 ms path, a request on another connection took 59 ms instead of 107–174 ms; on a 200 ms route 212 instead of 369 ms; on a 10 Mbit/s link with a call 91 instead of 164 ms. Call latency is unchanged. Throughput on a saturated link is 3–5% lower, and unchanged when the link is not the limit.
+- **Small requests skip the queue.** Pings, API calls and the first bytes of a new connection no longer wait behind bulk downloads, during a call too.
 
-Install the **server agent from this release** (0.3.7) on the final SSH server. [Audit and measurements](https://github.com/openm1ke/Secret-Tunnel/blob/v0.3.10/docs/CLAUDE-INDEPENDENT-AUDIT.md).
+Install the **server agent from this release** (0.3.8) on the final SSH server: the download direction is controlled by the agent. Profiles set to maximum throughput keep the previous behaviour. [Audit and measurements](https://github.com/openm1ke/Secret-Tunnel/blob/v0.3.11/docs/CLAUDE-INDEPENDENT-AUDIT.md).
 
 Packages include a signed Android APK, Windows setup and portable ZIP, macOS universal DMG and ZIP, and the Linux x86_64 agent archive. macOS per-app routing uses the separately installed ProxyBridge component.

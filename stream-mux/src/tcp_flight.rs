@@ -1,7 +1,23 @@
-//! Session-wide TCP credit budget while a voice-like UDP flow is active.
+//! Session-wide TCP credit budget: bytes sent and not yet received by the peer.
 //! Permits return on peer wire receipt, not on acceptance by an SSH writer.
 //! Per-flow application-consumption credit remains a separate constraint.
 //!
+//! Without a call the budget keeps the path free of a standing queue. A fixed
+//! 8 MiB let sixteen downloads park 0.9 s of data in the agent and the SSH path
+//! on an 80 Mbit/s link, and a request on any other connection waited behind it
+//! (speed test loaded ping 109-188 ms on a 52 ms path). It starts at 1 MiB and
+//! doubles per round trip until `Delivered` comes back late, then drops to what
+//! the path carried without a queue, so the queue drains; it then grows by a
+//! quarter per round trip. The uncongested delay here is the lowest of the last
+//! 10-20 s, so a path that really became slower is not throttled for the rest
+//! of the session; the regular drains keep that estimate honest.
+//!
+//! A budget that is kept full makes its waiters queue, and permits are granted
+//! in order: a ping reply on an idle connection waited behind sixteen downloads
+//! and the loaded ping got worse as the budget got tighter. A flow with almost
+//! nothing in flight therefore draws on a small shared reserve first.
+//!
+//! During a call, while a voice-like UDP flow is active, the budget is tighter.
 //! "Voice-like" is a run of short datagrams on one flow. Counting them per
 //! session let six DNS lookups (twelve short datagrams on a dozen flows) cap all
 //! TCP for the whole hold time on every page load.
@@ -29,6 +45,18 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const MAX: usize = 8 * 1024 * 1024;
+/// Budget without a call: where it starts, and the least it shrinks to.
+const BULK_START: usize = 1024 * 1024;
+const BULK_FLOOR: usize = 256 * 1024;
+/// Queueing delay that ends growth without a call; an eighth of the path
+/// delay on long paths, so their jitter does not count as a queue.
+const BULK_QUEUE: Duration = Duration::from_millis(10);
+/// A flow with at most this much in flight, the new bytes included, is light.
+const LIGHT_FLOW: usize = 2 * crate::TCP_CHUNK;
+/// Reserve shared by light flows, beside the budget.
+const LIGHT_RESERVE: usize = 512 * 1024;
+/// Age of the uncongested-delay estimate without a call.
+const BASE_WINDOW: Duration = Duration::from_secs(10);
 const DETECTION: Duration = Duration::from_millis(500);
 const HOLD: Duration = Duration::from_secs(15);
 /// Short datagrams one flow needs within `DETECTION` to activate the budget.
@@ -133,11 +161,44 @@ pub struct TcpFlightSnapshot {
     pub effective_bytes: usize,
     pub held_bytes: usize,
     pub flows_with_credit: usize,
+    /// Uncongested `Delivered` round trip the budget follows without a call.
+    pub path_delay_ms: Option<u64>,
+}
+/// Lowest round trip of the last one to two `BASE_WINDOW`s.
+#[derive(Default)]
+struct Recent {
+    since: Option<Instant>,
+    current: Option<Duration>,
+    previous: Option<Duration>,
+}
+impl Recent {
+    fn observe(&mut self, sample: Duration, now: Instant) -> Duration {
+        let since = *self.since.get_or_insert(now);
+        let age = now.saturating_duration_since(since);
+        if age >= BASE_WINDOW {
+            self.previous = if age >= BASE_WINDOW * 2 { None } else { self.current };
+            self.current = None;
+            self.since = Some(now);
+        }
+        let current = self.current.map_or(sample, |known| known.min(sample));
+        self.current = Some(current);
+        self.previous.map_or(current, |previous| previous.min(current))
+    }
 }
 struct Packet {
     payload: usize,
-    permit: OwnedSemaphorePermit,
+    permit: Permit,
     sent_at: Instant,
+}
+/// Charge for one packet, from the budget or from the light reserve.
+struct Permit {
+    permit: OwnedSemaphorePermit,
+    light: bool,
+}
+impl Permit {
+    fn bytes(&self) -> usize {
+        self.permit.num_permits()
+    }
 }
 struct State {
     limit: usize,
@@ -148,32 +209,45 @@ struct State {
     /// why it never ages.
     base: Option<Duration>,
     reduced_at: Option<Instant>,
+    /// Uncongested delay for the budget without a call.
+    recent: Recent,
+    /// Doubling until the first queue, and again after a call.
+    slow_start: bool,
 }
 pub(super) struct TcpFlight {
     available: Arc<Semaphore>,
+    light: Arc<Semaphore>,
     state: Mutex<State>,
     normal: usize,
     target: Option<usize>,
 }
 pub(super) struct Reservation {
     budget: Arc<TcpFlight>,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<Permit>,
     payload: usize,
 }
 impl TcpFlight {
     pub(super) fn new(normal: usize, target: Option<usize>) -> Arc<Self> {
+        Self::with_reserve(normal, target, LIGHT_RESERVE)
+    }
+    fn with_reserve(normal: usize, target: Option<usize>, light: usize) -> Arc<Self> {
         let normal = normal.min(MAX);
+        // Without a negotiated budget TCP is not charged here at all.
+        let limit = if target.is_some() { BULK_START.min(normal) } else { normal };
         Arc::new(Self {
-            available: Arc::new(Semaphore::new(normal)),
+            available: Arc::new(Semaphore::new(limit)),
+            light: Arc::new(Semaphore::new(light)),
             normal,
             target,
             state: Mutex::new(State {
-                limit: normal,
+                limit,
                 debt: 0,
                 held: HashMap::new(),
                 active_until: None,
                 base: None,
                 reduced_at: None,
+                recent: Recent::default(),
+                slow_start: true,
             }),
         })
     }
@@ -208,21 +282,27 @@ impl TcpFlight {
             self.resize(&mut state, self.floor());
         }
     }
-    /// Adapt the active budget to one `Delivered` round trip of `bytes`.
+    /// Adapt the budget to one `Delivered` round trip of `bytes`.
     fn follow_delay(&self, state: &mut State, sample: Duration, bytes: usize, now: Instant) {
         let base = state.base.map_or(sample, |known| known.min(sample));
         state.base = Some(base);
+        let recent = state.recent.observe(sample, now);
+        if self.target.is_none() {
+            return;
+        }
         if state.active_until.is_none() {
+            self.follow_bulk(state, recent, sample, bytes, now);
             return;
         }
         match delay(base, sample) {
-            // Additive: `bytes` of a full limit add one TCP chunk.
-            Delay::Clear => {
+            // Additive: `bytes` of a full limit add one TCP chunk. Light
+            // packets were not charged, so they report delay but earn nothing.
+            Delay::Clear if bytes > 0 => {
                 let growth = (bytes * crate::TCP_CHUNK / state.limit.max(1)).max(1024);
                 let limit = (state.limit + growth).min(self.normal);
                 self.resize(state, limit);
             }
-            Delay::Hold => {}
+            Delay::Clear | Delay::Hold => {}
             // Packets sent before a reduction still report the old queue.
             Delay::Queued => {
                 if state.reduced_at.is_none_or(|at| now.duration_since(at) >= sample) {
@@ -233,30 +313,74 @@ impl TcpFlight {
             }
         }
     }
+    /// Without a call: grow while `Delivered` shows no queue, drain one.
+    fn follow_bulk(&self, state: &mut State, base: Duration, sample: Duration, bytes: usize, now: Instant) {
+        // Bytes in flight when this packet was acknowledged, itself included.
+        let flight = (state.limit.saturating_sub(self.available.available_permits()) + bytes).min(state.limit);
+        if sample < base + (base / 8).max(BULK_QUEUE) {
+            // Only a budget that limits the sender earns more; an idle one
+            // would otherwise reach 8 MiB and release it in one burst.
+            if bytes > 0 && flight >= state.limit / 2 {
+                let growth = if state.slow_start { bytes } else { bytes / 4 };
+                let limit = (state.limit + growth.max(1024)).min(self.normal);
+                self.resize(state, limit);
+            }
+        } else if state.reduced_at.is_none_or(|at| now.duration_since(at) >= sample) {
+            // What the path carried in one uncongested round trip.
+            let drained = (flight as u128 * base.as_nanos() / sample.as_nanos().max(1)) as usize;
+            let limit = drained.clamp(BULK_FLOOR.min(self.normal), self.normal);
+            self.resize(state, limit.min(state.limit));
+            state.reduced_at = Some(now);
+            state.slow_start = false;
+        }
+    }
     pub(super) fn tick(&self, now: Instant) {
         let mut state = self.state.lock().unwrap();
         if state.active_until.is_some_and(|until| now >= until) {
+            // Keep the call's budget and earn the rest back by delay: the queue
+            // a jump to the full budget built is what the call was spared from.
             state.active_until = None;
-            self.resize(&mut state, self.normal);
+            state.slow_start = true;
+            state.reduced_at = None;
         }
     }
-    pub(super) async fn reserve(self: &Arc<Self>, payload: usize) -> Result<Reservation> {
+    /// Charge `payload` bytes of flow `id`.
+    pub(super) async fn reserve(self: &Arc<Self>, id: u32, payload: usize) -> Result<Reservation> {
         // Bound metadata too: a one-byte TCP frame still occupies one KiB of
         // the session budget until acknowledged or cancelled.
         let charge = payload.div_ceil(1024) * 1024;
+        let light = {
+            let state = self.state.lock().unwrap();
+            let in_flight: usize = state.held.get(&id).map_or(0, |packets| packets.iter().map(|p| p.permit.bytes()).sum());
+            in_flight + charge <= LIGHT_FLOW
+        };
+        if light {
+            if let Ok(permit) = self.light.clone().try_acquire_many_owned(charge as u32) {
+                return Ok(Reservation {
+                    budget: self.clone(),
+                    permit: Some(Permit { permit, light: true }),
+                    payload,
+                });
+            }
+        }
         let permit = self
             .available
             .clone()
             .acquire_many_owned(charge as u32)
             .await
             .map_err(|_| "TCP flight budget closed")?;
+        let permit = Permit { permit, light: false };
         Ok(Reservation {
             budget: self.clone(),
             permit: Some(permit),
             payload,
         })
     }
-    fn give_back(&self, state: &mut State, mut permit: OwnedSemaphorePermit) {
+    fn give_back(&self, state: &mut State, permit: Permit) {
+        let Permit { mut permit, light } = permit;
+        if light {
+            return;
+        }
         let remove = state.debt.min(permit.num_permits());
         if remove > 0 {
             permit.split(remove).unwrap().forget();
@@ -284,10 +408,11 @@ impl TcpFlight {
         if packets.is_empty() {
             state.held.remove(&id);
         }
-        let charged = returned.iter().map(|permit| permit.num_permits()).sum();
+        let charged = returned.iter().filter(|permit| !permit.light).map(Permit::bytes).sum();
         for permit in returned {
             self.give_back(&mut state, permit);
         }
+        // Light packets still report the path delay; they charge nothing.
         if let Some(sent_at) = sent_at {
             let now = Instant::now();
             self.follow_delay(&mut state, now.duration_since(sent_at), charged, now);
@@ -316,6 +441,7 @@ impl TcpFlight {
     }
     pub(super) fn close(&self) {
         self.available.close();
+        self.light.close();
     }
     pub(super) fn snapshot(&self) -> TcpFlightSnapshot {
         let state = self.state.lock().unwrap();
@@ -327,9 +453,12 @@ impl TcpFlight {
                 .held
                 .values()
                 .flatten()
-                .map(|p| p.permit.num_permits())
+                .map(|p| p.permit.bytes())
                 .sum(),
             flows_with_credit: state.held.len(),
+            path_delay_ms: state.recent.current.map(|current| {
+                state.recent.previous.map_or(current, |previous| previous.min(current)).as_millis() as u64
+            }),
         }
     }
 }
@@ -400,7 +529,8 @@ mod tests {
         assert_eq!(budget.snapshot().effective_bytes, 65536);
         budget.tick(now + HOLD);
         assert!(!budget.snapshot().interactive);
-        assert_eq!(budget.snapshot().effective_bytes, MAX);
+        // The call's budget stays; delivery delay earns the rest back.
+        assert_eq!(budget.snapshot().effective_bytes, 65536);
     }
     #[test]
     fn a_run_is_counted_per_flow_and_needs_twelve_within_the_window() {
@@ -470,7 +600,7 @@ mod tests {
     /// Send and acknowledge one packet of `size` on flow `id`, `rtt` later.
     async fn round(budget: &Arc<TcpFlight>, id: u32, size: usize, start: Instant, rtt: Duration) {
         let closed = AtomicBool::new(false);
-        budget.reserve(size).await.unwrap().commit(id, &closed, || Ok(())).unwrap();
+        budget.reserve(id, size).await.unwrap().commit(id, &closed, || Ok(())).unwrap();
         // Model the round trip by back-dating the send time.
         budget.state.lock().unwrap().held.get_mut(&id).unwrap().back_mut().unwrap().sent_at = start;
         let mut state = budget.state.lock().unwrap();
@@ -478,7 +608,7 @@ mod tests {
         if state.held[&id].is_empty() {
             state.held.remove(&id);
         }
-        let charged = packet.permit.num_permits();
+        let charged = packet.permit.bytes();
         budget.give_back(&mut state, packet.permit);
         budget.follow_delay(&mut state, rtt, charged, start + rtt);
     }
@@ -488,9 +618,9 @@ mod tests {
         let budget = TcpFlight::new(MAX, Some(floor));
         let ms = Duration::from_millis;
         let now = Instant::now();
-        // Inactive: samples set the path base and leave the budget alone.
+        // Without a call an idle sender earns nothing, whatever the delay.
         round(&budget, 1, 16384, now, ms(50)).await;
-        assert_eq!(budget.snapshot().effective_bytes, MAX);
+        assert_eq!(budget.snapshot().effective_bytes, BULK_START);
         // Activation starts at the configured size, as the fixed budget did.
         budget.activate(now);
         assert_eq!(budget.snapshot().effective_bytes, floor);
@@ -512,10 +642,113 @@ mod tests {
             round(&budget, 1, 16384, now + ms(500 + 200 * index), ms(150)).await;
         }
         assert_eq!(budget.snapshot().effective_bytes, floor);
-        // Expiry returns the session budget, as before.
+        // Expiry keeps the floor and slow-starts from it.
         budget.tick(now + ms(100) + HOLD);
-        assert_eq!(budget.snapshot().effective_bytes, MAX);
+        assert_eq!(budget.snapshot().effective_bytes, floor);
         assert!(!budget.snapshot().interactive);
+        for index in 0..6 {
+            bulk_round(&budget, ms(50), now + HOLD + ms(200 + index)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, 2 * floor);
+    }
+    /// One 16 KiB `Delivered` while the sender keeps the whole budget in flight.
+    async fn bulk_round(budget: &Arc<TcpFlight>, rtt: Duration, now: Instant) {
+        let spare = budget.available.available_permits();
+        let taken = (spare > 0).then(|| budget.available.clone().try_acquire_many_owned(spare as u32).unwrap());
+        let mut state = budget.state.lock().unwrap();
+        budget.follow_delay(&mut state, rtt, 16384, now);
+        if let Some(permit) = taken {
+            budget.give_back(&mut state, Permit { permit, light: false });
+        }
+    }
+    #[tokio::test]
+    async fn without_a_call_the_budget_doubles_until_a_queue_and_then_drains_it() {
+        let budget = TcpFlight::new(MAX, Some(96 * 1024));
+        let ms = Duration::from_millis;
+        let now = Instant::now();
+        assert_eq!(budget.snapshot().effective_bytes, BULK_START);
+        // Slow start: one round trip of a full budget doubles it.
+        for index in 0..64 {
+            bulk_round(&budget, ms(50), now + ms(index)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, 2 * BULK_START);
+        // A queue: down to what the path carried without it, once per round trip.
+        bulk_round(&budget, ms(100), now + ms(100)).await;
+        assert_eq!(budget.snapshot().effective_bytes, BULK_START);
+        bulk_round(&budget, ms(100), now + ms(150)).await;
+        assert_eq!(budget.snapshot().effective_bytes, BULK_START);
+        // Then a quarter per round trip.
+        for index in 0..64 {
+            bulk_round(&budget, ms(50), now + ms(300 + index)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, BULK_START + BULK_START / 4);
+        // A delay that is part of the path, not queue, is under the threshold.
+        bulk_round(&budget, ms(59), now + ms(400)).await;
+        assert!(budget.snapshot().effective_bytes > BULK_START + BULK_START / 4);
+        // Never below the floor, never above the session budget.
+        for index in 0..10 {
+            bulk_round(&budget, ms(1000), now + ms(1000 + 1100 * index)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, BULK_FLOOR);
+        assert!(!budget.snapshot().interactive);
+        let budget = TcpFlight::new(BULK_START + 65536, Some(96 * 1024));
+        for index in 0..64 {
+            bulk_round(&budget, ms(50), now + ms(index)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, BULK_START + 65536);
+    }
+    #[test]
+    fn the_uncongested_delay_ages_so_a_slower_path_is_not_throttled_for_good() {
+        let mut recent = Recent::default();
+        let ms = Duration::from_millis;
+        let now = Instant::now();
+        assert_eq!(recent.observe(ms(50), now), ms(50));
+        assert_eq!(recent.observe(ms(120), now + ms(5_000)), ms(50));
+        // The previous window still remembers the faster path.
+        assert_eq!(recent.observe(ms(120), now + ms(12_000)), ms(50));
+        assert_eq!(recent.observe(ms(120), now + ms(22_000)), ms(120));
+        // After a long silence nothing old is kept.
+        assert_eq!(recent.observe(ms(300), now + ms(60_000)), ms(300));
+    }
+    #[tokio::test]
+    async fn a_light_flow_passes_a_full_budget() {
+        let budget = TcpFlight::new(MAX, Some(65536));
+        budget.activate(Instant::now());
+        let closed = AtomicBool::new(false);
+        // A download: its first 32 KiB are light, the rest fills the budget.
+        for _ in 0..6 {
+            budget.reserve(1, 16384).await.unwrap().commit(1, &closed, || Ok(())).unwrap();
+        }
+        assert_eq!(budget.available.available_permits(), 0);
+        let blocked = {
+            let budget = budget.clone();
+            tokio::spawn(async move { budget.reserve(1, 16384).await })
+        };
+        // A ping reply on another connection does not wait behind it.
+        let ping = tokio::time::timeout(Duration::from_millis(100), budget.reserve(2, 100))
+            .await
+            .expect("light flow waited")
+            .unwrap();
+        ping.commit(2, &closed, || Ok(())).unwrap();
+        // More than a light flow carries goes through the budget.
+        let large = {
+            let budget = budget.clone();
+            tokio::spawn(async move { budget.reserve(3, 3 * 16384).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!blocked.is_finished() && !large.is_finished());
+        // Acknowledging light packets returns the reserve, not the budget.
+        budget.acknowledge(2, 100, 1).unwrap();
+        budget.acknowledge(1, 16384, 1).unwrap();
+        assert_eq!(budget.light.available_permits(), LIGHT_RESERVE - 16384);
+        assert_eq!(budget.available.available_permits(), 0);
+        budget.acknowledge(1, 16384, 1).unwrap();
+        assert_eq!(budget.light.available_permits(), LIGHT_RESERVE);
+        // The download's first budget packet frees room for its next one.
+        budget.acknowledge(1, 16384, 1).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), blocked).await.unwrap().unwrap().unwrap();
+        budget.clear(1);
+        large.abort();
     }
     #[test]
     fn the_datagram_port_is_read_from_every_address_form() {
@@ -536,11 +769,11 @@ mod tests {
     }
     #[tokio::test]
     async fn shrink_waits_for_peer_credit_and_graceful_retirement_does_not_refund_early() {
-        let budget = TcpFlight::new(MAX, Some(65536));
+        let budget = TcpFlight::with_reserve(MAX, Some(65536), 0);
         let closed = AtomicBool::new(false);
         for id in 0..16 {
             budget
-                .reserve(16384)
+                .reserve(id, 16384)
                 .await
                 .unwrap()
                 .commit(id, &closed, || Ok(()))
@@ -562,7 +795,7 @@ mod tests {
         assert!(budget.acknowledge(0, 1, 1).is_err());
         let waiting = {
             let budget = budget.clone();
-            tokio::spawn(async move { budget.reserve(16384).await })
+            tokio::spawn(async move { budget.reserve(100, 16384).await })
         };
         for id in 0..12 {
             budget.acknowledge(id, 16384, 1).unwrap();
@@ -588,27 +821,28 @@ mod tests {
         let now = Instant::now();
         activate(&budget, now);
         let closed = AtomicBool::new(false);
-        let reservation = budget.reserve(1).await.unwrap();
+        let reservation = budget.reserve(1, 1).await.unwrap();
         assert!(reservation
             .commit(1, &closed, || Err("writer stopped".into()))
             .is_err());
         assert_eq!(budget.available.available_permits(), 65536);
-        let reservation = budget.reserve(16384).await.unwrap();
+        let reservation = budget.reserve(2, 16384).await.unwrap();
         budget.retire(2, &closed, true);
         assert!(reservation
             .commit(2, &closed, || panic!("must not enqueue retired data"))
             .is_err());
         budget.tick(now + Duration::from_secs(16));
-        assert_eq!(budget.available.available_permits(), MAX);
+        assert_eq!(budget.available.available_permits(), 65536);
+        assert_eq!(budget.light.available_permits(), LIGHT_RESERVE);
         assert!(!budget.snapshot().interactive);
     }
     #[tokio::test]
     async fn closing_budget_wakes_waiters_without_a_peer_ack() {
-        let budget = TcpFlight::new(65536, Some(65536));
-        let held = budget.reserve(65536).await.unwrap();
+        let budget = TcpFlight::with_reserve(65536, Some(65536), 0);
+        let held = budget.reserve(1, 65536).await.unwrap();
         let waiting = {
             let budget = budget.clone();
-            tokio::spawn(async move { budget.reserve(1).await })
+            tokio::spawn(async move { budget.reserve(2, 1).await })
         };
         budget.close();
         assert!(tokio::time::timeout(Duration::from_secs(1), waiting)

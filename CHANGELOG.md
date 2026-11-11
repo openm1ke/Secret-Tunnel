@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.11 — 2026-11-11
+
+- The session TCP budget follows delivery delay all the time, not only during a call. It starts at 1 MiB, doubles per round trip until `Delivered` returns late, then drops to what the path carried without a queue and grows by a quarter per round trip; never below 256 KiB. Before, 8 MiB could wait in the agent and the SSH path: 16 downloads on an 80 Mbit/s link with 50 ms RTT raised a ping on another connection to 107 ms (1 MiB SSH window) or 174 ms (4 MiB). Now 59 ms. Throughput on a bottleneck link is 3–5% lower; without a bottleneck it is unchanged.
+- A flow with at most 32 KiB in flight draws on a separate 512 KiB reserve, so a ping reply, an API call or the start of a connection no longer waits for permits behind bulk downloads, also during a call.
+- The uncongested path delay the budget compares against is the lowest of the last 10–20 s, so a path that became slower is not throttled for the rest of the session. Diagnostics show it as `tcp_flight.path_delay_ms`; Android shows it in the log.
+- Profiles without a TCP budget (maximum throughput) are unchanged.
+
 ## 0.3.10 — 2026-11-11
 
 - The server agent resolves names in UDP destinations outside the packet loop. A slow lookup no longer delays datagrams to known addresses in the same association, concurrent lookups of one name are merged and cached for 30 s, the waiting queue is bounded, and nothing waiting for a name is sent after the flow was closed.

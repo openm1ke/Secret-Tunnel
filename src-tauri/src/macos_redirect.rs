@@ -239,6 +239,8 @@ impl RedirectState {
             let logs = logs.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    #[cfg(feature = "embedded-ssh")]
+                    crate::embedded_ssh::app_usage::note_route(&line);
                     let lifecycle = line.starts_with("Extension:")
                         || line.starts_with("Network configuration:")
                         || line == "Redirecting traffic. Press Ctrl+C to stop."

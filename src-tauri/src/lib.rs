@@ -27,6 +27,7 @@ fn background_command(program: &str) -> Command {
 
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
+mod stats;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod app_redirect;
@@ -343,6 +344,7 @@ struct AppState {
     logs: Arc<Mutex<Vec<String>>>,
     traffic: Mutex<Vec<TrafficPoint>>,
     ip_cache: Mutex<Option<(u64, String, IpInfo)>>,
+    sessions: Mutex<stats::SessionStore>,
 }
 
 fn now_epoch() -> u64 {
@@ -785,6 +787,7 @@ fn update_traffic(state: &AppState, runtime: &mut TunnelRuntime) {
                 rx_total,
                 tx_total,
             });
+            record_session(state, runtime, rx_total, tx_total, now);
         }
         Ok(None) => {}
         Err(error) => {
@@ -794,6 +797,47 @@ fn update_traffic(state: &AppState, runtime: &mut TunnelRuntime) {
             }
         }
     }
+}
+
+/// Keep the running session's totals and per-application traffic in history.
+fn record_session(state: &AppState, runtime: &TunnelRuntime, rx: u64, tx: u64, now: u64) {
+    #[cfg(feature = "embedded-ssh")]
+    let apps = embedded_ssh::app_usage::snapshot()
+        .into_iter()
+        .map(|(name, rx, tx, flows)| stats::AppUsage { name, rx, tx, flows })
+        .collect();
+    #[cfg(not(feature = "embedded-ssh"))]
+    let apps = Vec::new();
+    let (route, country) = state
+        .cached_status
+        .lock()
+        .map(|status| (status.ssh_route.clone(), status.country_code.clone()))
+        .unwrap_or_default();
+    let id = format!("{}-{}", runtime.started_at, runtime.generation);
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.observe(
+            stats::Observation { id: &id, started_at: runtime.started_at, server: &runtime.server.name, route: &route, country: &country, rx, tx, apps },
+            now,
+        );
+    }
+}
+
+fn finish_session(state: &AppState) {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        sessions.finish(now_epoch());
+    }
+}
+
+#[tauri::command]
+fn session_history(state: State<'_, AppState>) -> Result<Vec<stats::SessionRecord>, String> {
+    Ok(state.sessions.lock().map_err(|e| e.to_string())?.list())
+}
+
+#[tauri::command]
+fn clear_session_history(state: State<'_, AppState>) -> Result<Vec<stats::SessionRecord>, String> {
+    let mut sessions = state.sessions.lock().map_err(|e| e.to_string())?;
+    sessions.clear(now_epoch());
+    Ok(sessions.list())
 }
 
 fn country_code_to_flag(cc: &str) -> String {
@@ -1361,6 +1405,7 @@ fn start_session_workers(app: tauri::AppHandle) {
             if let Some(runtime) = retired {
                 let generation = runtime.generation;
                 runtime.stop(&state.logs);
+                finish_session(&state);
                 if let Err(error) = stop_application_redirect(&state) {
                     log_line(&state.logs, error);
                 }
@@ -1483,6 +1528,8 @@ fn start_embedded_ssh_tunnel(
         ),
     );
 
+    // Per-application traffic counts from zero for each tunnel session.
+    embedded_ssh::app_usage::reset();
     let handle = embedded_ssh::start_with_options_cancellable(
         embedded_server(&server),
         embedded_ssh::EmbeddedProxy {
@@ -1914,6 +1961,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
+            if let Ok(dir) = app_config_dir("secret-tunnel") {
+                *app.state::<AppState>().sessions.lock().unwrap() = stats::SessionStore::load(dir.join("sessions.json"));
+            }
             let initial = load_config().unwrap_or_else(|_| default_config());
             report_config_recovery(&app.state::<AppState>());
             *app.state::<AppState>().cached_status.lock().unwrap() =
@@ -1940,19 +1990,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) {
-                let state = window.app_handle().state::<AppState>();
-                state.closing.store(true, Ordering::SeqCst);
-                state.control.cancel();
-                if let Ok(mut redirect) = state.redirect.lock() {
-                    let _ = redirect.stop();
-                }
-                let runtime = match state.runtime.lock() {
-                    Ok(mut runtime_guard) => runtime_guard.take(),
-                    Err(_) => None,
-                };
-                if let Some(runtime) = runtime {
-                    runtime.stop(&state.logs);
-                }
+                shutdown(&window.app_handle().state::<AppState>());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1963,6 +2001,8 @@ pub fn run() {
             scan_installed_applications,
             resolve_application_paths,
             application_icons,
+            session_history,
+            clear_session_history,
             start_redirect,
             stop_redirect,
             save_server,
@@ -1983,8 +2023,32 @@ pub fn run() {
             get_logs,
             clear_logs
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Secret Tunnel application");
+        .build(tauri::generate_context!())
+        .expect("error while building Secret Tunnel application")
+        .run(|app, event| {
+            // Quitting from the menu or with Cmd+Q closes no window first.
+            if matches!(event, tauri::RunEvent::Exit) {
+                shutdown(&app.state::<AppState>());
+            }
+        });
+}
+
+/// Stop interception and the tunnel and close the running session. Safe to
+/// call more than once.
+fn shutdown(state: &AppState) {
+    state.closing.store(true, Ordering::SeqCst);
+    state.control.cancel();
+    if let Ok(mut redirect) = state.redirect.lock() {
+        let _ = redirect.stop();
+    }
+    let runtime = match state.runtime.lock() {
+        Ok(mut runtime_guard) => runtime_guard.take(),
+        Err(_) => None,
+    };
+    if let Some(runtime) = runtime {
+        runtime.stop(&state.logs);
+    }
+    finish_session(state);
 }
 
 #[cfg(test)]

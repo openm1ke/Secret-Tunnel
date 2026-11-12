@@ -145,6 +145,198 @@ impl TrafficCounters {
     }
 }
 
+/// Which application each tunnelled connection belongs to, and how much it
+/// carried. The interception engine (ProxyBridge) prints a line per new
+/// connection, `TCP Telegram -> 149.154.167.51:443 via SOCKS5 ...`, and then
+/// connects to the local SOCKS port itself; the connection to the same
+/// destination right after such a line is that application's. Connections
+/// without a line come from programs that use the proxy directly.
+pub mod app_usage {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// Connections no interception line accounts for.
+    pub const UNATTRIBUTED: &str = "Без перехвата (SOCKS)";
+    const ROUTE_TTL: Duration = Duration::from_secs(10);
+    const MAX_ROUTES: usize = 4096;
+
+    #[derive(Default)]
+    pub struct Counter {
+        rx: AtomicU64,
+        tx: AtomicU64,
+        flows: AtomicU64,
+    }
+
+    struct Route {
+        at: Instant,
+        udp: bool,
+        destination: String,
+        app: String,
+    }
+
+    #[derive(Default)]
+    struct Registry {
+        routes: VecDeque<Route>,
+        apps: HashMap<String, Arc<Counter>>,
+    }
+
+    fn registry() -> &'static Mutex<Registry> {
+        static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
+        REGISTRY.get_or_init(Default::default)
+    }
+
+    fn normalize(destination: &str) -> String {
+        destination.trim().trim_start_matches('[').replacen("]:", ":", 1).to_ascii_lowercase()
+    }
+
+    /// Parse one engine line; lines for direct routes or of other kinds are ignored.
+    pub fn note_route(line: &str) {
+        let Some((left, right)) = line.split_once(" -> ") else { return };
+        if !right.contains("SOCKS") {
+            return;
+        }
+        let Some(destination) = right.split_whitespace().next().filter(|d| !d.contains("unknown")) else { return };
+        let words: Vec<&str> = left.split_whitespace().filter(|word| !(word.starts_with('[') && word.ends_with(']'))).collect();
+        let protocol = words.iter().position(|word| word.eq_ignore_ascii_case("TCP") || word.eq_ignore_ascii_case("UDP"));
+        let udp = protocol.is_some_and(|index| words[index].eq_ignore_ascii_case("UDP"));
+        let app = match protocol {
+            Some(index) => words[index + 1..].join(" "),
+            None => words.join(" "),
+        };
+        // Windows lines may append the process id: `Discord.exe (1234)`.
+        let app = app.trim().trim_end_matches(|c: char| c == ')' || c.is_ascii_digit()).trim_end_matches(" (").trim().to_owned();
+        if app.is_empty() {
+            return;
+        }
+        let mut registry = registry().lock().unwrap();
+        let now = Instant::now();
+        while registry.routes.front().is_some_and(|route| now.duration_since(route.at) > ROUTE_TTL) || registry.routes.len() >= MAX_ROUTES {
+            registry.routes.pop_front();
+        }
+        registry.routes.push_back(Route { at: now, udp, destination: normalize(destination), app });
+    }
+
+    /// The application of the oldest unmatched line for this destination.
+    fn claim(udp: bool, destination: &str) -> Option<String> {
+        let destination = normalize(destination);
+        let mut registry = registry().lock().unwrap();
+        let index = registry.routes.iter().position(|route| route.udp == udp && route.destination == destination)?;
+        registry.routes.remove(index).map(|route| route.app)
+    }
+
+    fn counter(app: &str) -> Arc<Counter> {
+        registry().lock().unwrap().apps.entry(app.to_owned()).or_default().clone()
+    }
+
+    /// Start counting a new tunnel session from zero.
+    pub fn reset() {
+        let mut registry = registry().lock().unwrap();
+        registry.apps.clear();
+        registry.routes.clear();
+    }
+
+    /// Bytes received and sent and connections per application this session.
+    pub fn snapshot() -> Vec<(String, u64, u64, u64)> {
+        registry().lock().unwrap().apps.iter()
+            .map(|(name, c)| (name.clone(), c.rx.load(Ordering::Relaxed), c.tx.load(Ordering::Relaxed), c.flows.load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    /// One connection's bytes. The engine may print its line a little after
+    /// it connects, so bytes wait here until the application is known.
+    pub struct FlowUsage {
+        app: OnceLock<Arc<Counter>>,
+        rx: AtomicU64,
+        tx: AtomicU64,
+    }
+
+    impl FlowUsage {
+        pub fn start(udp: bool, destination: &str) -> Arc<Self> {
+            let flow = Arc::new(Self { app: OnceLock::new(), rx: AtomicU64::new(0), tx: AtomicU64::new(0) });
+            if let Some(app) = claim(udp, destination) {
+                flow.bind(&app);
+            } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let pending = flow.clone();
+                let destination = destination.to_owned();
+                runtime.spawn(async move {
+                    for _ in 0..30 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        if let Some(app) = claim(udp, &destination) {
+                            pending.bind(&app);
+                            return;
+                        }
+                    }
+                    pending.bind(UNATTRIBUTED);
+                });
+            } else {
+                flow.bind(UNATTRIBUTED);
+            }
+            flow
+        }
+
+        fn bind(&self, app: &str) {
+            let counter = counter(app);
+            counter.flows.fetch_add(1, Ordering::Relaxed);
+            if self.app.set(counter.clone()).is_ok() {
+                counter.rx.fetch_add(self.rx.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+                counter.tx.fetch_add(self.tx.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+            }
+        }
+
+        pub fn add_rx(&self, bytes: u64) {
+            match self.app.get() {
+                Some(counter) => counter.rx.fetch_add(bytes, Ordering::Relaxed),
+                None => self.rx.fetch_add(bytes, Ordering::Relaxed),
+            };
+        }
+
+        pub fn add_tx(&self, bytes: u64) {
+            match self.app.get() {
+                Some(counter) => counter.tx.fetch_add(bytes, Ordering::Relaxed),
+                None => self.tx.fetch_add(bytes, Ordering::Relaxed),
+            };
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn connections_are_attributed_to_the_engine_lines() {
+            reset();
+            note_route("[11:13:48] TCP Telegram -> 149.154.167.51:443 via SOCKS5 127.0.0.1:1080");
+            note_route("[11:13:48] UDP Discord Helper -> [2606:4700::1]:50001 via SOCKS5");
+            note_route("[11:13:48] UDP DirectProbe -> unknown:unknown via Direct");
+            note_route("[CONN] TCP Discord.exe (4321) -> 1.2.3.4:443 via SOCKS5 proxy");
+            let telegram = FlowUsage::start(false, "149.154.167.51:443");
+            telegram.add_rx(1000);
+            telegram.add_tx(10);
+            FlowUsage::start(true, "[2606:4700::1]:50001").add_rx(300);
+            FlowUsage::start(false, "1.2.3.4:443").add_tx(7);
+            // No line: counted after the wait as a direct proxy client.
+            let browser = FlowUsage::start(false, "example.org:443");
+            browser.add_rx(50);
+            tokio::time::sleep(Duration::from_millis(1700)).await;
+            browser.add_rx(5);
+            // Other tests relay through SOCKS concurrently and add to the
+            // shared unattributed counter, so that one is checked as a floor.
+            let mut usage = snapshot();
+            usage.sort();
+            let unattributed = usage.iter().find(|entry| entry.0 == UNATTRIBUTED).unwrap().1;
+            assert!(unattributed >= 55, "unattributed rx {unattributed}");
+            usage.retain(|entry| entry.0 != UNATTRIBUTED);
+            assert_eq!(usage, vec![
+                ("Discord Helper".to_owned(), 300, 0, 1),
+                ("Discord.exe".to_owned(), 0, 7, 1),
+                ("Telegram".to_owned(), 1000, 10, 1),
+            ]);
+        }
+    }
+}
+
 struct SshClient {
     host: String,
     port: u16,
@@ -1363,16 +1555,24 @@ async fn handle_socks_client(
     if !fake_ip {
         write_socks5_reply(&mut stream, 0x00).await?;
     }
+    let usage = app_usage::FlowUsage::start(false, &format!("{}:{}", request.host, request.port));
     if !preface.is_empty() {
         for chunk in preface.chunks(secret_tunnel_mux::TCP_CHUNK) {
             flow.sender().send(chunk.to_vec()).await?;
         }
         counters.add_tx(preface.len() as u64);
+        usage.add_tx(preface.len() as u64);
     }
     let relay_started = std::time::Instant::now();
     let result = secret_tunnel_mux::relay(&mut flow, &mut stream, |direction, count| match direction {
-        secret_tunnel_mux::Direction::Upload => counters.add_tx(count as u64),
-        secret_tunnel_mux::Direction::Download => counters.add_rx(count as u64),
+        secret_tunnel_mux::Direction::Upload => {
+            counters.add_tx(count as u64);
+            usage.add_tx(count as u64);
+        }
+        secret_tunnel_mux::Direction::Download => {
+            counters.add_rx(count as u64);
+            usage.add_rx(count as u64);
+        }
     })
     .await;
     if let Err(error) = &result {
@@ -1530,6 +1730,8 @@ async fn relay_udp_association(
     } else {
         Some(std::net::SocketAddr::new(peer.ip(), requested_port))
     };
+    // The application this association belongs to, from its first datagram.
+    let mut usage: Option<Arc<app_usage::FlowUsage>> = None;
     // True while every datagram of this association went to port 53.
     let mut dns_only = true;
     let mut sent = false;
@@ -1545,14 +1747,26 @@ async fn relay_udp_association(
                 let (packet, source) = received.map_err(|e| e.to_string())?;
                 if source.ip() != peer.ip() || endpoint.is_some_and(|expected| expected != source) { continue; }
                 let (payload, port) = match udp_protocol::parse_packet(&packet) {
-                    Ok(packet) => (packet.payload.len(), packet.address.port()),
+                    Ok(parsed) => {
+                        if usage.is_none() {
+                            let destination = match parsed.address {
+                                udp_protocol::PacketAddress::Socket(address) => address.to_string(),
+                                udp_protocol::PacketAddress::Domain(host, port) => format!("{host}:{port}"),
+                            };
+                            usage = Some(app_usage::FlowUsage::start(true, &destination));
+                        }
+                        (parsed.payload.len(), parsed.address.port())
+                    }
                     Err(_) => continue,
                 };
                 endpoint = Some(source);
                 dns_only &= port == 53;
                 sent = true;
                 last_activity = tokio::time::Instant::now();
-                if sender.try_send_datagram(packet)? { counters.add_tx(payload as u64); }
+                if sender.try_send_datagram(packet)? {
+                    counters.add_tx(payload as u64);
+                    if let Some(usage) = &usage { usage.add_tx(payload as u64); }
+                }
             }
             received = flow.recv() => {
                 let Some(packet) = received? else { return Ok(()); };
@@ -1560,6 +1774,7 @@ async fn relay_udp_association(
                     socket.send_to(&packet, endpoint).await.map_err(|e| e.to_string())?;
                     let parsed = udp_protocol::parse_packet(&packet).map_err(|e| e.to_string())?;
                     counters.add_rx(parsed.payload.len() as u64);
+                    if let Some(usage) = &usage { usage.add_rx(parsed.payload.len() as u64); }
                 }
                 answered = true;
                 last_activity = tokio::time::Instant::now();

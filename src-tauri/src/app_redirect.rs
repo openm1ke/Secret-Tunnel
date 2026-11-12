@@ -362,6 +362,8 @@ impl RedirectState {
             let stats = self.stats.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    #[cfg(feature = "embedded-ssh")]
+                    crate::embedded_ssh::app_usage::note_route(&line);
                     if line.contains("ProxyBridge is running.") {
                         let _ = ready.send(());
                     }

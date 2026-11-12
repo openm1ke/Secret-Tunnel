@@ -1,4 +1,5 @@
 import DomainsPanel from "./DomainsPanel";
+import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,6 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowDown,
   ArrowUp,
+  ChartColumn,
   Check,
   CircleStop,
   Copy,
@@ -115,7 +117,7 @@ type TunnelStatus = {
   last_error: string;
 };
 
-type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "settings";
+type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "settings";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
 type RedirectStatus = { running: boolean; starting: boolean; platform: string; requires_administrator: boolean; supports_system_ssh: boolean; supports_domains: boolean; setup_message: string; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
@@ -273,6 +275,7 @@ function App() {
   const [appsScanning, setAppsScanning] = useState(false);
   const [appsError, setAppsError] = useState("");
   const [appSearch, setAppSearch] = useState("");
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [selectedAppsOnly, setSelectedAppsOnly] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
@@ -315,6 +318,17 @@ function App() {
     .filter((app) => (!selectedAppsOnly || isAppSelected(app)) && `${app.name} ${app.executable}`.toLowerCase().includes(appSearch.toLowerCase()))
     .sort((a, b) => Number(isAppSelected(b)) - Number(isAppSelected(a)));
   const selectedApps = appChoices.filter(isAppSelected);
+  // Installed applications that appear in the session history, for icons.
+  const statsKnownApps = useMemo(() => {
+    const match = knownAppMatcher(installedApps);
+    const names = new Set(sessions.flatMap((session) => session.apps.map((app) => app.name)));
+    const found = new Map<string, InstalledApp>();
+    names.forEach((name) => {
+      const app = match(name);
+      if (app) found.set(app.executable, app);
+    });
+    return [...found.values()];
+  }, [installedApps, sessions]);
 
   const chain = serverChain(currentServer, config.servers) ?? [currentServer.name];
   const routeNames = connected && status.ssh_route?.length ? status.ssh_route : chain;
@@ -349,15 +363,16 @@ function App() {
 
   // Icons load in the background for the apps on screen, a batch at a time.
   useEffect(() => {
-    if (activeTab !== "applications" || !isMac) return;
-    const wanted = visibleApps.map((app) => app.executable)
+    if ((activeTab !== "applications" && activeTab !== "stats") || !isMac) return;
+    const source = activeTab === "stats" ? statsKnownApps : visibleApps;
+    const wanted = source.map((app) => app.executable)
       .filter((path) => path.endsWith(".app") && !iconRequestsRef.current.has(path)).slice(0, 48);
     if (!wanted.length) return;
     wanted.forEach((path) => iconRequestsRef.current.add(path));
     invoke<Record<string, string>>("application_icons", { paths: wanted })
       .then((icons) => setAppIcons((current) => ({ ...current, ...icons })))
       .catch(() => undefined);
-  }, [activeTab, isMac, visibleApps.map((app) => app.id).join("|"), appIcons]);
+  }, [activeTab, isMac, visibleApps.map((app) => app.id).join("|"), statsKnownApps.map((app) => app.executable).join("|"), appIcons]);
 
   function toggleApplication(app: InstalledApp, checked: boolean) {
     const current = settingsDraft.redirect_processes;
@@ -498,7 +513,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (activeTab === "applications" && !appsLoaded && !appsScanning) scanApplications();
+    if ((activeTab === "applications" || activeTab === "stats") && !appsLoaded && !appsScanning) scanApplications();
+  }, [activeTab]);
+
+  // Session history refreshes while the statistics are on screen.
+  useEffect(() => {
+    if (activeTab !== "stats") return;
+    const load = () => invoke<SessionRecord[]>("session_history").then(setSessions).catch(() => undefined);
+    load();
+    const timer = window.setInterval(load, 3000);
+    return () => window.clearInterval(timer);
   }, [activeTab]);
 
   const ipActions = (light: boolean) => (
@@ -520,6 +544,7 @@ function App() {
     { tab: "proxies", label: "Локальный прокси", icon: <Network size={17} /> },
     { tab: "applications", label: "Приложения", icon: <LayoutGrid size={17} />, badge: redirect.running ? "вкл" : undefined },
     { tab: "domains", label: "Домены", icon: <Globe size={17} /> },
+    { tab: "stats", label: "Статистика", icon: <ChartColumn size={17} /> },
     { tab: "settings", label: "Настройки", icon: <Settings size={17} /> },
   ];
 
@@ -955,6 +980,15 @@ function App() {
                 })}
                 onStop={() => runAction("disconnect", () => invoke<string>("stop_redirect"))} />
             </>
+          )}
+
+          {activeTab === "stats" && (
+            <StatsPanel sessions={sessions}
+              known={statsKnownApps.map((app) => ({ name: app.name, executable: app.executable, icon: appIcons[app.executable] }))}
+              onClear={() => runAction("save", async () => {
+                setSessions(await invoke<SessionRecord[]>("clear_session_history"));
+                return "История сеансов очищена";
+              })} />
           )}
 
           {activeTab === "settings" && (

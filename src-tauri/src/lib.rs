@@ -126,6 +126,32 @@ struct AppSettings {
     /// or menu bar; "Выйти" in its menu quits.
     #[serde(default = "default_true")]
     close_to_tray: bool,
+    /// UDP receive window of each flow on this computer; `None` is the
+    /// automatic 1 MiB / 512 slots, lowered to what an older agent allows.
+    #[serde(default)]
+    udp_receive_window: Option<UdpWindowSetting>,
+    /// UDP receive window asked of the agent, for uploads; `None` keeps the agent's own.
+    #[serde(default)]
+    agent_udp_receive_window: Option<UdpWindowSetting>,
+}
+
+/// A UDP flow window as the Android app stores it: bytes and datagram slots.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+struct UdpWindowSetting {
+    bytes: usize,
+    slots: usize,
+}
+
+impl UdpWindowSetting {
+    fn validate(&self, title: &str) -> Result<(), String> {
+        if !(65536..=1048576).contains(&self.bytes) || self.bytes % 1024 != 0 {
+            return Err(format!("{title}: окно UDP должно быть от 64 до 1024 КиБ"));
+        }
+        if !(4..=512).contains(&self.slots) {
+            return Err(format!("{title}: слотов UDP должно быть от 4 до 512"));
+        }
+        Ok(())
+    }
 }
 
 impl Default for AppSettings {
@@ -146,6 +172,8 @@ impl Default for AppSettings {
             bypass_vpn_for_ssh: true,
             follow_child_processes: true,
             close_to_tray: true,
+            udp_receive_window: None,
+            agent_udp_receive_window: None,
         }
     }
 }
@@ -644,9 +672,14 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
         jumps,
         ssh_tuning,
         // QUIC downloads need room for bursts: 128 datagrams per flow capped one
-        // at 25 Mbit/s on a 50 ms path. Older agents lower the slots to theirs.
-        udp_receive_window: Some(secret_tunnel_mux::FlowWindow { bytes: 1024 * 1024, slots: 512 }),
-        cap_default_udp_receive_slots: true,
+        // at 25 Mbit/s on a 50 ms path. Older agents lower the slots to theirs,
+        // unless the window was set by hand.
+        udp_receive_window: Some(config.settings.udp_receive_window
+            .map(|w| secret_tunnel_mux::FlowWindow { bytes: w.bytes, slots: w.slots })
+            .unwrap_or(secret_tunnel_mux::FlowWindow { bytes: 1024 * 1024, slots: 512 })),
+        cap_default_udp_receive_slots: config.settings.udp_receive_window.is_none(),
+        agent_udp_receive_window: config.settings.agent_udp_receive_window
+            .map(|w| secret_tunnel_mux::FlowWindow { bytes: w.bytes, slots: w.slots }),
         bind_physical_interface: config.settings.bypass_vpn_for_ssh,
         route_note: Some(Default::default()),
         ..Default::default()
@@ -678,6 +711,12 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     if let Some(value) = &settings.ssh_tuning {
         let tuning: embedded_ssh::SshTuning = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
         tuning.validate()?;
+    }
+    if let Some(window) = &settings.udp_receive_window {
+        window.validate("UDP · загрузка")?;
+    }
+    if let Some(window) = &settings.agent_udp_receive_window {
+        window.validate("UDP · отправка")?;
     }
     secret_tunnel_routing::validate(&settings.domain_rules)?;
     if !settings.redirect_processes.is_empty() || !settings.domain_rules.is_empty() {

@@ -89,7 +89,17 @@ type AppSettings = {
   bypass_vpn_for_ssh?: boolean;
   follow_child_processes?: boolean;
   close_to_tray?: boolean;
+  udp_receive_window?: UdpWindow | null;
+  agent_udp_receive_window?: UdpWindow | null;
 };
+
+type UdpWindow = { bytes: number; slots: number };
+// The same choices as on Android, so a profile reads the same on both.
+const udpPresets: { id: string; label: string; value: UdpWindow | null }[] = [
+  { id: "auto", label: "По умолчанию", value: null },
+  { id: "256", label: "256 КиБ · 192 слота", value: { bytes: 262144, slots: 192 } },
+  { id: "1024", label: "1 МиБ · 512 слотов", value: { bytes: 1048576, slots: 512 } },
+];
 
 type AppConfig = {
   selected_server_id: string;
@@ -188,6 +198,32 @@ const TRANSLIT: Record<string, string> = {
 
 // Russian names are the norm here, so they are transliterated: an empty ID
 // would leave «Сохранить» disabled.
+function UdpWindowField({ title, hint, value, onChange }: { title: string; hint: string; value?: UdpWindow | null; onChange: (value: UdpWindow | null) => void }) {
+  const preset = !value ? "auto" : udpPresets.find((item) => item.value?.bytes === value.bytes && item.value?.slots === value.slots)?.id ?? "manual";
+  return (
+    <>
+      <label>
+        <SettingLabel hint={hint}>{title}</SettingLabel>
+        <select value={preset} onChange={(event) => {
+          const id = event.target.value;
+          onChange(id === "manual" ? { bytes: 524288, slots: 256 } : udpPresets.find((item) => item.id === id)?.value ?? null);
+        }}>
+          {udpPresets.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          <option value="manual">Вручную</option>
+        </select>
+      </label>
+      {preset === "manual" && value && (
+        <div className="udpManual">
+          <label className="inlineNumber"><span>Окно, КиБ (64–1024)</span>
+            <input type="number" min={64} max={1024} value={value.bytes / 1024} onChange={(event) => onChange({ ...value, bytes: Math.round(Number(event.target.value)) * 1024 })} /></label>
+          <label className="inlineNumber"><span>Слоты (4–512)</span>
+            <input type="number" min={4} max={512} value={value.slots} onChange={(event) => onChange({ ...value, slots: Math.round(Number(event.target.value)) })} /></label>
+        </div>
+      )}
+    </>
+  );
+}
+
 function makeId(name: string) {
   return [...name.trim().toLowerCase()].map((char) => TRANSLIT[char] ?? char).join("")
     .replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -1200,6 +1236,12 @@ function App() {
                     <option value={0}>Максимальная скорость</option>
                   </select>
                 </label>
+                <UdpWindowField title="UDP · загрузка" value={settingsDraft.udp_receive_window}
+                  hint="Сколько UDP-данных одного соединения туннель принимает без подтверждения. Больше окно — быстрее видео, звонки и QUIC на дальних маршрутах, но больше памяти. «По умолчанию» — 1 МиБ, у старого агента меньше."
+                  onChange={(value) => updateSettings("udp_receive_window", value)} />
+                <UdpWindowField title="UDP · отправка" value={settingsDraft.agent_udp_receive_window}
+                  hint="То же для отправки: окно, которое агент на сервере держит для ваших UDP-данных. «По умолчанию» — значение агента."
+                  onChange={(value) => updateSettings("agent_udp_receive_window", value)} />
               </fieldset>
 
               <div className="actions">

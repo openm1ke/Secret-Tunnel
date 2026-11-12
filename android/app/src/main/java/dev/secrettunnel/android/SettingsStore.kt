@@ -66,6 +66,16 @@ data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, v
     }
 }
 
+/** Settings for every connection, as on the desktop's «Для опытных: встроенный SSH». */
+data class Tuning(val ssh: SshSettings = SshSettings(), val udpReceive: UdpWindow? = null, val udpAgentReceive: UdpWindow? = null) {
+    fun toJson(): JSONObject = JSONObject().put("ssh", ssh.toJson()).put("udpReceive", udpReceive?.toJson() ?: JSONObject.NULL)
+        .put("udpAgentReceive", udpAgentReceive?.toJson() ?: JSONObject.NULL)
+    companion object {
+        fun fromJson(o: JSONObject) = Tuning(o.optJSONObject("ssh")?.let { SshSettings.fromJson(it) } ?: SshSettings(),
+            o.optJSONObject("udpReceive")?.let { UdpWindow.fromJson(it) }, o.optJSONObject("udpAgentReceive")?.let { UdpWindow.fromJson(it) })
+    }
+}
+
 data class ProxyProfile(val id:String, val name:String, val serverId:String, val port:Int,
     val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null, val ssh:SshSettings=SshSettings())
 data class TunnelSession(val route:List<SshEndpoint>, val socksPort:Int, val packages:Set<String>,
@@ -90,7 +100,19 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
             for(field in listOf("host","port","user","fingerprint","key_iv","key_cipher")) editor.remove(field)
             check(editor.commit()) {"Не удалось перенести настройки"}
         }
+        if(!prefs.contains("tuning")) {
+            // These lived in each proxy profile; the active one's become everyone's.
+            val proxy=proxies().let{all->all.firstOrNull{it.id==prefs.getString("active_proxy","")}?:all.firstOrNull()}
+            val tuning=Tuning(proxy?.ssh?:SshSettings(),proxy?.udpReceive,proxy?.udpAgentReceive)
+            check(prefs.edit().putString("tuning",tuning.toJson().toString()).commit()) {"Не удалось перенести настройки"}
+        }
     }
+    var tuning:Tuning get()=runCatching{Tuning.fromJson(JSONObject(prefs.getString("tuning","{}")!!))}.getOrDefault(Tuning())
+        set(v){check(prefs.edit().putString("tuning",v.toJson().toString()).commit()){"Не удалось сохранить настройки"}}
+    /** IP addresses stay hidden until the eye is pressed, like on the desktop. */
+    var hideSensitive:Boolean get()=prefs.getBoolean("hide_sensitive",true);set(v){prefs.edit().putBoolean("hide_sensitive",v).apply()}
+    /** After connecting, ask through the tunnel where it comes out: exit IP and country. */
+    var verifyProxy:Boolean get()=prefs.getBoolean("verify_proxy",true);set(v){prefs.edit().putBoolean("verify_proxy",v).apply()}
     private fun ids():List<String> {val a=org.json.JSONArray(prefs.getString("server_ids","[]"));return (0 until a.length()).map{a.getString(it)}}
     private fun currentId()=profileId ?: activeProxy?.serverId ?: ids().firstOrNull().orEmpty()
     private fun scoped(field:String)="server.${currentId()}.$field"
@@ -202,8 +224,8 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
             require(SettingsStore(context, server.id).hasKey()) { "Добавьте SSH-ключ для сервера «${server.name}»" }
         }
         require(packages.isNotEmpty()) {"Выберите приложения"}
-        return TunnelSession(route,proxy.port,packages,
-            proxy.udpReceive,proxy.udpAgentReceive,proxy.ssh)
+        val tuning=tuning
+        return TunnelSession(route,proxy.port,packages,tuning.udpReceive,tuning.udpAgentReceive,tuning.ssh)
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {

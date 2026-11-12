@@ -20,6 +20,11 @@ class TunnelVpnService : VpnService() {
         val traffic=TrafficHistory()
         @Volatile internal var appTraffic: AppTrafficAccounting? = null
             private set
+        /** Where the tunnel comes out, asked through it after connecting. */
+        @Volatile var exitIp = ""
+        @Volatile var exitCountry = ""
+        /** The session being written to the statistics, while connected. */
+        @Volatile var sessionId: String? = null
         private const val CHANNEL = "ssh-tunnel"
         private const val NOTICE = 1080
     }
@@ -61,6 +66,22 @@ class TunnelVpnService : VpnService() {
     private var session:TunnelSession?=null
     // Flows refused by either multiplexer end in the current SSH session.
     private var reportedRejections=0L
+    private var sessionStarted=0L
+    private var sessionBaseline=longArrayOf(0,0)
+    private var sessionSavedAt=0L
+    /** Saves this session's totals and per-app traffic to the statistics. */
+    private fun recordSession(active:Boolean){
+        val id=sessionId?:return
+        val current=session?:return
+        val totals=runCatching{NativeBridge.trafficTotals()}.getOrNull()?:return
+        val apps=appTraffic?.entries.orEmpty().filter{it.down>0||it.up>0}.map{AppUsage(it.name,it.down,it.up)}
+        val names=current.route.map{it.profile.name}
+        runCatching{SessionHistory.save(this,SessionRecord(id,sessionStarted,System.currentTimeMillis()/1000,names.last(),
+            if(names.size>1)names else emptyList(),exitCountry,(totals[0]-sessionBaseline[0]).coerceAtLeast(0),
+            (totals[1]-sessionBaseline[1]).coerceAtLeast(0),apps,active))}
+        sessionSavedAt=SystemClock.elapsedRealtime()
+        if(!active)sessionId=null
+    }
     private fun readyDetail()="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"+
         if(reportedRejections>0)" · отказов по лимиту: $reportedRejections" else ""
     private val monitor = object:Runnable {
@@ -131,6 +152,7 @@ class TunnelVpnService : VpnService() {
         recovery.reset()
         traffic.clear()
         appTraffic = null
+        exitIp = ""; exitCountry = ""; sessionId = null
         stopping.set(false); active = true; phase = "Подключение"; detail = "Проверка SSH-сервера"
         val notification = notification()
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -157,9 +179,20 @@ class TunnelVpnService : VpnService() {
                             val (rx, tx) = NativeBridge.trafficTotals()
                             traffic.sample(now, rx, tx)
                             if (accounting != null) accounting.sample(now, TProxyDrainTraffic() ?: ByteArray(0))
+                            if (now - sessionSavedAt >= 30_000) recordSession(true)
                         }
                     }, 0, 250, TimeUnit.MILLISECONDS)
+                    sessionStarted = System.currentTimeMillis() / 1000
+                    sessionBaseline = NativeBridge.trafficTotals()
+                    sessionSavedAt = SystemClock.elapsedRealtime()
+                    sessionId = sessionStarted.toString()
                     markReady()
+                    if (settings.verifyProxy) {
+                        val port = session!!.socksPort
+                        Thread {
+                            SpeedTest.trace(port)?.let { exitIp = it.ip; exitCountry = it.country; if (!stopping.get()) recordSession(true) }
+                        }.apply { isDaemon = true }.start()
+                    }
                 }
                 main.postDelayed(monitor, 1500)
             } catch (error: Exception) {
@@ -269,6 +302,9 @@ class TunnelVpnService : VpnService() {
     private fun cleanup() {
         main.removeCallbacks(monitor)
         sampling.shutdownNow()
+        sampling.awaitTermination(1, TimeUnit.SECONDS)
+        recordSession(false)
+        exitIp = ""; exitCountry = ""
         TProxyStopService() // join native reader BEFORE closing its borrowed fd
         TProxySetAccounting(false)
         tun?.close(); tun = null;engineIpv6=null;engineCapacity=0

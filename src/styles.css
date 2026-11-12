@@ -306,6 +306,7 @@ details.advanced > label { margin-bottom: 10px; }
 fieldset { border: 1px solid var(--line-soft); border-radius: var(--radius); margin: 0; padding: 12px 14px 14px; display: grid; gap: 10px; }
 legend { padding: 0 6px; font-weight: 680; font-size: 13px; }
 .inlineNumber { grid-template-columns: 1fr 110px; align-items: center; }
+.udpManual { display: grid; gap: 8px; padding-left: 12px; border-left: 2px solid var(--line, #d8e2e0); }
 
 /* Applications */
 .appsPanel { min-height: 100%; grid-template-rows: auto auto auto minmax(0, 1fr) auto; }

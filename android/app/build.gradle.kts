@@ -29,6 +29,7 @@ android {
 }
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

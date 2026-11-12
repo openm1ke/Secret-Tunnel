@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.20 — 2026-11-12
+
+- Fixed the Windows release check for application traffic attribution. The client uses a single deadline for matching a flow, and the test waits for the attribution to finish.
+- Includes the desktop interface, statistics, and speed tests from 0.3.19, and the call detection changes from 0.3.18.
+
 ## 0.3.19 — 2026-11-12
 
 Desktop (macOS first; Windows shares the interface and the speed tests).

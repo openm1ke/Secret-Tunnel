@@ -1,1 +1,22 @@
-<inset xmlns:android="http://schemas.android.com/apk/res/android" android:drawable="@drawable/app_icon" android:inset="18%" />
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The tunnel mouth from design/logo.svg, sized to the adaptive icon's safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:scaleX="0.137" android:scaleY="0.137" android:translateX="18.928" android:translateY="19.339">
+        <path android:pathData="M100,404 V258 A156,156 0 0 1 412,258 V404" android:strokeColor="#1FB3A6" android:strokeWidth="38" android:strokeLineCap="round" />
+        <path android:pathData="M164,404 V282 A92,92 0 0 1 348,282 V404" android:strokeColor="#14928A" android:strokeWidth="30" android:strokeLineCap="round" />
+        <path android:pathData="M216,404 V304 A40,40 0 0 1 296,304 V404" android:strokeColor="#0F706C" android:strokeWidth="22" android:strokeLineCap="round" />
+        <path android:pathData="M194,330 A62,62 0 1 0 318,330 A62,62 0 1 0 194,330 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="radial" android:centerX="256" android:centerY="330" android:gradientRadius="62">
+                    <item android:offset="0" android:color="#E6FFD58A" />
+                    <item android:offset="0.45" android:color="#59F2A541" />
+                    <item android:offset="1" android:color="#00F2A541" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path android:pathData="M239,330 A17,17 0 1 0 273,330 A17,17 0 1 0 239,330 Z" android:fillColor="#FFC463" />
+    </group>
+</vector>

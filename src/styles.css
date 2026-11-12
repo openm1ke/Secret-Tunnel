@@ -451,6 +451,29 @@ input.switch:checked::after { transform: translateX(14px); }
 
 /* Speed test */
 .speedPage { display: grid; gap: 14px; align-content: start; }
+.speedControls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.speedPath { grid-column: 1 / -1; display: grid; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line-soft); }
+.speedPath .route { margin: 0; }
+.exitLine { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; font-size: 13px; color: var(--ink-soft); }
+.exitLine b { font-weight: 640; color: var(--ink); }
+.exitLine .exitIp { display: inline-flex; align-items: center; gap: 6px; }
+.exitLine code { font-size: 12.5px; }
+.exitLine .muted { color: var(--muted); }
+.pathCell { display: inline-flex; align-items: center; gap: 8px; }
+.pathCell .chain { display: inline-flex; align-items: center; gap: 5px; }
+.pathCell .chain b { font-weight: 600; }
+.pathCell .chain i { font-style: normal; color: var(--muted); }
+.pathBadge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--panel-sunk); color: var(--ink-soft); border: 1px solid var(--line); white-space: nowrap; }
+.pathBadge.chainBadge { background: var(--teal-wash); color: var(--teal-strong); border-color: #b9dcd8; }
+.pathBadge.direct { background: var(--amber-wash); color: var(--amber); border-color: #f0d49a; }
+.exitCell { display: inline-flex; align-items: baseline; gap: 4px; }
+.exitCell small { color: var(--muted); font-size: 11px; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.serviceCell { color: var(--ink-soft); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.speedTable tr.directRun td:first-child { box-shadow: inset 3px 0 0 #f0d49a; }
+.compare th small { display: block; font-weight: 400; color: var(--muted); font-size: 11px; }
+.compare em { font-style: normal; font-weight: 640; }
+.compare em.better { color: var(--teal-strong); }
+.compare em.worse { color: var(--red); }
 .speedHero { grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr); align-items: center; gap: 10px 22px; }
 .gauges { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .gauge { margin: 0; display: grid; justify-items: center; gap: 2px; }

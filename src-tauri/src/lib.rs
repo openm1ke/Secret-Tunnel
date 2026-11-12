@@ -837,21 +837,27 @@ fn finish_session(state: &AppState) {
 
 /// Start a speed test of the running tunnel through its local proxy.
 #[tauri::command]
-fn speedtest_start(app: tauri::AppHandle, state: State<'_, AppState>, kind: String) -> Result<(), String> {
-    let (host, port, server) = {
-        let mut runtime = state.runtime.lock().map_err(|e| e.to_string())?;
-        let runtime = runtime.as_mut().ok_or("Сначала подключите туннель")?;
-        if let Some(error) = runtime.try_wait()? {
-            return Err(format!("Туннель завершился: {error}"));
-        }
-        (runtime.proxy.host.clone(), runtime.proxy.port, runtime.server.name.clone())
+fn speedtest_start(app: tauri::AppHandle, state: State<'_, AppState>, kind: String, direct: Option<bool>, provider: Option<String>) -> Result<(), String> {
+    let provider = provider.unwrap_or_else(|| "cloudflare".into());
+    let target = if direct.unwrap_or(false) {
+        // The computer's own connection, for comparison with the tunnel.
+        speedtest::Target { proxy: None, provider, server: String::new(), route: Vec::new(), country: String::new() }
+    } else {
+        let (host, port, server) = {
+            let mut runtime = state.runtime.lock().map_err(|e| e.to_string())?;
+            let runtime = runtime.as_mut().ok_or("Сначала подключите туннель")?;
+            if let Some(error) = runtime.try_wait()? {
+                return Err(format!("Туннель завершился: {error}"));
+            }
+            (runtime.proxy.host.clone(), runtime.proxy.port, runtime.server.name.clone())
+        };
+        let (route, country) = state
+            .cached_status
+            .lock()
+            .map(|status| (status.ssh_route.clone(), status.country_code.clone()))
+            .unwrap_or_default();
+        speedtest::Target { proxy: Some((host, port)), provider, server, route, country }
     };
-    let (route, country) = state
-        .cached_status
-        .lock()
-        .map(|status| (status.ssh_route.clone(), status.country_code.clone()))
-        .unwrap_or_default();
-    let target = speedtest::Target { host, port, server, route, country };
     state.speed.lock().map_err(|e| e.to_string())?.start(&kind, target, move |run| {
         if let Ok(mut speed) = app.state::<AppState>().speed.lock() {
             speed.finish(run);

@@ -1070,7 +1070,9 @@ function App() {
 
           {activeTab === "speed" && (
             <SpeedPanel connected={connected} live={speedLive} history={speedHistory} serverPing={connected ? latestPing : null}
-              onStart={(kind) => invoke("speedtest_start", { kind }).then(() => invoke<SpeedLive>("speedtest_status").then(setSpeedLive)).catch((error) => setMessage({ text: String(error), error: true }))}
+              tunnelRoute={connected && status.ssh_route?.length ? status.ssh_route : chain.length > 1 ? chain : []} tunnelServer={currentServer.name}
+              tunnelCountry={connected ? status.country_code : ""} hideAddresses={config.settings.hide_sensitive}
+              onStart={(kind, direct, provider) => invoke("speedtest_start", { kind, direct, provider }).then(() => invoke<SpeedLive>("speedtest_status").then(setSpeedLive)).catch((error) => setMessage({ text: String(error), error: true }))}
               onCancel={() => invoke("speedtest_cancel").catch(() => undefined)}
               onClear={() => invoke<SpeedRun[]>("speedtest_clear").then(setSpeedHistory).catch(() => undefined)} />
           )}

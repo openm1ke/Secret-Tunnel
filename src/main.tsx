@@ -81,6 +81,7 @@ type AppSettings = {
   reconnect_delay_seconds: number;
   start_tunnel_on_launch: boolean;
   clear_logs_on_start: boolean;
+  bypass_vpn_for_ssh?: boolean;
 };
 
 type AppConfig = {
@@ -954,6 +955,8 @@ function App() {
                     <option value="system">Системный OpenSSH — только TCP</option>
                   </select>
                 </label>
+                {isMac && <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.bypass_vpn_for_ssh ?? true} onChange={(event) => updateSettings("bypass_vpn_for_ssh", event.target.checked)} />
+                  <SettingLabel hint="SSH-соединение к серверу идёт напрямую через Wi-Fi или Ethernet, даже если включён другой VPN (Clash, v2RayTun). Иначе туннель окажется внутри чужого VPN: двойное шифрование и ниже скорость. Выключите, если сервер доступен только через тот VPN.">SSH мимо других VPN</SettingLabel></label>}
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.auto_reconnect} onChange={(event) => updateSettings("auto_reconnect", event.target.checked)} />
                   <SettingLabel hint="Если соединение оборвалось, приложение подключится снова с выбранным сервером и прокси.">Переподключаться автоматически</SettingLabel></label>
                 <label className="inlineNumber">

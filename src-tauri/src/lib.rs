@@ -109,6 +109,9 @@ struct AppSettings {
     start_tunnel_on_launch: bool,
     #[serde(default)]
     clear_logs_on_start: bool,
+    /// macOS: SSH to the server bypasses other VPNs' TUN interfaces.
+    #[serde(default = "default_true")]
+    bypass_vpn_for_ssh: bool,
 }
 
 impl Default for AppSettings {
@@ -126,6 +129,7 @@ impl Default for AppSettings {
             reconnect_delay_seconds: default_reconnect_delay_seconds(),
             start_tunnel_on_launch: false,
             clear_logs_on_start: false,
+            bypass_vpn_for_ssh: true,
         }
     }
 }
@@ -625,6 +629,8 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
         // at 25 Mbit/s on a 50 ms path. Older agents lower the slots to theirs.
         udp_receive_window: Some(secret_tunnel_mux::FlowWindow { bytes: 1024 * 1024, slots: 512 }),
         cap_default_udp_receive_slots: true,
+        bind_physical_interface: config.settings.bypass_vpn_for_ssh,
+        route_note: Some(Default::default()),
         ..Default::default()
     })
 }

@@ -221,6 +221,8 @@ fn start(raw: String) -> Result<(), String> {
             }),
             cap_default_udp_receive_slots: true,
             agent_udp_receive_window: None,
+                bind_physical_interface: false,
+                route_note: None,
             // The receive budget is accounting, not preallocated memory. With an agent
             // older than the budget fix, half of this limit is usable for UDP flows, so
             // a small cap made it reject new flows during page loads on the device.

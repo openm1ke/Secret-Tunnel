@@ -193,6 +193,8 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
                     && build_kib.is_none()
                     && build_slots.is_none(),
                 agent_udp_receive_window: cfg.agent_udp_receive_window,
+                bind_physical_interface: false,
+                route_note: None,
                 max_connections: if cfg.max_connections == 0 {
                     512
                 } else {

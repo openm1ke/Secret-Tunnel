@@ -65,6 +65,11 @@ pub struct EmbeddedOptions {
     pub cap_default_udp_receive_slots: bool,
     pub agent_udp_receive_window: Option<FlowWindow>,
     pub ssh_tuning: SshTuning,
+    /// macOS: bind the SSH socket to the primary physical interface, so the
+    /// TUN of another VPN (Clash, v2RayTun) does not carry the tunnel itself.
+    pub bind_physical_interface: bool,
+    /// Filled by the first hop's connect: how the SSH connection was routed.
+    pub route_note: Option<Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 #[derive(Debug)]
@@ -584,9 +589,13 @@ async fn run_embedded_tunnel(
     if !options.jumps.is_empty() {
         super::log_line(&logs, format!("SSH-маршрут: {route_description}"));
     }
+    let route_note = options.route_note.clone();
     let route = tokio::time::timeout(route_connect_timeout(&options), connect_route(&server, options))
     .await
     .map_err(|_| format!("Embedded SSH connect/authentication timed out: {route_description}"))??;
+    if let Some(note) = route_note.and_then(|note| note.lock().ok().and_then(|mut slot| slot.take())) {
+        super::log_line(&logs, note);
+    }
     super::log_line(&logs, "SSH и ключ проверены; проверяем серверный агент");
     let tcp_interactive_bytes = ssh_tuning.tcp_interactive_bytes;
     let (transport, agent) = start_agent_transport_qos(
@@ -944,6 +953,51 @@ pub fn diagnose_server_with_options(
     })
 }
 
+/// The primary physical interface macOS reports (`scutil --nwi`), with its
+/// IPv4 address. Other VPNs' TUN interfaces are not listed there.
+#[cfg(target_os = "macos")]
+fn primary_interface() -> Option<(String, Option<std::net::IpAddr>)> {
+    let output = std::process::Command::new("/usr/sbin/scutil").arg("--nwi").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut name = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if name.is_none() {
+            if let Some((interface, rest)) = trimmed.split_once(" : flags") {
+                if !interface.is_empty() && !interface.contains(' ') && rest.contains("IPv4") {
+                    name = Some(interface.to_string());
+                }
+            }
+        } else if let Some(address) = trimmed.strip_prefix("address") {
+            let address = address.trim_start_matches([' ', ':']).trim().parse().ok();
+            return name.map(|name| (name, address));
+        } else if trimmed.contains(" : flags") {
+            break;
+        }
+    }
+    name.map(|name| (name, None))
+}
+
+#[cfg(target_os = "macos")]
+fn bind_to_interface(socket: &tokio::net::TcpSocket, name: &str, ipv6: bool) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    let c_name = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+    if index == 0 {
+        return Err(format!("интерфейс {name} не найден"));
+    }
+    let (level, option) = if ipv6 { (libc::IPPROTO_IPV6, libc::IPV6_BOUND_IF) } else { (libc::IPPROTO_IP, libc::IP_BOUND_IF) };
+    let index = index as libc::c_int;
+    let result = unsafe {
+        libc::setsockopt(socket.as_raw_fd(), level, option, &index as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t)
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
 async fn handshake<A: ToSocketAddrs>(
     server: &EmbeddedServer,
     addrs: A,
@@ -954,6 +1008,10 @@ async fn handshake<A: ToSocketAddrs>(
     // capture their own SSH connection. No extra transport connection is made.
     let mut connected = None;
     let mut last_error = "SSH hostname has no addresses".to_string();
+    #[cfg(target_os = "macos")]
+    let primary = (options.protect_socket.is_none()).then(primary_interface).flatten();
+    #[cfg(target_os = "macos")]
+    let mut bound_to: Option<String> = None;
     for addr in tokio::net::lookup_host(addrs)
         .await
         .map_err(|e| e.to_string())?
@@ -964,6 +1022,15 @@ async fn handshake<A: ToSocketAddrs>(
             tokio::net::TcpSocket::new_v6()
         }
         .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        if options.bind_physical_interface {
+            if let Some((name, _)) = &primary {
+                match bind_to_interface(&socket, name, addr.is_ipv6()) {
+                    Ok(()) => bound_to = Some(name.clone()),
+                    Err(error) => last_error = format!("Не удалось привязать SSH к {name}: {error}"),
+                }
+            }
+        }
         if let Some(protect) = &options.protect_socket {
             #[cfg(unix)]
             {
@@ -988,6 +1055,21 @@ async fn handshake<A: ToSocketAddrs>(
     }
     let stream = connected.ok_or(last_error)?;
     let _ = stream.set_nodelay(true);
+    #[cfg(target_os = "macos")]
+    if let Some(note) = &options.route_note {
+        let local = stream.local_addr().ok().map(|addr| addr.ip());
+        let text = match (&bound_to, &primary) {
+            (Some(name), _) => Some(format!("SSH идёт напрямую через {name}, мимо других VPN")),
+            (None, Some((name, Some(address)))) if local.is_some_and(|local| local != *address) => Some(format!(
+                "SSH к серверу идёт через другой VPN или TUN (локальный адрес {}, а у {name} — {address}). Скорость может быть ниже: включите «SSH мимо других VPN» в настройках или исключите сервер в правилах того VPN.",
+                local.unwrap()
+            )),
+            _ => None,
+        };
+        if let Ok(mut slot) = note.lock() {
+            *slot = text;
+        }
+    }
     handshake_stream(server, ObservedStream::new(stream, observer), options).await
 }
 
@@ -1181,6 +1263,8 @@ async fn route_handshake(server: &EmbeddedServer, mut options: EmbeddedOptions) 
             ssh_tuning: options.ssh_tuning.clone(),
             host_key_sha256: jump.host_key_sha256,
             protect_socket: options.protect_socket.clone(),
+            bind_physical_interface: options.bind_physical_interface,
+            route_note: options.route_note.clone(),
             ..Default::default()
         };
         let result = async {

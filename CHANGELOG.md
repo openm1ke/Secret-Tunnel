@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Server and proxy forms: a Russian name fills the ID by transliteration ("Мой сервер" → `moy-server`), and the ID field can be edited. Before, a Russian name left the ID empty and «Сохранить» disabled, and typing in the ID field had no effect.
+- Website: step-by-step install guide with pictures for macOS, Windows and Linux, from a hoster's root password to the first connection: https://openm1ke.github.io/Secret-Tunnel/guide.html
+
 ## 0.3.22 — 2026-11-12
 
 - Windows: the application picker shows each program's icon, the one Explorer shows for the program or its shortcut. Entries added by process name only keep a letter badge.

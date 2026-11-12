@@ -21,7 +21,7 @@ carries TCP and UDP inside a single SSH channel.
 | `android/` | Android app: Kotlin UI and `VpnService` in `app/`, JNI bridge crate in `native/`, hev-socks5-tunnel for TUN. |
 | `ios/` | iOS app and Packet Tunnel extension (not part of releases). |
 | `routing-engine/`, `session-control/` | Domain rules engine (Windows) and tunnel session state machine. |
-| `site/` | GitHub Pages site (landing, knowledge base, screenshots, releases). Published by `scripts/publish-site.sh`. |
+| `site/` | GitHub Pages site (landing, install guide `guide.html`, knowledge base, screenshots, releases). Published by `scripts/publish-site.sh`. |
 | `design/` | Logo, app icon masters, tray icon frames (SVG sources). |
 | `docs/` | Design notes, audits, platform guides (mostly Russian). |
 | `scripts/` | Builds, packaging, checks, `set-version.py`, `deploy-agent.sh`, `publish-site.sh`. |
@@ -85,7 +85,9 @@ APK needs the signing keystore, so check resources with `./gradlew :app:processD
 ## Conventions
 
 - UI copy is Russian, plain and specific; keep labels identical across the
-  app, `site/knowledge.html` and `docs/SETUP-FOR-AI.md` when renaming.
+  app, `site/guide.html`, `site/knowledge.html` and `docs/SETUP-FOR-AI.md` when renaming.
+  The guide's screenshots in `site/assets/guide/` picture the UI; retake them when a
+  pictured screen changes.
 - Comments say why, not what. Commit messages: a short subject, then the
   reason and the measured effect.
 - Never commit private keys, tokens, real server addresses or local configs.

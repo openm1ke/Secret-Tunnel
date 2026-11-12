@@ -9,6 +9,11 @@ pub struct InstalledApp {
     pub executable: String,
     pub patterns: Vec<String>,
     pub source: String,
+    /// macOS: the bundle's own identifier. Helper identifiers in `patterns`
+    /// can be shared by many applications (Sparkle, Mozilla), so only this
+    /// one says whether the application itself is selected.
+    #[serde(default)]
+    pub primary: String,
 }
 
 pub fn scan() -> Result<Vec<InstalledApp>, String> {

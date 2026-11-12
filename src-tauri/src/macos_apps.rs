@@ -66,6 +66,7 @@ pub fn describe(path: &Path) -> Result<InstalledApp, String> {
     }
     let (id, name) = metadata(&path).ok_or("В приложении отсутствует CFBundleIdentifier")?;
     super::macos_redirect::validate_ids(std::slice::from_ref(&id))?;
+    let primary = id.clone();
     let mut patterns = vec![id];
     helpers(&path.join("Contents"), 10, &mut patterns, &mut 20_000);
     patterns.sort();
@@ -76,6 +77,7 @@ pub fn describe(path: &Path) -> Result<InstalledApp, String> {
         executable: path.to_string_lossy().into_owned(),
         patterns,
         source: "macos".into(),
+        primary,
     })
 }
 
@@ -268,6 +270,8 @@ mod tests {
         }
         let result = describe(&app).unwrap();
         assert_eq!(result.name, "Test App");
+        // Helpers are sorted in with the bundle ID; `primary` keeps the app's own.
+        assert_eq!(result.primary, "org.example.Test");
         assert_eq!(
             result.patterns,
             ["org.example.Test", "org.example.Test.helper"]

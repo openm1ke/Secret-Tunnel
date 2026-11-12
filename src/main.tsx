@@ -119,9 +119,14 @@ type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "set
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
 type RedirectStatus = { running: boolean; starting: boolean; platform: string; requires_administrator: boolean; supports_system_ssh: boolean; supports_domains: boolean; setup_message: string; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
-type InstalledApp = { id: string; name: string; executable: string; patterns: string[]; source: string };
+type InstalledApp = { id: string; name: string; executable: string; patterns: string[]; source: string; primary?: string };
 const normalizeAppPattern = (value: string) => value.trim().replace(/\//g, "\\").toLowerCase();
+/** Every rule an application contributes, including its helpers. */
 const appAliases = (app: InstalledApp) => (app.source === "macos" ? app.patterns : [...app.patterns, app.executable.split(/[\\/]/).pop() || ""]).map(normalizeAppPattern);
+/** Rules that mean the application itself is selected. On macOS helper IDs
+ * such as Sparkle's or Mozilla's are shared by many applications, so only the
+ * bundle's own identifier counts. */
+const appOwnKeys = (app: InstalledApp) => (app.source === "macos" && app.primary ? [normalizeAppPattern(app.primary)] : appAliases(app));
 type BusyAction = "connect" | "disconnect" | "restart" | "save" | "delete" | "test" | "logs" | null;
 type CopyField = "proxy-ip" | "server-host" | "ipinfo-token" | "logs" | null;
 type Phase = "up" | "busy" | "down" | "error";
@@ -228,6 +233,10 @@ function maskValue(value: string) {
   return value ? "••••••••" : "—";
 }
 
+function dedupePatterns(patterns: string[]) {
+  return [...new Map(patterns.filter((pattern) => pattern.trim()).map((pattern) => [normalizeAppPattern(pattern), pattern.trim()])).values()];
+}
+
 function plural(count: number, one: string, few: string, many: string) {
   const mod10 = count % 10;
   const mod100 = count % 100;
@@ -294,7 +303,7 @@ function App() {
   const latest = traffic[traffic.length - 1];
   const latestPing = [...traffic].reverse().find((point) => point.latency_ms !== null)?.latency_ms ?? null;
   const selectedPatterns = new Set(settingsDraft.redirect_processes.map(normalizeAppPattern));
-  const isAppSelected = (app: InstalledApp) => appAliases(app).some((pattern) => selectedPatterns.has(pattern));
+  const isAppSelected = (app: InstalledApp) => appOwnKeys(app).some((pattern) => selectedPatterns.has(pattern));
   const appChoices = useMemo(() => {
     const known = new Set(installedApps.flatMap(appAliases));
     const custom = settingsDraft.redirect_processes.filter((pattern) => pattern && !known.has(normalizeAppPattern(pattern)))
@@ -351,9 +360,15 @@ function App() {
   }, [activeTab, isMac, visibleApps.map((app) => app.id).join("|"), appIcons]);
 
   function toggleApplication(app: InstalledApp, checked: boolean) {
-    const aliases = new Set(appAliases(app));
-    const patterns = settingsDraft.redirect_processes.filter((pattern) => !aliases.has(normalizeAppPattern(pattern)));
-    updateSettings("redirect_processes", checked ? [...patterns, ...app.patterns] : patterns);
+    const current = settingsDraft.redirect_processes;
+    if (checked) {
+      updateSettings("redirect_processes", dedupePatterns([...current, ...app.patterns]));
+      return;
+    }
+    // Keep helpers another selected application still needs.
+    const stillNeeded = new Set(appChoices.filter((other) => other.id !== app.id && isAppSelected(other)).flatMap(appAliases));
+    const remove = new Set([...appAliases(app).filter((pattern) => !stillNeeded.has(pattern)), ...appOwnKeys(app)]);
+    updateSettings("redirect_processes", current.filter((pattern) => !remove.has(normalizeAppPattern(pattern))));
   }
 
   async function addApplicationFile() {
@@ -371,13 +386,13 @@ function App() {
   }
 
   function applicationSettings() {
-    // Expand selected app families, including their updaters, when saving old rules.
-    let patterns = [...settingsDraft.redirect_processes];
-    for (const app of appChoices.filter(isAppSelected)) {
-      const aliases = new Set(appAliases(app));
-      patterns = [...patterns.filter((pattern) => !aliases.has(normalizeAppPattern(pattern))), ...app.patterns];
-    }
-    return { ...settingsDraft, redirect_processes: [...new Map(patterns.filter(Boolean).map((pattern) => [normalizeAppPattern(pattern), pattern])).values()] };
+    // Exactly the rules of the selected applications, with their helpers,
+    // plus manual rules that belong to no found application. Leftovers of
+    // deselected applications (shared helper IDs) are dropped.
+    const known = new Set(installedApps.flatMap(appAliases));
+    const manual = settingsDraft.redirect_processes.filter((pattern) => pattern.trim() && !known.has(normalizeAppPattern(pattern)));
+    const selected = installedApps.filter(isAppSelected).flatMap((app) => app.patterns);
+    return { ...settingsDraft, redirect_processes: dedupePatterns([...selected, ...manual]) };
   }
 
   async function refreshAll() {

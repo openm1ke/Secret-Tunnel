@@ -47,7 +47,7 @@ let browser;
  await page.getByRole('checkbox',{name:'Включить правило 1',exact:true}).uncheck();
  await page.getByText('Правило 2: Напрямую',{exact:true}).waitFor();
  await page.getByRole('button',{name:'Сохранить правила',exact:true}).click();
- await page.getByText('Правила доменов сохранены. Включите перехват для применения',{exact:true}).waitFor();
+ await page.getByText('Правила доменов сохранены. Включите перехват, чтобы применить их',{exact:true}).waitFor();
  if(cfg.settings.domain_rules.length!==2||cfg.settings.domain_rules[0].enabled||cfg.settings.domain_rules[1].action!=='direct')throw Error('Save mismatch');
  await page.getByRole('button',{name:'Включить перехват',exact:true}).click();
  await page.getByRole('button',{name:'Сохранить и применить',exact:true}).waitFor();

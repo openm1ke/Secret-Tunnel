@@ -1790,6 +1790,21 @@ fn resolve_application_paths(paths: Vec<String>) -> Result<Vec<InstalledApp>, St
     Err("Чтение .app доступно только на macOS".into())
 }
 
+/// PNG data URLs of application icons by path, for the application picker.
+#[tauri::command(async)]
+fn application_icons(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    if paths.len() > 400 {
+        return Err("Слишком много приложений за один запрос".into());
+    }
+    #[cfg(target_os = "macos")]
+    return Ok(macos_apps::icons(&paths));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = paths;
+        Ok(Default::default())
+    }
+}
+
 fn stop_application_redirect(state: &AppState) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     return state.redirect.lock().map_err(|e| e.to_string())?.stop();
@@ -1941,6 +1956,7 @@ pub fn run() {
             check_domain_rule,
             scan_installed_applications,
             resolve_application_paths,
+            application_icons,
             start_redirect,
             stop_redirect,
             save_server,

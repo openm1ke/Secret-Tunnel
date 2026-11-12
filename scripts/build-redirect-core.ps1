@@ -23,10 +23,10 @@ $routingLibrary=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../routing-engi
 $sources=$units | ForEach-Object {Join-Path $patchedRoot $_}
 Push-Location -LiteralPath $outputRoot
 try {
-    & cl.exe /nologo /O2 /MT /LD /utf-8 /DPROXYBRIDGE_EXPORTS /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS "/I$driverRoot/include" @sources /link "/LIBPATH:$driverRoot/x64" WinDivert.lib ws2_32.lib iphlpapi.lib userenv.lib bcrypt.lib ntdll.lib $routingLibrary /OUT:ProxyBridgeCore.dll /DYNAMICBASE /NXCOMPAT
+    & cl.exe /nologo /O2 /MT /LD /utf-8 /DPROXYBRIDGE_EXPORTS /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS "/I$driverRoot/include" @sources /link "/LIBPATH:$driverRoot/x64" WinDivert.lib ws2_32.lib iphlpapi.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib $routingLibrary /OUT:ProxyBridgeCore.dll /DYNAMICBASE /NXCOMPAT
     if($LASTEXITCODE -ne 0){throw 'Core compilation failed.'}
     $objects=$units | ForEach-Object {[IO.Path]::GetFileNameWithoutExtension($_)+'.obj'}
-    & cl.exe /nologo /O2 /MT /utf-8 /DPROXYBRIDGE_EXPORTS /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS "/I$patchedRoot" "/I$driverRoot/include" "$PSScriptRoot/check-domain-engine.c" @objects /Fe:check-domain-engine.exe /link "/LIBPATH:$driverRoot/x64" WinDivert.lib ws2_32.lib iphlpapi.lib userenv.lib bcrypt.lib ntdll.lib $routingLibrary
+    & cl.exe /nologo /O2 /MT /utf-8 /DPROXYBRIDGE_EXPORTS /D_CRT_SECURE_NO_WARNINGS /D_WINSOCK_DEPRECATED_NO_WARNINGS "/I$patchedRoot" "/I$driverRoot/include" "$PSScriptRoot/check-domain-engine.c" @objects /Fe:check-domain-engine.exe /link "/LIBPATH:$driverRoot/x64" WinDivert.lib ws2_32.lib iphlpapi.lib userenv.lib bcrypt.lib ntdll.lib synchronization.lib $routingLibrary
     if($LASTEXITCODE -ne 0){throw 'Native test compilation failed.'}
 } finally {Pop-Location}
 foreach($file in @('WinDivert.dll','WinDivert64.sys')){

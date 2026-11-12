@@ -1,6 +1,6 @@
 [package]
 name = "secret-tunnel"
-version = "0.3.18"
+version = "0.3.19"
 description = "Desktop SSH SOCKS tunnel manager"
 authors = ["Secret Tunnel contributors"]
 edition = "2021"

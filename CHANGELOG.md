@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.19 — 2026-11-12
+
+Desktop (macOS first; Windows shares the interface and the speed tests).
+
+- Redesigned window: route ribbon from this computer through each server to the exit country, full-width traffic chart, a log dock, application icons, country flags on every platform.
+- SSH to the server bypasses other VPNs' TUN interfaces on macOS (bound to the physical interface), so a running Clash no longer wraps the tunnel in a second VPN. Setting: "SSH мимо других VPN", on by default.
+- Interception on macOS matches what the system reports. Rules carry the code-signing identifier of every program inside a selected app, not only bundle IDs: ChatGPT's agent `codex` is signed `codex` and went direct. DNS that intercepted apps send through the tunnel goes to 1.1.1.1: the system resolver (Clash's 114.114.114.114, a home router) does not answer from the server, which kept Discord at its update check.
+- Programs a selected app starts (node, python, MCP servers, updaters) are followed while running, via kernel process events, and get a rule within about a second. Rules change without dropping connections: the old ProxyBridge CLI is stopped without cleanup and the new one only replaces the rules. Setting: "Подхватывать программы, запущенные выбранными приложениями".
+- The application picker keeps the selection: shared helper IDs (Sparkle, Mozilla) no longer select or deselect other applications.
+- Statistics: sessions with duration, route, exit country and traffic per application, kept locally.
+- Journal: connections in plain words (through the tunnel, direct, blocked) with host names learned from tunnelled DNS, filters for events, connections, errors and service entries, IP hiding, repeats collapsed.
+- Speed: Cloudflare, LibreSpeed and M-Lab NDT7 tests through the tunnel or over the computer's own connection, with gauges, latency under load, UDP round trips, the exit address and country, a comparison of the two, and a history that shows chains of servers.
+- Quitting from the menu stops interception and the tunnel, as closing the window did.
+- 0.3.18 (call detection) was not published; its change is part of this release.
+
 ## 0.3.18 — 2026-11-12
 
 - A UDP flow counts as a call only while it carries short datagrams both ways, the quieter direction at least three per 500 ms and 30% of the busier one. Short datagrams one way are the ACKs of a download: on a phone the Instagram feed's QUIC flows held the call budget on 18 of 19 snapshots and capped TCP at 96 KiB per round trip, 7–12 Mbit/s on an 85 ms path, and Speedtest triggered it during half of its download. Bench, 4 TCP downloads plus a 2 Mbit/s QUIC-like flow with an ACK per two datagrams: call mode 8 s of 10 before, 0 now; a voice stream is still detected.

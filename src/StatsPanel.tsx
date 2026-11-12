@@ -15,7 +15,7 @@ export type SessionRecord = {
   apps: AppUsage[];
   active: boolean;
 };
-export type KnownApp = { name: string; executable: string; icon?: string };
+export type KnownApp = { name: string; executable: string; icon?: string; patterns?: string[] };
 
 const UNATTRIBUTED = "Без перехвата (SOCKS)";
 type Period = "today" | "week" | "month" | "all";
@@ -61,14 +61,16 @@ export function knownAppMatcher<T extends KnownApp>(known: T[]) {
     .sort((a, b) => b.app.name.length - a.app.name.length);
   const find = (name: string) => {
     const lower = name.toLowerCase().replace(/\.exe$/, "");
-    return entries.find(({ keys }) => keys.some((key) => key && (lower === key || lower.startsWith(`${key} `) || lower.startsWith(`${key}.`))))?.app;
+    return entries.find(({ keys }) => keys.some((key) => key && (lower === key || lower.startsWith(`${key} `) || lower.startsWith(`${key}.`))))?.app
+      // A program inside the app signed under its own name: ChatGPT's `codex`.
+      ?? entries.find(({ app }) => app.patterns?.some((pattern) => pattern.toLowerCase() === lower))?.app;
   };
   return (name: string): T | undefined => find(name) ?? find(parentName(name));
 }
 
 /** Child processes that do not carry their application's name. */
 function parentName(name: string) {
-  return /^plugin-container$/i.test(name) ? "Firefox" : name.replace(/ Helper( \(.*\))?$/, "");
+  return /^plugin-container$/i.test(name) ? "Firefox" : name.replace(/ Helper( \(.*\))?$/, "").replace(/ \([^()]*\)$/, "");
 }
 
 function useAppResolver(known: KnownApp[]) {

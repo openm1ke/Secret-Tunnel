@@ -527,6 +527,12 @@ function App() {
     if ((activeTab === "applications" || activeTab === "stats") && !appsLoaded && !appsScanning) scanApplications();
   }, [activeTab]);
 
+  // The sidebar counts selected applications, not their rules, so the list
+  // is needed as soon as interception runs.
+  useEffect(() => {
+    if (redirect.running && !appsLoaded && !appsScanning) scanApplications();
+  }, [redirect.running]);
+
   // Programs the selected applications start under their own signing
   // identifier go direct until they have a rule of their own.
   useEffect(() => {
@@ -1079,7 +1085,7 @@ function App() {
 
           {activeTab === "stats" && (
             <StatsPanel sessions={sessions}
-              known={statsKnownApps.map((app) => ({ name: app.name, executable: app.executable, icon: appIcons[app.executable] }))}
+              known={statsKnownApps.map((app) => ({ name: app.name, executable: app.executable, icon: appIcons[app.executable], patterns: app.patterns }))}
               onClear={() => runAction("save", async () => {
                 setSessions(await invoke<SessionRecord[]>("clear_session_history"));
                 return "История сеансов очищена";

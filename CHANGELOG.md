@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.23 — 2026-11-12
 
+- Android: «Скорость» with the desktop's tests — quick, full, bandwidth, browsing, mixed, latency and UDP, M-Lab NDT7 — through the tunnel or straight from the phone, on Cloudflare or the nearest LibreSpeed server, with history, exit country and a tunnel-vs-direct comparison. History uses the desktop's `speedtests.json` fields.
+- Android: «Статистика» with tunnel sessions and each app's traffic for today, 7 or 30 days or all time, kept in `sessions.json` like on the desktop. Traffic that went through the proxy itself (speed tests, apps set to use it) shows as «Без перехвата».
+- Android: the home screen shows the exit IP and country after connecting («Проверять прокси после подключения»), hidden until tapped («Скрывать IP-адреса»).
+- Android: bottom tabs are now «Главная», «Приложения», «Скорость», «Статистика», «Ещё»; servers, proxies, settings and the journal are under «Ещё».
+- Android: cipher, SSH queue, call priority and UDP windows moved from each proxy profile to «Ещё» → «Настройки» and apply to every connection, as on the desktop. The selected profile's values carry over on update. Server form labels match the desktop: «Порт SSH», «Пользователь», «Подключаться через».
+- Desktop: «UDP · загрузка» and «UDP · отправка» in «Для опытных: встроенный SSH», the UDP windows Android already had. «По умолчанию» keeps 1 MiB / 512 slots for downloads and the agent's own window for uploads.
 - Server and proxy forms: a Russian name fills the ID by transliteration ("Мой сервер" → `moy-server`), and the ID field can be edited. Before, a Russian name left the ID empty and «Сохранить» disabled, and typing in the ID field had no effect.
 - Website: step-by-step install guide with pictures for macOS, Windows and Linux, from a hoster's root password to the first connection: https://openm1ke.github.io/Secret-Tunnel/guide.html
 

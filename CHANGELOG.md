@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.22 — 2026-11-12
+
+- Windows: the application picker shows each program's icon, the one Explorer shows for the program or its shortcut. Entries added by process name only keep a letter badge.
+
 ## 0.3.21 — 2026-11-12
 
 - New icon on desktop and Android: a tunnel mouth with the exit light. Android uses an adaptive icon with a monochrome layer for themed icons (Android 13+).

@@ -9,6 +9,8 @@ remote=$(git -C "$root" remote get-url origin)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cp -R "$root/site/." "$work/"
+# The setup guide for AI assistants is served next to llms.txt; docs/ stays its only source.
+cp "$root/docs/SETUP-FOR-AI.md" "$work/setup-for-ai.md"
 touch "$work/.nojekyll"
 cd "$work"
 git init -q -b gh-pages

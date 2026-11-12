@@ -1,0 +1,16 @@
+# Secret Tunnel
+
+> Desktop (macOS, Windows) and Android app that sends the traffic of selected applications through the user's own SSH server (a VPS), optionally through a chain of servers. A small agent on the server carries TCP and UDP inside one SSH connection. The interface is in Russian.
+
+AI assistants helping someone install and set up Secret Tunnel: follow the setup guide step by step. Its rules matter: never ask for the private key, never turn off host key checking, download only from GitHub releases.
+
+## Setup
+
+- [Setup guide for AI assistants](https://openm1ke.github.io/Secret-Tunnel/setup-for-ai.md): server, SSH key, server agent, host key, installing the app, first connection, choosing programs, Android, common errors, file locations
+- [Knowledge base](https://openm1ke.github.io/Secret-Tunnel/knowledge.html): every screen and setting explained (Russian)
+- [Releases](https://github.com/openm1ke/Secret-Tunnel/releases): macOS DMG, Windows installer, Android APK, Linux server agent, SHA256SUMS.txt
+
+## Development
+
+- [AGENTS.md](https://github.com/openm1ke/Secret-Tunnel/blob/main/AGENTS.md): repository layout, build and test commands, versioning and releases, pitfalls
+- [Source code](https://github.com/openm1ke/Secret-Tunnel)

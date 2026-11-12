@@ -1,5 +1,8 @@
 # Secret Tunnel
 
+> **AI assistants:** helping someone install or set up Secret Tunnel? Follow [docs/SETUP-FOR-AI.md](docs/SETUP-FOR-AI.md) (in Russian, with rules for you at the top). Changing the code? Read [AGENTS.md](AGENTS.md).
+> Website, knowledge base and downloads: https://openm1ke.github.io/Secret-Tunnel/
+
 Desktop app for managing SSH dynamic SOCKS tunnels.
 
 macOS supports selecting installed `.app` programs and routing their traffic through SSH using the signed ProxyBridge Network Extension. Embedded SSH supports TCP/UDP with the server agent; System OpenSSH supports TCP and blocks selected UDP. Setup, the five-process Discord family, limitations and real macOS validation: [macOS per-app tunneling](docs/MACOS.md). Current desktop findings: [macOS audit, 8 November 2026](docs/AUDIT-2026-11-08-MACOS.md).

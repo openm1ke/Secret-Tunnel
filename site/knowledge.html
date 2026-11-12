@@ -66,7 +66,7 @@
 
     <main id="main">
       <h1>База знаний</h1>
-      <p class="intro">Всё о настройке: от аренды сервера до звонков через туннель. Ищите по любому слову — статьи отфильтруются, совпадения подсветятся.</p>
+      <p class="intro">Всё о настройке: от аренды сервера до звонков через туннель. Ищите по любому слову — статьи отфильтруются, совпадения подсветятся. Настраиваете вместе с ChatGPT или Claude? Дайте ассистенту ссылку на <a href="setup-for-ai.md">пошаговую инструкцию для ИИ</a> — в ней точные команды и правила безопасности.</p>
 
       <p class="part">Начало</p>
 
@@ -76,7 +76,7 @@
         <ul>
           <li><b>Сервер</b> — ваш VPS с доступом по SSH. Можно поставить промежуточный сервер, тогда соединение идёт «компьютер → промежуточный → сервер выхода».</li>
           <li><b>Ключ</b> — файл SSH-ключа на вашем устройстве. Паролей приложение не хранит.</li>
-          <li><b>Агент</b> — небольшая программа на сервере. С ней через туннель идут TCP и UDP: звонки, игры, QUIC. Без неё работает только TCP.</li>
+          <li><b>Агент</b> — небольшая программа на сервере. Через неё идут TCP и UDP: звонки, игры, QUIC. Встроенному SSH она обязательна; без неё работает только системный OpenSSH и только по TCP.</li>
           <li><b>Локальный прокси</b> — SOCKS5-порт на вашем компьютере, например <code>127.0.0.1:1080</code>. Через него идёт выбранный трафик, его же можно указать в браузере вручную.</li>
           <li><b>Перехват</b> — направляет в туннель отмеченные программы целиком, без настройки прокси в каждой. Всё остальное идёт напрямую.</li>
         </ul>
@@ -95,11 +95,17 @@
 
       <article class="doc" id="keys" data-keywords="ssh-keygen ed25519 ключ authorized_keys ssh-copy-id wsl windows команды публичный приватный">
         <h2><a href="#keys">SSH-ключ</a></h2>
-        <p>Создайте ключ на компьютере. На macOS и Linux — в Терминале, на Windows — в WSL или PowerShell:</p>
-        <pre><code>ssh-keygen -t ed25519 -f ~/.ssh/secret-tunnel -C "secret-tunnel"</code></pre>
+        <p>Создайте ключ на компьютере. На вопрос о пароле ключа дважды нажмите Enter. macOS и Linux, Терминал:</p>
+        <pre><code>mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/secret-tunnel -C "secret-tunnel"</code></pre>
+        <p>Windows, PowerShell (без папки <code>.ssh</code> ключ не сохранится):</p>
+        <pre><code>New-Item -ItemType Directory -Force $env:USERPROFILE\.ssh | Out-Null
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\secret-tunnel -C "secret-tunnel"</code></pre>
         <p>Добавьте публичную часть на сервер. Порт и пользователя замените своими:</p>
         <pre><code>ssh-copy-id -i ~/.ssh/secret-tunnel.pub -p 2222 user@203.0.113.10</code></pre>
-        <p>Если <code>ssh-copy-id</code> нет, скопируйте содержимое файла <code>~/.ssh/secret-tunnel.pub</code> в конец <code>~/.ssh/authorized_keys</code> на сервере. Проверьте вход:</p>
+        <p>На Windows вместо <code>ssh-copy-id</code>:</p>
+        <pre><code>type $env:USERPROFILE\.ssh\secret-tunnel.pub | ssh -p 2222 user@203.0.113.10 "mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh &amp;&amp; cat &gt;&gt; ~/.ssh/authorized_keys &amp;&amp; chmod 600 ~/.ssh/authorized_keys"</code></pre>
+        <p>Проверьте вход:</p>
         <pre><code>ssh -i ~/.ssh/secret-tunnel -p 2222 user@203.0.113.10 'echo ok'</code></pre>
         <p>Для цепочки серверов публичную часть того же ключа добавьте на оба сервера: приложение входит на каждый одним и тем же ключом.</p>
         <p class="note">Приватный ключ (<code>secret-tunnel</code> без <code>.pub</code>) никому не отправляйте. Ключи с паролем (passphrase) пока не поддерживаются.</p>
@@ -107,16 +113,17 @@
 
       <article class="doc" id="agent" data-keywords="агент udp-agent install-server-agent установка обновление откат rollback звонки udp quic tar.gz">
         <h2><a href="#agent">Агент на сервере</a></h2>
-        <p>С агентом через туннель идут и TCP, и UDP. Он запускается по SSH только на время подключения, не требует открытых портов, служб и sudo.</p>
+        <p>Агент нужен встроенному SSH (он выбран по умолчанию): через него идут и TCP, и UDP. Без агента подключение остановится с ошибкой <code>AGENT_MISSING</code>; системный OpenSSH работает без агента, но только по TCP. Агент запускается по SSH на время подключения, не требует открытых портов, служб и sudo.</p>
         <ol>
           <li>Скачайте серверный архив со страницы <a href="releases.html">релизов</a>: <code>SecretTunnel-X.Y.Z-server-linux-x86_64.tar.gz</code>.</li>
           <li>Скопируйте его на сервер и распакуйте:
             <pre><code>scp -P 2222 SecretTunnel-*-server-linux-x86_64.tar.gz user@203.0.113.10:
 ssh -p 2222 user@203.0.113.10
-tar xzf SecretTunnel-*-server-linux-x86_64.tar.gz &amp;&amp; cd server</code></pre></li>
+mkdir -p st-agent &amp;&amp; tar xzf SecretTunnel-*-server-linux-x86_64.tar.gz -C st-agent
+cd st-agent</code></pre></li>
           <li>Установите: <code>sh install-server-agent.sh</code>. Установщик проверит архитектуру и контрольную сумму, сохранит прежнюю версию и положит агент в <code>~/.local/bin</code>.</li>
         </ol>
-        <p>Откат к предыдущей версии: <code>sh install-server-agent.sh --rollback</code>. Обновляйте агент вместе с приложением: у них общий номер версии, слишком старый агент приложение отклонит с понятной ошибкой.</p>
+        <p>Проверка: <code>~/.local/bin/secret-tunnel-agent --capabilities</code> выводит версию агента и <code>"tcp":true,"udp":true</code>. Откат к предыдущей версии: <code>sh install-server-agent.sh --rollback</code>. Обновляйте агент вместе с приложением: у них общий номер версии, слишком старый агент приложение отклонит с понятной ошибкой.</p>
         <p>В цепочке агент нужен только на сервере выхода.</p>
       </article>
 

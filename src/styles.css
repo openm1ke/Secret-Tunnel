@@ -449,6 +449,70 @@ input.switch:checked::after { transform: translateX(14px); }
 .sessionApp .appIcon.small.letter { font-size: 10px; }
 @media (max-width: 1100px) { .statsColumns { grid-template-columns: minmax(0, 1fr); } }
 
+/* Speed test */
+.speedPage { display: grid; gap: 14px; align-content: start; }
+.speedHero { grid-template-columns: minmax(0, 1.6fr) minmax(220px, 1fr); align-items: center; gap: 10px 22px; }
+.gauges { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.gauge { margin: 0; display: grid; justify-items: center; gap: 2px; }
+.gauge svg { width: 100%; max-width: 270px; overflow: visible; }
+.gauge figcaption { font-size: 13px; font-weight: 620; color: var(--ink-soft); margin-top: -6px; }
+.gauge .track { fill: none; stroke: var(--panel-sunk); stroke-width: 13; stroke-linecap: round; }
+.gauge .value { fill: none; stroke-width: 13; stroke-linecap: round; transition: stroke-dasharray .35s ease-out; }
+.gauge.rx .value { stroke: var(--rx); }
+.gauge.tx .value { stroke: var(--tx); }
+.gauge .tick line { stroke: #b7c3ca; stroke-width: 1.5; }
+.gauge .tick text { font-size: 9px; fill: var(--muted); text-anchor: middle; font-variant-numeric: tabular-nums; }
+.gauge .needle { stroke: var(--ink); stroke-width: 2.5; stroke-linecap: round; transform-box: view-box; transform-origin: 100px 100px; transition: transform .35s ease-out; }
+.gauge .hub { fill: var(--ink); }
+.gauge .reading { font-size: 30px; font-weight: 700; text-anchor: middle; fill: var(--ink); font-variant-numeric: tabular-nums; }
+.gauge.active.rx .reading { fill: var(--rx); }
+.gauge.active.tx .reading { fill: var(--tx); }
+.gauge .unit { font-size: 10px; text-anchor: middle; fill: var(--muted); }
+@media (prefers-reduced-motion: reduce) { .gauge .value, .gauge .needle { transition: none; } }
+.pings { display: grid; gap: 10px; }
+.pingMeter { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; align-items: baseline; }
+.pingMeter span { font-size: 12.5px; color: var(--muted); }
+.pingMeter strong { font-size: 17px; font-weight: 680; font-variant-numeric: tabular-nums; }
+.pingMeter i { grid-column: 1 / -1; display: block; height: 5px; border-radius: 3px; background: var(--panel-sunk); overflow: hidden; }
+.pingMeter i b { display: block; height: 100%; border-radius: 3px; background: #a9b5bd; transition: width .35s ease-out; }
+.pingMeter.good i b { background: var(--teal); }
+.pingMeter.fair i b { background: #e7a43a; }
+.pingMeter.poor i b { background: var(--red); }
+.pingFacts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 2px 0 0; }
+.pingFacts div { display: grid; gap: 1px; }
+.pingFacts dt { font-size: 12px; color: var(--muted); }
+.pingFacts dd { margin: 0; font-weight: 640; font-variant-numeric: tabular-nums; }
+.speedSteps { grid-column: 1 / -1; display: grid; gap: 8px; }
+.speedSteps ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.speedSteps li { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: var(--panel); }
+.speedSteps li.current { border-color: var(--teal); color: var(--teal-strong); background: var(--teal-wash); font-weight: 620; }
+.speedSteps li.done { color: var(--ink-soft); }
+.speedSteps li.done::before { content: "✓ "; color: var(--teal); }
+.speedProgress { height: 4px; border-radius: 2px; background: var(--panel-sunk); overflow: hidden; }
+.speedProgress i { display: block; height: 100%; background: var(--teal); transition: width .3s linear; }
+.speedTimeline { width: 100%; height: 62px; }
+.speedTimeline.empty { height: 0; }
+.speedTimeline path { fill: none; stroke-width: 1.6; vector-effect: non-scaling-stroke; }
+.speedTimeline .rx { stroke: var(--rx); }
+.speedTimeline .tx { stroke: var(--tx); }
+.speedKinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.speedKind { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 14px; display: grid; grid-template-rows: auto 1fr auto; gap: 6px; }
+.speedKind h3 { font-size: 14.5px; font-weight: 680; }
+.speedKind p { font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; }
+.speedKind footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.speedKind footer span { font-size: 12px; color: var(--muted); }
+.speedKind.running { border-color: var(--teal); box-shadow: inset 0 0 0 1px var(--teal); }
+.metrics.speedResults { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tableScroll { overflow-x: auto; }
+.speedTable td { white-space: nowrap; }
+.speedTable small { color: var(--muted); }
+.barCell { position: relative; display: inline-block; min-width: 70px; text-align: right; }
+.barCell i { position: absolute; right: 0; bottom: -3px; height: 3px; border-radius: 2px; background: var(--rx); opacity: .45; max-width: 100%; }
+@media (max-width: 1100px) {
+  .speedHero { grid-template-columns: minmax(0, 1fr); }
+  .speedKinds, .metrics.speedResults { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (min-width: 1680px) { .metrics { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
 @media (max-width: 1180px) {
   .split { grid-template-columns: 1fr; }

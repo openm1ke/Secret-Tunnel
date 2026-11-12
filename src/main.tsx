@@ -1,5 +1,6 @@
 import DomainsPanel from "./DomainsPanel";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
+import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
@@ -14,6 +15,7 @@ import {
   Eye,
   EyeOff,
   FolderOpen,
+  Gauge,
   Globe,
   HelpCircle,
   LayoutGrid,
@@ -122,7 +124,7 @@ type TunnelStatus = {
 type Leak = { app: string; process: string; path: string; rule: string; flows: number };
 /** A program a selected application started that was given a rule while running. */
 type Followed = { app: string; process: string; rule: string };
-type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "settings";
+type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "speed" | "settings";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
 type RedirectStatus = { running: boolean; starting: boolean; platform: string; requires_administrator: boolean; supports_system_ssh: boolean; supports_domains: boolean; setup_message: string; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
@@ -281,6 +283,8 @@ function App() {
   const [appsError, setAppsError] = useState("");
   const [appSearch, setAppSearch] = useState("");
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [speedLive, setSpeedLive] = useState<SpeedLive>(emptyLive);
+  const [speedHistory, setSpeedHistory] = useState<SpeedRun[]>([]);
   const [leaks, setLeaks] = useState<Leak[]>([]);
   const [followed, setFollowed] = useState<Followed[]>([]);
   const [selectedAppsOnly, setSelectedAppsOnly] = useState(false);
@@ -540,6 +544,33 @@ function App() {
     return () => window.clearInterval(timer);
   }, [activeTab, redirect.running, isMac]);
 
+  // Speed tests: the gauges follow a running test closely, history reloads
+  // when one finishes.
+  useEffect(() => {
+    if (activeTab !== "speed") return;
+    invoke<SpeedRun[]>("speedtest_history").then(setSpeedHistory).catch(() => undefined);
+  }, [activeTab]);
+  useEffect(() => {
+    if (activeTab !== "speed" && !speedLive.running) return;
+    let stopped = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await invoke<SpeedLive>("speedtest_status");
+        if (stopped) return;
+        setSpeedLive((previous) => {
+          if (previous.running && !next.running) invoke<SpeedRun[]>("speedtest_history").then(setSpeedHistory).catch(() => undefined);
+          return next;
+        });
+        timer = window.setTimeout(poll, next.running ? 300 : 2000);
+      } catch {
+        timer = window.setTimeout(poll, 2000);
+      }
+    };
+    poll();
+    return () => { stopped = true; window.clearTimeout(timer); };
+  }, [activeTab, speedLive.running]);
+
   // Session history refreshes while the statistics are on screen.
   useEffect(() => {
     if (activeTab !== "stats") return;
@@ -569,6 +600,7 @@ function App() {
     { tab: "applications", label: "Приложения", icon: <LayoutGrid size={17} />, badge: redirect.running ? "вкл" : undefined },
     { tab: "domains", label: "Домены", icon: <Globe size={17} /> },
     { tab: "stats", label: "Статистика", icon: <ChartColumn size={17} /> },
+    { tab: "speed", label: "Скорость", icon: <Gauge size={17} />, badge: speedLive.running ? "тест" : undefined },
     { tab: "settings", label: "Настройки", icon: <Settings size={17} /> },
   ];
 
@@ -1034,6 +1066,13 @@ function App() {
                 })}
                 onStop={() => runAction("disconnect", () => invoke<string>("stop_redirect"))} />
             </>
+          )}
+
+          {activeTab === "speed" && (
+            <SpeedPanel connected={connected} live={speedLive} history={speedHistory} serverPing={connected ? latestPing : null}
+              onStart={(kind) => invoke("speedtest_start", { kind }).then(() => invoke<SpeedLive>("speedtest_status").then(setSpeedLive)).catch((error) => setMessage({ text: String(error), error: true }))}
+              onCancel={() => invoke("speedtest_cancel").catch(() => undefined)}
+              onClear={() => invoke<SpeedRun[]>("speedtest_clear").then(setSpeedHistory).catch(() => undefined)} />
           )}
 
           {activeTab === "stats" && (

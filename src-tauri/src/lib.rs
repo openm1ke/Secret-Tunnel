@@ -27,6 +27,7 @@ fn background_command(program: &str) -> Command {
 
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
+mod speedtest;
 mod stats;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -350,6 +351,7 @@ struct AppState {
     traffic: Mutex<Vec<TrafficPoint>>,
     ip_cache: Mutex<Option<(u64, String, IpInfo)>>,
     sessions: Mutex<stats::SessionStore>,
+    speed: Mutex<speedtest::SpeedTests>,
 }
 
 fn now_epoch() -> u64 {
@@ -831,6 +833,53 @@ fn finish_session(state: &AppState) {
     if let Ok(mut sessions) = state.sessions.lock() {
         sessions.finish(now_epoch());
     }
+}
+
+/// Start a speed test of the running tunnel through its local proxy.
+#[tauri::command]
+fn speedtest_start(app: tauri::AppHandle, state: State<'_, AppState>, kind: String) -> Result<(), String> {
+    let (host, port, server) = {
+        let mut runtime = state.runtime.lock().map_err(|e| e.to_string())?;
+        let runtime = runtime.as_mut().ok_or("Сначала подключите туннель")?;
+        if let Some(error) = runtime.try_wait()? {
+            return Err(format!("Туннель завершился: {error}"));
+        }
+        (runtime.proxy.host.clone(), runtime.proxy.port, runtime.server.name.clone())
+    };
+    let (route, country) = state
+        .cached_status
+        .lock()
+        .map(|status| (status.ssh_route.clone(), status.country_code.clone()))
+        .unwrap_or_default();
+    let target = speedtest::Target { host, port, server, route, country };
+    state.speed.lock().map_err(|e| e.to_string())?.start(&kind, target, move |run| {
+        if let Ok(mut speed) = app.state::<AppState>().speed.lock() {
+            speed.finish(run);
+        }
+    })
+}
+
+#[tauri::command]
+fn speedtest_status(state: State<'_, AppState>) -> Result<speedtest::Live, String> {
+    Ok(state.speed.lock().map_err(|e| e.to_string())?.status())
+}
+
+#[tauri::command]
+fn speedtest_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    state.speed.lock().map_err(|e| e.to_string())?.cancel();
+    Ok(())
+}
+
+#[tauri::command]
+fn speedtest_history(state: State<'_, AppState>) -> Result<Vec<speedtest::Run>, String> {
+    Ok(state.speed.lock().map_err(|e| e.to_string())?.history())
+}
+
+#[tauri::command]
+fn speedtest_clear(state: State<'_, AppState>) -> Result<Vec<speedtest::Run>, String> {
+    let mut speed = state.speed.lock().map_err(|e| e.to_string())?;
+    speed.clear();
+    Ok(speed.history())
 }
 
 #[tauri::command]
@@ -2036,6 +2085,7 @@ pub fn run() {
         .setup(|app| {
             if let Ok(dir) = app_config_dir("secret-tunnel") {
                 *app.state::<AppState>().sessions.lock().unwrap() = stats::SessionStore::load(dir.join("sessions.json"));
+                *app.state::<AppState>().speed.lock().unwrap() = speedtest::SpeedTests::load(dir.join("speedtests.json"));
             }
             let initial = load_config().unwrap_or_else(|_| default_config());
             report_config_recovery(&app.state::<AppState>());
@@ -2076,6 +2126,11 @@ pub fn run() {
             application_icons,
             session_history,
             clear_session_history,
+            speedtest_start,
+            speedtest_status,
+            speedtest_cancel,
+            speedtest_history,
+            speedtest_clear,
             redirect_leaks,
             redirect_followed,
             start_redirect,
@@ -2113,6 +2168,16 @@ pub fn run() {
 fn shutdown(state: &AppState) {
     state.closing.store(true, Ordering::SeqCst);
     state.control.cancel();
+    // A running speed test stops its curl transfers within a quarter second.
+    if let Ok(speed) = state.speed.lock() {
+        speed.cancel();
+    }
+    for _ in 0..12 {
+        if !state.speed.lock().map(|speed| speed.status().running).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     if let Ok(mut redirect) = state.redirect.lock() {
         let _ = redirect.stop();
     }

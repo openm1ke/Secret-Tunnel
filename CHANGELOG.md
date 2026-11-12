@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.21 — 2026-11-12
+
+- New icon on desktop and Android: a tunnel mouth with the exit light. Android uses an adaptive icon with a monochrome layer for themed icons (Android 13+).
+- Desktop tray and menu-bar icon. Closing the window keeps the app and the tunnel running there; the menu shows the tunnel's state and can open the window, connect, disconnect, check speed, open settings and quit. The icon follows the tunnel: a dark light when off, a yellow light when connected, and arches lighting up in turn while connecting. On macOS the Dock icon brings the window back. Setting: "Сворачивать в трей / строку меню при закрытии окна", on by default.
+- The sidebar counts selected applications as soon as interception runs; it counted their rules until the Applications tab was opened.
+- Statistics count programs an application starts under its own signature as that application: ChatGPT's `codex`, `Codex (Renderer)` and `node` show as ChatGPT.
+- Website with a knowledge base, screenshots and every release: https://openm1ke.github.io/Secret-Tunnel/
+
 ## 0.3.20 — 2026-11-12
 
 - Fixed the Windows release check for application traffic attribution. The client uses a single deadline for matching a flow, and the test waits for the attribution to finish.

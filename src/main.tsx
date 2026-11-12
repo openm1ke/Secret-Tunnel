@@ -180,8 +180,26 @@ function SettingLabel({ children, hint }: { children: React.ReactNode; hint: str
   return <span className="settingLabel"><span>{children}</span><SettingHint text={hint} /></span>;
 }
 
+const TRANSLIT: Record<string, string> = {
+  а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "y", к: "k", л: "l", м: "m",
+  н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "h", ц: "ts", ч: "ch", ш: "sh", щ: "sch",
+  ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya",
+};
+
+// Russian names are the norm here, so they are transliterated: an empty ID
+// would leave «Сохранить» disabled.
 function makeId(name: string) {
-  return name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return [...name.trim().toLowerCase()].map((char) => TRANSLIT[char] ?? char).join("")
+    .replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+// The ID follows the name while it is still the one derived from it and the
+// profile is unsaved; a typed ID or a saved one stays as it is.
+function nextId(key: string, value: unknown, current: { id: string; name: string }, saved: { id: string }[]) {
+  if (key === "id") return String(value);
+  const derived = !current.id || current.id === makeId(current.name);
+  if (key === "name" && derived && !saved.some((profile) => profile.id === current.id)) return makeId(String(value));
+  return current.id;
 }
 
 function phaseOf(status: TunnelStatus): Phase {
@@ -468,12 +486,12 @@ function App() {
 
   function updateServer<K extends keyof ServerProfile>(key: K, value: ServerProfile[K]) {
     serverDraftDirtyRef.current = true;
-    setServerDraft((current) => ({ ...current, [key]: value, id: key === "name" && !current.id ? makeId(String(value)) : current.id }));
+    setServerDraft((current) => ({ ...current, [key]: value, id: nextId(key, value, current, config.servers) }));
   }
 
   function updateProxy<K extends keyof ProxyProfile>(key: K, value: ProxyProfile[K]) {
     proxyDraftDirtyRef.current = true;
-    setProxyDraft((current) => ({ ...current, [key]: value, id: key === "name" && !current.id ? makeId(String(value)) : current.id }));
+    setProxyDraft((current) => ({ ...current, [key]: value, id: nextId(key, value, current, config.proxies) }));
   }
 
   function updateSettings<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {

@@ -206,7 +206,14 @@ pub mod app_usage {
             None => words.join(" "),
         };
         // Windows lines may append the process id: `Discord.exe (1234)`.
-        let app = app.trim().trim_end_matches(|c: char| c == ')' || c.is_ascii_digit()).trim_end_matches(" (").trim().to_owned();
+        // Only a numeric suffix is a pid; "Codex (Renderer)" keeps its name.
+        let app = app.trim();
+        let app = match app.rsplit_once(" (") {
+            Some((name, pid)) if pid.strip_suffix(')').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) => name,
+            _ => app,
+        }
+        .trim()
+        .to_owned();
         if app.is_empty() {
             return;
         }
@@ -308,7 +315,7 @@ pub mod app_usage {
         async fn connections_are_attributed_to_the_engine_lines() {
             reset();
             note_route("[11:13:48] TCP Telegram -> 149.154.167.51:443 via SOCKS5 127.0.0.1:1080");
-            note_route("[11:13:48] UDP Discord Helper -> [2606:4700::1]:50001 via SOCKS5");
+            note_route("[11:13:48] UDP Discord Helper (Renderer) -> [2606:4700::1]:50001 via SOCKS5");
             note_route("[11:13:48] UDP DirectProbe -> unknown:unknown via Direct");
             note_route("[CONN] TCP Discord.exe (4321) -> 1.2.3.4:443 via SOCKS5 proxy");
             let telegram = FlowUsage::start(false, "149.154.167.51:443");
@@ -329,7 +336,7 @@ pub mod app_usage {
             assert!(unattributed >= 55, "unattributed rx {unattributed}");
             usage.retain(|entry| entry.0 != UNATTRIBUTED);
             assert_eq!(usage, vec![
-                ("Discord Helper".to_owned(), 300, 0, 1),
+                ("Discord Helper (Renderer)".to_owned(), 300, 0, 1),
                 ("Discord.exe".to_owned(), 0, 7, 1),
                 ("Telegram".to_owned(), 1000, 10, 1),
             ]);
@@ -1486,7 +1493,7 @@ async fn handle_socks_client(
     logs: &Arc<std::sync::Mutex<Vec<String>>>,
     buffers: DatagramBuffers,
 ) -> Result<(), String> {
-    let request =
+    let mut request =
         match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
             .await
             .map_err(|_| "SOCKS handshake timed out".to_string())?
@@ -1511,6 +1518,10 @@ async fn handle_socks_client(
         .await;
     }
 
+    // DNS over TCP goes to the same reachable resolver as DNS over UDP.
+    if request.port == TUNNEL_DNS.port() && request.host.parse::<std::net::IpAddr>().is_ok() {
+        request.host = TUNNEL_DNS.ip().to_string();
+    }
     let fake_ip = tls_target::is_fake_ip(&request.host);
     let (destination, preface) = if fake_ip {
         // The proxy client sends ClientHello only after SOCKS CONNECT succeeds.
@@ -1699,6 +1710,34 @@ const DNS_IDLE: DnsIdle = DnsIdle {
     unanswered: Duration::from_secs(15),
 };
 
+/// Resolver for DNS that intercepted applications send through the tunnel.
+/// The system resolver is often reachable only from this computer: a home
+/// router, or another VPN's TUN that hijacks port 53 (Clash answers its
+/// 114.114.114.114 locally). Sent from the server, such queries time out and
+/// the application cannot resolve anything.
+const TUNNEL_DNS: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53);
+
+/// A DNS datagram re-addressed to [`TUNNEL_DNS`], with the server it was for.
+fn redirect_dns(packet: &[u8]) -> Option<(Vec<u8>, std::net::SocketAddr)> {
+    let parsed = udp_protocol::parse_packet(packet).ok()?;
+    let udp_protocol::PacketAddress::Socket(address) = parsed.address else { return None };
+    if address.port() != 53 || address == TUNNEL_DNS {
+        return None;
+    }
+    Some((udp_protocol::encode_packet(TUNNEL_DNS, parsed.payload).ok()?, address))
+}
+
+/// A reply from [`TUNNEL_DNS`] shown as coming from the server the
+/// application asked, since resolvers drop answers from other addresses.
+fn restore_dns_source(packet: &[u8], original: std::net::SocketAddr) -> Option<Vec<u8>> {
+    let parsed = udp_protocol::parse_packet(packet).ok()?;
+    if parsed.address != udp_protocol::PacketAddress::Socket(TUNNEL_DNS) {
+        return None;
+    }
+    udp_protocol::encode_packet(original, parsed.payload).ok()
+}
+
 async fn relay_udp_association(
     mut control: TcpStream,
     peer: std::net::SocketAddr,
@@ -1734,6 +1773,8 @@ async fn relay_udp_association(
     let mut usage: Option<Arc<app_usage::FlowUsage>> = None;
     // True while every datagram of this association went to port 53.
     let mut dns_only = true;
+    // The resolver the application asked, while its queries go to TUNNEL_DNS.
+    let mut dns_server: Option<std::net::SocketAddr> = None;
     let mut sent = false;
     let mut answered = false;
     let mut last_activity = tokio::time::Instant::now();
@@ -1761,6 +1802,13 @@ async fn relay_udp_association(
                 };
                 endpoint = Some(source);
                 dns_only &= port == 53;
+                let packet = match redirect_dns(&packet) {
+                    Some((redirected, original)) => {
+                        dns_server = Some(original);
+                        redirected
+                    }
+                    None => packet,
+                };
                 sent = true;
                 last_activity = tokio::time::Instant::now();
                 if sender.try_send_datagram(packet)? {
@@ -1770,9 +1818,11 @@ async fn relay_udp_association(
             }
             received = flow.recv() => {
                 let Some(packet) = received? else { return Ok(()); };
+                let restored = dns_server.and_then(|original| restore_dns_source(&packet, original));
+                let datagram: &[u8] = restored.as_deref().unwrap_or(&packet);
                 if let Some(endpoint) = endpoint {
-                    socket.send_to(&packet, endpoint).await.map_err(|e| e.to_string())?;
-                    let parsed = udp_protocol::parse_packet(&packet).map_err(|e| e.to_string())?;
+                    socket.send_to(datagram, endpoint).await.map_err(|e| e.to_string())?;
+                    let parsed = udp_protocol::parse_packet(datagram).map_err(|e| e.to_string())?;
                     counters.add_rx(parsed.payload.len() as u64);
                     if let Some(usage) = &usage { usage.add_rx(parsed.payload.len() as u64); }
                 }
@@ -1901,6 +1951,29 @@ mod udp_association_tests {
             .expect("unanswered DNS association must still end");
         assert_eq!(result.unwrap(), Ok(()));
         assert_eq!(association.transport.snapshot().active, 0);
+    }
+
+    #[tokio::test]
+    async fn dns_to_a_local_resolver_goes_to_the_tunnel_resolver_and_returns_from_it() {
+        // The echo server answers from wherever the datagram was sent.
+        let association = association(FAST, true).await;
+        let asked = SocketAddr::from(([114, 114, 114, 114], 53));
+        let packet = udp_protocol::encode_packet(asked, b"query").unwrap();
+        let (redirected, original) = redirect_dns(&packet).unwrap();
+        assert_eq!(original, asked);
+        let parsed = udp_protocol::parse_packet(&redirected).unwrap();
+        assert_eq!(parsed.address, udp_protocol::PacketAddress::Socket(TUNNEL_DNS));
+        assert_eq!(parsed.payload, b"query");
+        association.app_udp.send_to(&packet, association.relay).await.unwrap();
+        let mut buffer = [0_u8; 128];
+        let (count, _) = tokio::time::timeout(Duration::from_secs(2), association.app_udp.recv_from(&mut buffer))
+            .await
+            .expect("answer through the multiplexer")
+            .unwrap();
+        // The application sees the answer from the server it asked.
+        assert_eq!(&buffer[..count], &packet[..]);
+        // Other traffic is untouched.
+        assert!(redirect_dns(&udp_protocol::encode_packet(([9, 9, 9, 9], 443).into(), b"x").unwrap()).is_none());
     }
 
     #[tokio::test]

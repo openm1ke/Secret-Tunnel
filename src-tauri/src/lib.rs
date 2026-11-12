@@ -1868,6 +1868,21 @@ fn stop_application_redirect(state: &AppState) -> Result<(), String> {
     }
 }
 
+/// Programs of the selected applications that went around the tunnel.
+#[tauri::command]
+fn redirect_leaks(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let leaks = state.redirect.lock().map_err(|e| e.to_string())?.leaks();
+        return Ok(leaks.into_iter().filter_map(|leak| serde_json::to_value(leak).ok()).collect());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Ok(Vec::new())
+    }
+}
+
 #[tauri::command(async)]
 fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
     let config = load_config()?;
@@ -1885,8 +1900,23 @@ fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
     let (proxy, udp) = proxy;
     #[cfg(target_os = "macos")]
     {
+        // Rules come from the applications as installed now, so programs
+        // added by an update and bundled tools signed under their own
+        // identifier (ChatGPT's `codex`) are intercepted too.
+        let apps = macos_apps::selected(&config.settings.redirect_processes);
+        let mut ids = config.settings.redirect_processes.clone();
+        let mut seen: std::collections::HashSet<String> = ids.iter().map(|id| id.to_ascii_lowercase()).collect();
+        for pattern in apps.iter().flat_map(|app| app.patterns.iter()) {
+            if seen.insert(pattern.to_ascii_lowercase()) {
+                ids.push(pattern.clone());
+            }
+        }
+        let selection = macos_redirect::Selection {
+            bundles: apps.iter().map(|app| (app.name.clone(), PathBuf::from(&app.executable))).collect(),
+            covered: seen,
+        };
         let value = macos_redirect::profile(
-            &config.settings.redirect_processes,
+            &ids,
             &config.settings.domain_rules,
             &proxy.host,
             proxy.port,
@@ -1902,10 +1932,11 @@ fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
             &value,
             Arc::clone(&state.logs),
             config.settings.hide_sensitive,
+            selection,
         )?;
         log_line(
             &state.logs,
-            "Запрошен запуск перехвата macOS; ожидаем подтверждение расширения",
+            format!("Запрошен запуск перехвата macOS: {} приложений, {} правил; ожидаем подтверждение расширения", apps.len(), ids.len()),
         );
         Ok("Запускаем расширение ProxyBridge. При первом запуске разрешите расширение и сетевую конфигурацию в настройках macOS".into())
     }
@@ -2003,6 +2034,7 @@ pub fn run() {
             application_icons,
             session_history,
             clear_session_history,
+            redirect_leaks,
             start_redirect,
             stop_redirect,
             save_server,

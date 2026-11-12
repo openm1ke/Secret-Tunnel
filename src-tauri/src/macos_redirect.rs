@@ -1,8 +1,10 @@
 //! ProxyBridge macOS CLI adapter (profile contract checked against 4.1.2,
 //! cb897b017a88a142ec803c3af138b0ad75c2ae12). No Windows profile translation.
 use crate::app_redirect::{DomainStats, RedirectStatus};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
+    collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
@@ -137,12 +139,68 @@ struct Progress {
     error: String,
 }
 
+/// The selected applications and every identifier the running rules cover.
+#[derive(Clone, Default)]
+pub struct Selection {
+    /// Application name and bundle path.
+    pub bundles: Vec<(String, PathBuf)>,
+    /// Lower-case identifiers and process names in the rules.
+    pub covered: HashSet<String>,
+}
+
+/// A program started by a selected application whose connections went direct.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Leak {
+    pub app: String,
+    pub process: String,
+    pub path: String,
+    /// The rule that would intercept it: its signing identifier, else its name.
+    pub rule: String,
+    pub flows: u64,
+}
+
 #[derive(Default)]
 pub struct RedirectState {
     child: Option<Child>,
     progress: Arc<Mutex<Progress>>,
     started: Option<Instant>,
     error: String,
+    selection: Selection,
+    /// Connections the engine let go direct, by process name.
+    direct: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+/// The executable of a running process.
+fn executable_path(pid: u32) -> Option<PathBuf> {
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length = unsafe { libc::proc_pidpath(pid as i32, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(PathBuf::from(String::from_utf8(buffer).ok()?))
+}
+
+/// One `ps -axo pid=,ppid=,comm=` line. Columns are right-aligned, so fields
+/// are separated by runs of spaces; the path itself may contain spaces.
+fn process_line(line: &str) -> Option<(u32, (u32, PathBuf))> {
+    let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+    let (ppid, path) = rest.trim_start().split_once(char::is_whitespace)?;
+    let path = path.trim_start();
+    (!path.is_empty()).then(|| Some((pid.parse().ok()?, (ppid.parse().ok()?, PathBuf::from(path)))))?
+}
+
+/// The process of an engine line that went direct:
+/// `[12:00:00] TCP node -> 1.2.3.4:443 via Direct`.
+fn direct_process(line: &str) -> Option<&str> {
+    let (left, right) = line.split_once(" -> ")?;
+    if !right.ends_with(" via Direct") {
+        return None;
+    }
+    let left = left.trim_start();
+    let left = if left.starts_with('[') { left.split_once("] ")?.1 } else { left };
+    let (_, process) = left.split_once(' ')?; // protocol
+    Some(process.trim()).filter(|process| !process.is_empty())
 }
 
 impl RedirectState {
@@ -198,10 +256,13 @@ impl RedirectState {
         value: &Value,
         logs: Arc<Mutex<Vec<String>>>,
         hide_sensitive: bool,
+        selection: Selection,
     ) -> Result<(), String> {
         if self.child.is_some() {
             return Err("Перехват уже запущен или ожидает разрешения macOS".into());
         }
+        self.selection = selection;
+        self.direct = Arc::default();
         let executable = component(executable)?;
         self.progress = Arc::new(Mutex::new(Progress {
             message: "Ожидаем запуск расширения. При первом запуске разрешите ProxyBridge в настройках macOS".into(),
@@ -237,8 +298,16 @@ impl RedirectState {
         if let Some(stdout) = child.stdout.take() {
             let progress = self.progress.clone();
             let logs = logs.clone();
+            let direct = self.direct.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Some(process) = direct_process(&line) {
+                        if let Ok(mut direct) = direct.lock() {
+                            if direct.len() < 2048 || direct.contains_key(process) {
+                                *direct.entry(process.to_owned()).or_default() += 1;
+                            }
+                        }
+                    }
                     #[cfg(feature = "embedded-ssh")]
                     crate::embedded_ssh::app_usage::note_route(&line);
                     let lifecycle = line.starts_with("Extension:")
@@ -280,6 +349,60 @@ impl RedirectState {
         self.child = Some(child);
         self.error.clear();
         Ok(())
+    }
+
+    /// Programs of the selected applications, or started by them, whose
+    /// connections went direct because no rule names them. macOS reports a
+    /// flow under the program's own signing identifier, not its parent's, so
+    /// tools an application launches (node, uv, python, MCP servers) are not
+    /// covered by the application's rule.
+    pub fn leaks(&self) -> Vec<Leak> {
+        if self.child.is_none() || self.selection.bundles.is_empty() {
+            return Vec::new();
+        }
+        let direct = self.direct.lock().map(|d| d.clone()).unwrap_or_default();
+        if direct.is_empty() {
+            return Vec::new();
+        }
+        let Ok(output) = std::process::Command::new("/bin/ps").args(["-axo", "pid=,ppid=,comm="]).output() else {
+            return Vec::new();
+        };
+        let processes: HashMap<u32, (u32, PathBuf)> =
+            String::from_utf8_lossy(&output.stdout).lines().filter_map(process_line).collect();
+        let owner = |path: &Path| {
+            self.selection.bundles.iter().find(|(_, bundle)| path.starts_with(bundle)).map(|(name, _)| name.clone())
+        };
+        let mut leaks: HashMap<String, Leak> = HashMap::new();
+        for (pid, (_, path)) in &processes {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(&flows) = direct.get(name) else { continue };
+            // `ps` shows a program started through PATH by its bare name.
+            let path = &(if path.is_absolute() { None } else { executable_path(*pid) }).unwrap_or_else(|| path.clone());
+            // The application it belongs to, or the nearest selected ancestor.
+            let mut app = owner(path);
+            let mut current = *pid;
+            for _ in 0..32 {
+                if app.is_some() {
+                    break;
+                }
+                let Some((parent, _)) = processes.get(&current) else { break };
+                let Some((_, parent_path)) = processes.get(parent) else { break };
+                app = owner(parent_path);
+                current = *parent;
+            }
+            let Some(app) = app else { continue };
+            let rule = crate::macos_apps::signing_identifier(path)
+                .filter(|id| validate_ids(std::slice::from_ref(id)).is_ok())
+                .or_else(|| Some(name.to_owned()).filter(|n| validate_ids(std::slice::from_ref(n)).is_ok()));
+            let Some(rule) = rule else { continue };
+            if self.selection.covered.contains(&rule.to_ascii_lowercase()) || self.selection.covered.contains(&name.to_ascii_lowercase()) {
+                continue;
+            }
+            leaks.entry(rule.clone()).or_insert(Leak { app, process: name.to_owned(), path: path.to_string_lossy().into_owned(), rule, flows });
+        }
+        let mut leaks: Vec<_> = leaks.into_values().collect();
+        leaks.sort_by(|a, b| b.flows.cmp(&a.flows).then_with(|| a.rule.cmp(&b.rule)));
+        leaks
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
@@ -483,6 +606,47 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn process_lines_with_aligned_columns_and_spaces_in_paths() {
+        assert_eq!(
+            process_line("  801     1 /Applications/Secret Tunnel.app/Contents/MacOS/secret-tunnel"),
+            Some((801, (1, PathBuf::from("/Applications/Secret Tunnel.app/Contents/MacOS/secret-tunnel"))))
+        );
+        assert_eq!(process_line("88417 88335 codex"), Some((88417, (88335, PathBuf::from("codex")))));
+        assert_eq!(process_line("  12  "), None);
+    }
+
+    #[test]
+    fn the_executable_of_a_running_process_is_found() {
+        assert_eq!(executable_path(std::process::id()), std::env::current_exe().ok());
+    }
+
+    #[test]
+    fn direct_lines_name_their_process() {
+        assert_eq!(direct_process("[12:00:01] TCP node -> 1.2.3.4:443 via Direct"), Some("node"));
+        assert_eq!(direct_process("[12:00:01] UDP Codex (Renderer) -> 1.2.3.4:53 via Direct"), Some("Codex (Renderer)"));
+        assert_eq!(direct_process("[12:00:01] TCP node -> 1.2.3.4:443 via SOCKS5 127.0.0.1:1080"), None);
+        assert_eq!(direct_process("Redirecting traffic. Press Ctrl+C to stop."), None);
+    }
+
+    #[test]
+    fn a_program_started_by_a_selected_app_that_went_direct_is_a_leak() {
+        // This test process stands in for a tool the selected app started.
+        let me = std::env::current_exe().unwrap();
+        let name = me.file_name().unwrap().to_str().unwrap().to_owned();
+        let mut state = RedirectState::default();
+        // Not running: nothing to report.
+        assert!(state.leaks().is_empty());
+        state.child = Some(std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap());
+        state.direct.lock().unwrap().insert(name.clone(), 3);
+        // The test binary lives under target/; treat that directory as the app.
+        let bundle = me.parent().unwrap().to_path_buf();
+        state.selection = Selection { bundles: vec![("Test".into(), bundle)], covered: HashSet::new() };
+        let leaks = state.leaks();
+        let _ = state.child.take().map(|mut c| { let _ = c.kill(); c.wait() });
+        assert!(leaks.iter().any(|leak| leak.process == name && leak.flows == 3 && leak.app == "Test"), "{leaks:?}");
+    }
+
     #[test]
     fn graceful_stop_sends_sigterm_instead_of_sigkill() {
         let mut cli = std::process::Command::new("/bin/sh")

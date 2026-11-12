@@ -117,6 +117,8 @@ type TunnelStatus = {
   last_error: string;
 };
 
+/** A program started by a selected application that went around the tunnel. */
+type Leak = { app: string; process: string; path: string; rule: string; flows: number };
 type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "settings";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
@@ -276,6 +278,7 @@ function App() {
   const [appsError, setAppsError] = useState("");
   const [appSearch, setAppSearch] = useState("");
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [leaks, setLeaks] = useState<Leak[]>([]);
   const [selectedAppsOnly, setSelectedAppsOnly] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
@@ -515,6 +518,19 @@ function App() {
   useEffect(() => {
     if ((activeTab === "applications" || activeTab === "stats") && !appsLoaded && !appsScanning) scanApplications();
   }, [activeTab]);
+
+  // Programs the selected applications start under their own signing
+  // identifier go direct until they have a rule of their own.
+  useEffect(() => {
+    if (activeTab !== "applications" || !redirect.running || !isMac) {
+      setLeaks([]);
+      return;
+    }
+    const load = () => invoke<Leak[]>("redirect_leaks").then(setLeaks).catch(() => undefined);
+    load();
+    const timer = window.setInterval(load, 4000);
+    return () => window.clearInterval(timer);
+  }, [activeTab, redirect.running, isMac]);
 
   // Session history refreshes while the statistics are on screen.
   useEffect(() => {
@@ -874,6 +890,28 @@ function App() {
               </header>
 
               <div className="notices">
+                {leaks.length > 0 && (
+                  <div className="notice leakNotice">
+                    <strong>Мимо туннеля идут программы, которые запустили выбранные приложения.</strong>
+                    <span> macOS опознаёт их по собственной подписи, поэтому правило приложения на них не действует.</span>
+                    <ul className="leakList">
+                      {leaks.slice(0, 8).map((leak) => (
+                        <li key={leak.rule} title={leak.path}><code>{leak.process}</code> из {leak.app} · {leak.flows} {leak.flows === 1 ? "соединение" : leak.flows < 5 ? "соединения" : "соединений"}</li>
+                      ))}
+                    </ul>
+                    <button className="primary" disabled={busy !== null} onClick={() => runAction("save", async () => {
+                      const settings = { ...applicationSettings() };
+                      settings.redirect_processes = dedupePatterns([...settings.redirect_processes, ...leaks.map((leak) => leak.rule)]);
+                      await invoke<AppConfig>("save_settings", { settings });
+                      setSettingsDraft(settings);
+                      settingsDirtyRef.current = false;
+                      setLeaks([]);
+                      await invoke<string>("stop_redirect");
+                      await invoke<string>("start_redirect");
+                      return `Через туннель пойдут ещё ${leaks.length} ${leaks.length === 1 ? "программа" : leaks.length < 5 ? "программы" : "программ"}. Перехват перезапущен`;
+                    })}><Play size={15} />Направить через туннель</button>
+                  </div>
+                )}
                 {!connected && redirectSupported && <div className="notice info">Перехват работает поверх подключённого туннеля. Подключитесь на вкладке «Подключение».</div>}
                 {!redirectSupported && redirect.platform !== "unknown" && <div className="notice">Перехват приложений доступен на macOS и Windows.</div>}
                 {redirect.requires_administrator && !redirect.administrator && <div className="notice">Для перехвата запустите Secret Tunnel от имени администратора.</div>}
@@ -940,7 +978,7 @@ function App() {
                       }}><FolderOpen size={16} /></button>
                     </div>
                   </label>
-                  <p className="fieldNote">{isMac ? "Программы сопоставляются по точным bundle ID, включая вложенные .app и .xpc." : "Нужен проверенный комплект ProxyBridge с WinDivert."} При аварии перехвата прямой выход не блокируется. Системный DNS может идти напрямую.</p>
+                  <p className="fieldNote">{isMac ? "Программы сопоставляются по точным идентификаторам подписи: самого приложения, вложенных .app, .xpc, .appex и программ внутри него. DNS-запросы выбранных приложений идут через туннель на 1.1.1.1." : "Нужен проверенный комплект ProxyBridge с WinDivert. Системный DNS может идти напрямую."} При аварии перехвата прямой выход не блокируется.</p>
                 </details>
                 <button disabled={busy !== null} onClick={() => runAction("save", async () => {
                   const settings = applicationSettings();

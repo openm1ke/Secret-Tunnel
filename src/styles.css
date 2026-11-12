@@ -280,6 +280,11 @@ details.advanced > label { margin-bottom: 10px; }
 .notice.bad { border-color: #f1bcb7; background: var(--red-wash); color: var(--red); overflow-wrap: anywhere; }
 .notice a { color: inherit; }
 .notices { display: grid; gap: 8px; }
+.leakNotice { display: grid; gap: 6px; }
+.leakNotice > span { color: inherit; opacity: .85; }
+.leakList { margin: 2px 0 4px; padding-left: 18px; display: grid; gap: 2px; }
+.leakList code { font-weight: 600; }
+.leakNotice > button { justify-self: start; }
 .notices:empty { display: none; }
 
 .settingLabel { display: inline-flex; align-items: center; gap: 6px; font-weight: 560; }

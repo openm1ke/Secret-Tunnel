@@ -269,6 +269,8 @@ pub mod app_usage {
     /// Connections no interception line accounts for.
     pub const UNATTRIBUTED: &str = "Без перехвата (SOCKS)";
     const ROUTE_TTL: Duration = Duration::from_secs(10);
+    const ATTRIBUTION_WAIT: Duration = Duration::from_millis(1500);
+    const ROUTE_POLL_INTERVAL: Duration = Duration::from_millis(50);
     const MAX_ROUTES: usize = 4096;
 
     #[derive(Default)]
@@ -376,13 +378,18 @@ pub mod app_usage {
             } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let pending = flow.clone();
                 let destination = destination.to_owned();
+                let deadline = tokio::time::Instant::now() + ATTRIBUTION_WAIT;
                 runtime.spawn(async move {
-                    for _ in 0..30 {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    loop {
                         if let Some(app) = claim(udp, &destination) {
                             pending.bind(&app);
                             return;
                         }
+                        let now = tokio::time::Instant::now();
+                        if now >= deadline {
+                            break;
+                        }
+                        tokio::time::sleep_until((now + ROUTE_POLL_INTERVAL).min(deadline)).await;
                     }
                     pending.bind(UNATTRIBUTED);
                 });
@@ -435,7 +442,13 @@ pub mod app_usage {
             // No line: counted after the wait as a direct proxy client.
             let browser = FlowUsage::start(false, "example.org:443");
             browser.add_rx(50);
-            tokio::time::sleep(Duration::from_millis(1700)).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while browser.app.get().is_none() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("SOCKS flow should be attributed after the routing deadline");
             browser.add_rx(5);
             // Other tests relay through SOCKS concurrently and add to the
             // shared unattributed counter, so that one is checked as a floor.

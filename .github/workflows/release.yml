@@ -32,6 +32,7 @@ jobs:
       - id: version
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          BUILD_ONLY: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]] || exit 1
           version="${RELEASE_TAG#v}"
@@ -39,7 +40,9 @@ jobs:
           # Apps and the server agent share one version number.
           python3 scripts/set-version.py --check "$version"
           commit=$(git rev-parse HEAD)
-          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+          # A build-only run may verify a fix for a failed tag. Publishing
+          # still requires the source commit to match the tag.
+          if [[ "$BUILD_ONLY" != true ]] && git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
             test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$commit"
           fi
           {

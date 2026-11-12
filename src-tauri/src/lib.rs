@@ -29,6 +29,7 @@ fn background_command(program: &str) -> Command {
 mod embedded_ssh;
 mod speedtest;
 mod stats;
+mod tray;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod app_redirect;
@@ -118,6 +119,10 @@ struct AppSettings {
     /// running, applied without dropping connections.
     #[serde(default = "default_true")]
     follow_child_processes: bool,
+    /// Closing the window keeps the app and the tunnel running in the tray
+    /// or menu bar; "Выйти" in its menu quits.
+    #[serde(default = "default_true")]
+    close_to_tray: bool,
 }
 
 impl Default for AppSettings {
@@ -137,6 +142,7 @@ impl Default for AppSettings {
             clear_logs_on_start: false,
             bypass_vpn_for_ssh: true,
             follow_child_processes: true,
+            close_to_tray: true,
         }
     }
 }
@@ -2098,6 +2104,9 @@ pub fn run() {
             *app.state::<AppState>().cached_status.lock().unwrap() =
                 build_status("stopped", None, &initial, &app.state::<AppState>());
             start_session_workers(app.handle().clone());
+            if let Err(error) = tray::create(app.handle()) {
+                log_line(&app.state::<AppState>().logs, format!("Значок в трее недоступен: {error}"));
+            }
             let should_start = load_config()
                 .map(|config| config.settings.start_tunnel_on_launch)
                 .unwrap_or(false);
@@ -2118,7 +2127,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::CloseRequested { .. }) {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // The window hides; the tunnel keeps running in the tray.
+                let to_tray = load_config().map(|config| config.settings.close_to_tray).unwrap_or(true);
+                if to_tray && window.app_handle().tray_by_id("main").is_some() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
                 shutdown(&window.app_handle().state::<AppState>());
             }
         })
@@ -2165,6 +2181,11 @@ pub fn run() {
             // Quitting from the menu or with Cmd+Q closes no window first.
             if matches!(event, tauri::RunEvent::Exit) {
                 shutdown(&app.state::<AppState>());
+            }
+            // macOS: clicking the Dock icon brings a hidden window back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
+                tray::show_window(app);
             }
         });
 }

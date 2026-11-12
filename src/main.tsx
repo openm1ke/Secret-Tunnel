@@ -4,6 +4,7 @@ import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowDown,
@@ -87,6 +88,7 @@ type AppSettings = {
   clear_logs_on_start: boolean;
   bypass_vpn_for_ssh?: boolean;
   follow_child_processes?: boolean;
+  close_to_tray?: boolean;
 };
 
 type AppConfig = {
@@ -549,6 +551,15 @@ function App() {
     const timer = window.setInterval(load, 4000);
     return () => window.clearInterval(timer);
   }, [activeTab, redirect.running, isMac]);
+
+  // The tray menu connects, disconnects and opens tabs without the window.
+  useEffect(() => {
+    const stops = [
+      listen<{ text: string; error: boolean }>("tray-result", (event) => setMessage({ text: event.payload.text, error: event.payload.error })),
+      listen<string>("tray-open", (event) => setActiveTab(event.payload as Tab)),
+    ];
+    return () => { stops.forEach((stop) => stop.then((unlisten) => unlisten())); };
+  }, []);
 
   // Speed tests: the gauges follow a running test closely, history reloads
   // when one finishes.
@@ -1107,6 +1118,8 @@ function App() {
                 </label>
                 {isMac && <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.bypass_vpn_for_ssh ?? true} onChange={(event) => updateSettings("bypass_vpn_for_ssh", event.target.checked)} />
                   <SettingLabel hint="SSH-соединение к серверу идёт напрямую через Wi-Fi или Ethernet, даже если включён другой VPN (Clash, v2RayTun). Иначе туннель окажется внутри чужого VPN: двойное шифрование и ниже скорость. Выключите, если сервер доступен только через тот VPN.">SSH мимо других VPN</SettingLabel></label>}
+                <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.close_to_tray ?? true} onChange={(event) => updateSettings("close_to_tray", event.target.checked)} />
+                  <SettingLabel hint={`Закрытие окна прячет приложение ${isMac ? "в строку меню" : "в трей"}, туннель продолжает работать. Подключиться, отключиться и выйти можно из меню значка.`}>{isMac ? "Сворачивать в строку меню при закрытии окна" : "Сворачивать в трей при закрытии окна"}</SettingLabel></label>
                 {isMac && <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.follow_child_processes ?? true} onChange={(event) => updateSettings("follow_child_processes", event.target.checked)} />
                   <SettingLabel hint="Программы, которые запускают выбранные приложения (node, python, MCP-серверы, программы обновления), macOS опознаёт по их собственной подписи. Перехват замечает их за пару секунд и добавляет правило, не обрывая соединения. Командные оболочки и мелкие утилиты не добавляются.">Подхватывать программы, запущенные выбранными приложениями</SettingLabel></label>}
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.auto_reconnect} onChange={(event) => updateSettings("auto_reconnect", event.target.checked)} />

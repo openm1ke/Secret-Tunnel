@@ -459,12 +459,12 @@ impl Inner {
     /// Count a UDP datagram of `state` towards a voice-like run of that flow.
     /// DNS never counts: a resolver that shares one flow is not a call either.
     /// Large datagrams count only towards the flow's volume, see `tcp_flight`.
-    fn note_datagram(&self, state: &State, data: &[u8]) {
+    fn note_datagram(&self, state: &State, data: &[u8], outgoing: bool) {
         if !self.tcp_flight.enabled() || tcp_flight::datagram_port(data) == Some(53) {
             return;
         }
         let now = Instant::now();
-        if state.short_run.lock().unwrap().note(now, data.len()) {
+        if state.short_run.lock().unwrap().note(now, data.len(), outgoing) {
             self.tcp_flight.activate(now);
         }
     }
@@ -1073,7 +1073,7 @@ impl Sender {
             return Err("Flow closed".into());
         }
         let metrics = &inner.counters.diagnostics;
-        inner.note_datagram(&self.state, &data);
+        inner.note_datagram(&self.state, &data, true);
         metrics.udp_tx_attempts.fetch_add(1, Ordering::Relaxed);
         let mut credit = match self.state.window.reserve(data.len()) {
             Ok(credit) => credit,
@@ -1176,7 +1176,7 @@ impl Sender {
             return Err("Flow closed".into());
         }
         if credit && self.state.kind == FlowKind::Udp {
-            inner.note_datagram(&self.state, &data);
+            inner.note_datagram(&self.state, &data, true);
         }
         let mut all_closed = inner.closed.subscribe();
         let mut flow_closed = self.state.closed.subscribe();
@@ -1521,7 +1521,7 @@ fn dispatch(frame: Frame, inner: &Arc<Inner>) -> Result<()> {
                 .bytes_rx
                 .fetch_add(data.len() as u64, Ordering::Relaxed);
             if state.kind == FlowKind::Udp {
-                inner.note_datagram(&state, &data);
+                inner.note_datagram(&state, &data, false);
                 inner
                     .counters
                     .diagnostics

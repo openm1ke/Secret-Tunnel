@@ -682,12 +682,21 @@ async fn only_a_voice_like_run_on_one_flow_caps_tcp_and_dns_never_does() {
         bulk_peer.recv().await.unwrap().unwrap();
     }
     assert!(!interactive(&client) && !interactive(&server));
-    // A call: twelve short datagrams on one flow reach both ends.
-    let (voice, mut voice_peer) = udp_flow(&client, &server).await;
-    for index in 0..12 {
-        assert_eq!(interactive(&client), false, "after {index} datagrams");
+    // Short datagrams one way only, like a download's ACKs, are not a call.
+    let (one_way, mut one_way_peer) = udp_flow(&client, &server).await;
+    for _ in 0..20 {
+        assert!(one_way.sender().try_send_datagram(datagram(443, 60)).unwrap());
+        one_way_peer.recv().await.unwrap().unwrap();
+    }
+    assert!(!interactive(&client) && !interactive(&server));
+    // A call: voice both ways, twelve short datagrams on one flow at each end.
+    let (mut voice, mut voice_peer) = udp_flow(&client, &server).await;
+    for index in 0..6 {
+        assert_eq!(interactive(&client), false, "after {index} exchanges");
         assert!(voice.sender().try_send_datagram(datagram(50_000, 160)).unwrap());
-        voice_peer.recv().await.unwrap().unwrap();
+        let sent = voice_peer.recv().await.unwrap().unwrap();
+        assert!(voice_peer.sender().try_send_datagram(sent.to_vec()).unwrap());
+        voice.recv().await.unwrap().unwrap();
     }
     assert!(interactive(&client) && interactive(&server));
     assert_eq!(

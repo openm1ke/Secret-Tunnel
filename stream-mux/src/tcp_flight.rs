@@ -38,7 +38,8 @@
 //! configured size. It starts there, so a call is protected at once as before,
 //! grows by about one TCP chunk per round trip while `Delivered` returns near
 //! the uncongested path delay and halves when a queue builds up, never below
-//! the configured size. Growth is additive because the delay signal arrives a
+//! the configured size. Like the budget without a call it decides once per
+//! round trip on the mean delay of its own bytes. Growth is additive because the delay signal arrives a
 //! round trip late: doubling overran a 2 Mbit/s, 300 ms path before the queue
 //! showed and doubled voice p95. A fixed 96 KiB
 //! capped every download at 96 KiB per round trip (14.8 Mbit/s at 53 ms) and
@@ -79,6 +80,9 @@ const DETECTION: Duration = Duration::from_millis(500);
 const HOLD: Duration = Duration::from_secs(15);
 /// Short datagrams one flow needs within `DETECTION` to activate the budget.
 const SHORT_RUN: usize = 12;
+/// Short datagrams each direction needs within a window; the quieter one must
+/// also carry at least 30% of the busier one's.
+const MIN_EACH_WAY: usize = 3;
 /// An encoded datagram up to this size counts as short.
 pub(super) const SHORT_DATAGRAM: usize = 512;
 
@@ -116,7 +120,9 @@ fn delay(base: Duration, sample: Duration) -> Delay {
 /// Datagrams sent and received on one flow within the current window.
 pub(super) struct ShortRun {
     since: Instant,
-    count: usize,
+    /// Short datagrams this endpoint sent and received in the window.
+    outgoing: usize,
+    incoming: usize,
     large: usize,
     bytes: usize,
     /// Bytes of the previous window, so a sustained download stays bulk while
@@ -125,16 +131,23 @@ pub(super) struct ShortRun {
 }
 impl ShortRun {
     pub(super) fn new(now: Instant) -> Self {
-        Self { since: now, count: 0, large: 0, bytes: 0, previous_bytes: 0 }
+        Self { since: now, outgoing: 0, incoming: 0, large: 0, bytes: 0, previous_bytes: 0 }
     }
-    /// Count one datagram of `len` bytes; true while the flow keeps a run of
-    /// short datagrams at a call-like volume.
-    pub(super) fn note(&mut self, now: Instant, len: usize) -> bool {
+    /// Count one datagram of `len` bytes, sent by this endpoint when
+    /// `outgoing`; true while the flow keeps a run of short datagrams in both
+    /// directions at a call-like volume.
+    ///
+    /// A call carries voice both ways. Short datagrams in one direction only
+    /// are the ACKs of a download: an Instagram feed's QUIC flows below the
+    /// volume limit held the call budget on 18 of 19 snapshots and capped TCP
+    /// at 96 KiB per round trip (7-12 Mbit/s on an 85 ms path).
+    pub(super) fn note(&mut self, now: Instant, len: usize, outgoing: bool) -> bool {
         let mut elapsed = now.duration_since(self.since);
         if elapsed > DETECTION {
             self.previous_bytes = if elapsed > DETECTION * 2 { 0 } else { self.bytes };
             self.since = now;
-            self.count = 0;
+            self.outgoing = 0;
+            self.incoming = 0;
             self.large = 0;
             self.bytes = 0;
             elapsed = Duration::ZERO;
@@ -144,13 +157,21 @@ impl ShortRun {
             self.large += 1;
             return false;
         }
-        self.count += 1;
+        if outgoing {
+            self.outgoing += 1;
+        } else {
+            self.incoming += 1;
+        }
+        let count = self.outgoing + self.incoming;
+        let (fewer, more) = (self.outgoing.min(self.incoming), self.outgoing.max(self.incoming));
         // Compare rates, not totals: a download reaches twelve ACKs within tens
         // of milliseconds of a window, long before it accumulates its volume.
         let span = elapsed.max(DETECTION / 5).as_micros();
         let allowed = BULK_BYTES as u128 * span / DETECTION.as_micros();
-        self.count >= SHORT_RUN
-            && self.large <= self.count * BULK_RATIO
+        count >= SHORT_RUN
+            && fewer >= MIN_EACH_WAY
+            && fewer * 10 >= more * 3
+            && self.large <= count * BULK_RATIO
             && self.previous_bytes <= BULK_BYTES
             && self.bytes as u128 <= allowed
     }
@@ -203,6 +224,29 @@ impl Recent {
         self.previous.map_or(current, |previous| previous.min(current))
     }
 }
+/// Delay of the budget's own bytes within one round trip.
+#[derive(Default)]
+struct Round {
+    start: Option<Instant>,
+    /// Nanoseconds times bytes, and those bytes.
+    delay_bytes: u128,
+    bytes: u128,
+}
+impl Round {
+    /// Add one `Delivered`; at the end of a round, the byte-weighted mean
+    /// delay of its charged bytes, if any were acknowledged.
+    fn add(&mut self, sample: Duration, bytes: usize, now: Instant, length: Duration) -> Option<Duration> {
+        self.delay_bytes += sample.as_nanos() * bytes as u128;
+        self.bytes += bytes as u128;
+        let start = *self.start.get_or_insert(now);
+        if now.saturating_duration_since(start) < length {
+            return None;
+        }
+        let (delay_bytes, bytes) = (std::mem::take(&mut self.delay_bytes), std::mem::take(&mut self.bytes));
+        self.start = Some(now);
+        (bytes > 0).then(|| Duration::from_nanos((delay_bytes / bytes) as u64))
+    }
+}
 /// Per-round state of the budget without a call.
 #[derive(Default)]
 struct Bulk {
@@ -246,6 +290,8 @@ struct State {
     /// Doubling until the first queue, and again after a call.
     slow_start: bool,
     bulk: Bulk,
+    /// Rounds while a call is active.
+    call: Round,
 }
 pub(super) struct TcpFlight {
     available: Arc<Semaphore>,
@@ -282,6 +328,7 @@ impl TcpFlight {
                 recent: Recent::default(),
                 slow_start: true,
                 bulk: Bulk::default(),
+                call: Round::default(),
             }),
         })
     }
@@ -313,6 +360,7 @@ impl TcpFlight {
         let mut state = self.state.lock().unwrap();
         if state.active_until.replace(now + HOLD).is_none() {
             state.reduced_at = None;
+            state.call = Round::default();
             self.resize(&mut state, self.floor());
         }
     }
@@ -328,22 +376,23 @@ impl TcpFlight {
             self.follow_bulk(state, recent, sample, bytes, now);
             return;
         }
-        match delay(base, sample) {
-            // Additive: `bytes` of a full limit add one TCP chunk. Light
-            // packets were not charged, so they report delay but earn nothing.
-            Delay::Clear if bytes > 0 => {
-                let growth = (bytes * crate::TCP_CHUNK / state.limit.max(1)).max(1024);
-                let limit = (state.limit + growth).min(self.normal);
+        // Once per round trip, on the mean delay of the budget's own bytes:
+        // judging every sample halved the budget on each delay spike of a
+        // jittery Wi-Fi path and held it at the floor. Light packets were
+        // not charged, so they report delay but take no part.
+        let Some(mean) = state.call.add(sample, bytes, now, base.max(ROUND)) else {
+            return;
+        };
+        match delay(base, mean) {
+            // Additive: about one TCP chunk per round trip.
+            Delay::Clear => {
+                let limit = (state.limit + crate::TCP_CHUNK).min(self.normal);
                 self.resize(state, limit);
             }
-            Delay::Clear | Delay::Hold => {}
-            // Packets sent before a reduction still report the old queue.
+            Delay::Hold => {}
             Delay::Queued => {
-                if state.reduced_at.is_none_or(|at| now.duration_since(at) >= sample) {
-                    let limit = (state.limit / 2).max(self.floor());
-                    self.resize(state, limit);
-                    state.reduced_at = Some(now);
-                }
+                let limit = (state.limit / 2).max(self.floor());
+                self.resize(state, limit);
             }
         }
     }
@@ -574,9 +623,11 @@ impl Drop for Reservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// One flow's short datagrams, as `Inner::note_datagram` feeds them.
+    /// One flow's short datagrams, as `Inner::note_datagram` feeds them: a
+    /// call, alternating between the two directions.
     fn note_short(budget: &TcpFlight, run: &mut ShortRun, now: Instant) {
-        if run.note(now, 160) {
+        let outgoing = run.outgoing <= run.incoming;
+        if run.note(now, 160, outgoing) {
             budget.activate(now);
         }
     }
@@ -634,27 +685,56 @@ mod tests {
     fn short_acks_of_a_bulk_download_do_not_look_like_a_call() {
         let budget = TcpFlight::new(MAX, Some(65536));
         let now = Instant::now();
-        // QUIC with an ACK every eighth 1200-byte datagram, slow to fast.
-        for mbit in [1u64, 2, 5, 20] {
+        // QUIC downloads, slow to fast, with an ACK every second or eighth
+        // datagram and a short last packet of a response every twentieth.
+        // At 1 Mbit/s with an ACK every second datagram the volume limit alone
+        // let a feed's flow pass for a call.
+        for (mbit, every) in [(1u64, 2), (1, 8), (2, 2), (5, 8), (20, 8)] {
             let gap = Duration::from_micros(1200 * 8 / mbit);
             let mut run = ShortRun::new(now);
             for index in 0..(2_000_000 / gap.as_micros() as u64) {
                 let at = now + gap * index as u32;
-                if run.note(at, 1200) {
+                let len = if index % 20 == 19 { 300 } else { 1200 };
+                if run.note(at, len, false) {
                     budget.activate(at);
                 }
-                if index % 8 == 7 && run.note(at, 60) {
+                if index % every == every - 1 && run.note(at, 60, true) {
                     budget.activate(at);
                 }
             }
-            assert!(!budget.snapshot().interactive, "{mbit} Mbit/s QUIC looked like a call");
+            assert!(!budget.snapshot().interactive, "{mbit} Mbit/s QUIC, ACK per {every}, looked like a call");
         }
+        // Short datagrams one way only, like a game server's state updates.
+        let mut run = ShortRun::new(now);
+        for index in 0..100u64 {
+            if run.note(now + Duration::from_millis(10 * index), 120, false) {
+                budget.activate(now);
+            }
+        }
+        assert!(!budget.snapshot().interactive);
         // A video call: 50 voice packets and 150 video packets per second each way.
         let mut run = ShortRun::new(now);
         for index in 0..100u64 {
             let at = now + Duration::from_millis(5 * index);
-            let len = if index % 4 == 0 { 160 } else { 1200 };
-            if run.note(at, len) {
+            let len = if index % 8 < 2 { 160 } else { 1200 };
+            if run.note(at, len, index % 2 == 0) {
+                budget.activate(at);
+            }
+        }
+        assert!(budget.snapshot().interactive);
+    }
+    #[test]
+    fn a_call_with_a_quieter_side_still_counts() {
+        let budget = TcpFlight::new(MAX, Some(65536));
+        let now = Instant::now();
+        // 50 voice packets per second out, 20 back (comfort noise and RTCP).
+        let mut run = ShortRun::new(now);
+        for index in 0..25u64 {
+            let at = now + Duration::from_millis(20 * index);
+            if run.note(at, 160, true) {
+                budget.activate(at);
+            }
+            if index % 5 < 2 && run.note(at, 80, false) {
                 budget.activate(at);
             }
         }
@@ -697,22 +777,29 @@ mod tests {
         // Activation starts at the configured size, as the fixed budget did.
         budget.activate(now);
         assert_eq!(budget.snapshot().effective_bytes, floor);
-        // Fast delivery: one round trip of a full limit adds about one chunk.
-        for index in 0..64 {
-            round(&budget, 1, 16384, now + ms(index), ms(52)).await;
+        // Fast delivery: each round trip adds one chunk.
+        for index in 1..=8 {
+            round(&budget, 1, 16384, now + ms(50 * index), ms(52)).await;
         }
         let grown = budget.snapshot().effective_bytes;
-        assert!(grown > floor + 6 * 16384 && grown < floor + 64 * 16384, "grew to {grown}");
+        assert_eq!(grown, floor + 7 * 16384);
         // A continuing call does not reset what the delay has earned.
         budget.activate(now + ms(100));
         assert_eq!(budget.snapshot().effective_bytes, grown);
-        // A queue halves it, at most once per round trip, never below the floor.
-        round(&budget, 1, 16384, now + ms(200), ms(150)).await;
+        // One delay spike among a round's deliveries is jitter, not a queue.
+        // (`round` reports a delivery at send time plus its delay.)
+        round(&budget, 1, 16384, now + ms(312), ms(150)).await;
+        for index in 0..9 {
+            round(&budget, 1, 16384, now + ms(410 + 5 * index), ms(52)).await;
+        }
+        assert_eq!(budget.snapshot().effective_bytes, grown);
+        // A queue halves it, once per round trip, never below the floor.
+        round(&budget, 1, 16384, now + ms(500), ms(150)).await;
         assert_eq!(budget.snapshot().effective_bytes, grown / 2);
-        round(&budget, 1, 16384, now + ms(201), ms(150)).await;
+        round(&budget, 1, 16384, now + ms(510), ms(150)).await;
         assert_eq!(budget.snapshot().effective_bytes, grown / 2);
         for index in 0..10 {
-            round(&budget, 1, 16384, now + ms(500 + 200 * index), ms(150)).await;
+            round(&budget, 1, 16384, now + ms(600 + 160 * index), ms(150)).await;
         }
         assert_eq!(budget.snapshot().effective_bytes, floor);
         // Expiry keeps the floor and slow-starts from it.

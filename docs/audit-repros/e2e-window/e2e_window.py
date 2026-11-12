@@ -259,7 +259,7 @@ class UdpDownload:
 
     SIZE = 1200
 
-    def __init__(self, socks_port, mbit, burst):
+    def __init__(self, socks_port, mbit, burst, acks=0):
         self.source = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.source.bind(("127.0.0.1", 0))
         self.source.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 << 20)
@@ -271,11 +271,12 @@ class UdpDownload:
         while len(reply) < 10:
             reply += self.control.recv(10 - len(reply))
         assert reply[1] == 0, "UDP ASSOCIATE refused"
-        relay = (socket.inet_ntoa(reply[4:8]), int.from_bytes(reply[8:10], "big"))
+        relay = self.relay = (socket.inet_ntoa(reply[4:8]), int.from_bytes(reply[8:10], "big"))
         self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
         self.udp.settimeout(0.2)
-        header = b"\x00\x00\x00\x01" + socket.inet_aton("127.0.0.1") + self.source.getsockname()[1].to_bytes(2, "big")
+        header = self.header = b"\x00\x00\x00\x01" + socket.inet_aton("127.0.0.1") + self.source.getsockname()[1].to_bytes(2, "big")
+        self.acks = acks
         self.udp.sendto(header + b"start", relay)
         _, self.peer = self.source.recvfrom(64)
         self.interval = burst * self.SIZE * 8 / (mbit * 1e6)
@@ -298,11 +299,16 @@ class UdpDownload:
             time.sleep(max(0.0, due - time.monotonic()))
 
     def _receive(self):
+        got = 0
         while not self.stop.is_set():
             try:
                 self.udp.recvfrom(2048)
             except OSError:
                 continue
+            got += 1
+            # A QUIC client's ACK: a short datagram back per `acks` received.
+            if self.acks and got % self.acks == 0:
+                self.udp.sendto(self.header + bytes(40), self.relay)
             if self.counting:
                 self.received += 1
 
@@ -473,6 +479,8 @@ def main():
                         help="also receive 1200-byte UDP datagrams at this rate in Mbit/s, sent in bursts")
     parser.add_argument("--udp-window", default="",
                         help="client UDP receive window as KIB/SLOTS, for example 256/192 like the phone")
+    parser.add_argument("--udp-acks", type=int, default=0,
+                        help="send a 40-byte datagram back per this many --udp-download datagrams, like QUIC ACKs")
     parser.add_argument("--udp-burst", type=int, default=32, help="datagrams per burst for --udp-download")
     parser.add_argument("--tcp-ping", action="store_true",
                         help="report round trips of 16-byte requests every 100 ms on a separate TCP flow")
@@ -547,7 +555,7 @@ def main():
                     if voice:
                         time.sleep(3)
                     ping = TcpPing(args.socks_port) if args.tcp_ping else None
-                    udp = UdpDownload(args.socks_port, args.udp_download, args.udp_burst) if args.udp_download else None
+                    udp = UdpDownload(args.socks_port, args.udp_download, args.udp_burst, args.udp_acks) if args.udp_download else None
                     first = len(samples)
                     amount, elapsed = measure(args.socks_port, endpoints, flows, direction,
                                               args.warmup, args.seconds, voice, ping, udp)
@@ -579,6 +587,8 @@ def main():
                         row["mux_queue_over_100ms"] = f"{late}/{frames}"
                         row["mux_budget_kib"] = sorted({sample[side]["tcp_flight"]["effective_bytes"] // 1024
                                                         for sample in window if sample.get(side)})
+                        row["call_mode_seconds"] = sum(1 for sample in window if sample.get(side)
+                                                       and sample[side]["tcp_flight"].get("interactive"))
                         row["mux_path_delay_ms"] = sorted({sample[side]["tcp_flight"].get("path_delay_ms")
                                                            for sample in window if sample.get(side)} - {None})
                     if args.dns_lookups:

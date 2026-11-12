@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.18 — 2026-11-12
+
+- A UDP flow counts as a call only while it carries short datagrams both ways, the quieter direction at least three per 500 ms and 30% of the busier one. Short datagrams one way are the ACKs of a download: on a phone the Instagram feed's QUIC flows held the call budget on 18 of 19 snapshots and capped TCP at 96 KiB per round trip, 7–12 Mbit/s on an 85 ms path, and Speedtest triggered it during half of its download. Bench, 4 TCP downloads plus a 2 Mbit/s QUIC-like flow with an ACK per two datagrams: call mode 8 s of 10 before, 0 now; a voice stream is still detected.
+- During a call the TCP budget also decides once per round trip on the mean delay of its own bytes. Judging every sample halved it on each delay spike of a jittery path (Wi-Fi with 20 ms jitter) and held it at 96 KiB. On the jitter-free bench voice p95 is 95–99 ms instead of 89 ms on a 10 Mbit/s link with four transfers.
+
 ## 0.3.17 — 2026-11-11
 
 - The apps and the server agent share one version number: agent 0.3.17 is the one built with the 0.3.17 apps (the agent was 0.3.13 next to app 0.3.16). `scripts/set-version.py X.Y.Z` writes it to every version file, including the Android versionCode, and the release workflow refuses a tag that any of them does not match (`--check`).

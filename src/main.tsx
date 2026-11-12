@@ -374,12 +374,14 @@ function App() {
     }
   }
 
-  // Icons load in the background for the apps on screen, a batch at a time.
+  // Icons load in the background for the apps on screen, a batch at a time:
+  // .app bundles on macOS, programs and shortcuts by full path on Windows.
   useEffect(() => {
-    if ((activeTab !== "applications" && activeTab !== "stats") || !isMac) return;
+    if (activeTab !== "applications" && activeTab !== "stats") return;
     const source = activeTab === "stats" ? statsKnownApps : visibleApps;
+    const hasIcon = (path: string) => (isMac ? path.endsWith(".app") : /^[a-z]:\\|^\\\\/i.test(path));
     const wanted = source.map((app) => app.executable)
-      .filter((path) => path.endsWith(".app") && !iconRequestsRef.current.has(path)).slice(0, 48);
+      .filter((path) => hasIcon(path) && !iconRequestsRef.current.has(path)).slice(0, 48);
     if (!wanted.length) return;
     wanted.forEach((path) => iconRequestsRef.current.add(path));
     invoke<Record<string, string>>("application_icons", { paths: wanted })

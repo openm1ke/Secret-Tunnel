@@ -218,23 +218,6 @@ fn icon_file(app: &Path) -> Option<PathBuf> {
     fallback.is_file().then_some(fallback)
 }
 
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for (index, shift) in [18, 12, 6, 0].into_iter().enumerate() {
-            out.push(if index <= chunk.len() {
-                TABLE[(n >> shift) as usize & 63] as char
-            } else {
-                '='
-            });
-        }
-    }
-    out
-}
 
 /// A 64-pixel PNG of the bundle's icon as a data URL, converted by the system
 /// `sips` tool; nothing in the bundle is executed.
@@ -259,7 +242,7 @@ fn icon_data_url(app: &Path) -> Option<String> {
     let bytes = std::fs::read(&out).ok();
     let _ = std::fs::remove_file(&out);
     let bytes = bytes.filter(|_| status.is_some_and(|s| s.success()))?;
-    Some(format!("data:image/png;base64,{}", base64(&bytes)))
+    Some(format!("data:image/png;base64,{}", crate::icon_png::base64(&bytes)))
 }
 
 /// Icons of `.app` bundles by path; bundles without an icon file are left out.
@@ -343,14 +326,6 @@ pub fn scan() -> Result<Vec<InstalledApp>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn base64_matches_the_standard_alphabet() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
     #[test]
     fn a_system_app_icon_becomes_a_png_data_url() {
         let icons = icons(&["/System/Applications/Calculator.app".into(), "/nonexistent.app".into()]);

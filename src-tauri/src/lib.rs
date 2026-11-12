@@ -28,7 +28,10 @@ fn background_command(program: &str) -> Command {
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
 mod speedtest;
+mod icon_png;
 mod stats;
+#[cfg(windows)]
+mod windows_icons;
 mod tray;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -1917,7 +1920,9 @@ fn application_icons(paths: Vec<String>) -> Result<std::collections::HashMap<Str
     }
     #[cfg(target_os = "macos")]
     return Ok(macos_apps::icons(&paths));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return Ok(windows_icons::icons(&paths));
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = paths;
         Ok(Default::default())

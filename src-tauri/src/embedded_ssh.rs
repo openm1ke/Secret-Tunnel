@@ -151,6 +151,115 @@ impl TrafficCounters {
 /// connects to the local SOCKS port itself; the connection to the same
 /// destination right after such a line is that application's. Connections
 /// without a line come from programs that use the proxy directly.
+/// Host names applications looked up through the tunnel, so the journal can
+/// say "api.telegram.org" instead of an address.
+pub mod dns_names {
+    use std::collections::HashMap;
+    use std::net::IpAddr;
+    use std::sync::{Mutex, OnceLock};
+
+    const LIMIT: usize = 8192;
+
+    fn names() -> &'static Mutex<HashMap<IpAddr, String>> {
+        static NAMES: OnceLock<Mutex<HashMap<IpAddr, String>>> = OnceLock::new();
+        NAMES.get_or_init(Default::default)
+    }
+
+    pub fn remember(ip: IpAddr, name: &str) {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() {
+            return;
+        }
+        if let Ok(mut names) = names().lock() {
+            if names.len() >= LIMIT {
+                names.clear();
+            }
+            names.insert(ip, name);
+        }
+    }
+
+    pub fn lookup(address: &str) -> Option<String> {
+        let ip: IpAddr = address.parse().ok()?;
+        names().lock().ok()?.get(&ip).cloned()
+    }
+
+    /// Remember the addresses in a DNS answer under the name that was asked.
+    pub fn learn(message: &[u8]) {
+        if let Some((name, addresses)) = answers(message) {
+            for ip in addresses {
+                remember(ip, &name);
+            }
+        }
+    }
+
+    /// A possibly compressed name, and where the record continues after it.
+    fn read_name(message: &[u8], mut at: usize) -> Option<(String, usize)> {
+        let mut labels = Vec::new();
+        let mut end = None;
+        for _ in 0..128 {
+            let length = *message.get(at)? as usize;
+            if length & 0xc0 == 0xc0 {
+                end.get_or_insert(at + 2);
+                at = ((length & 0x3f) << 8) | *message.get(at + 1)? as usize;
+                continue;
+            }
+            if length == 0 {
+                end.get_or_insert(at + 1);
+                return Some((labels.join("."), end?));
+            }
+            labels.push(String::from_utf8_lossy(message.get(at + 1..at + 1 + length)?).into_owned());
+            at += 1 + length;
+        }
+        None
+    }
+
+    fn answers(message: &[u8]) -> Option<(String, Vec<IpAddr>)> {
+        let word = |at: usize| message.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+        if word(2)? & 0x8000 == 0 || word(4)? != 1 {
+            return None; // a query, or not a single question
+        }
+        let (name, mut at) = read_name(message, 12)?;
+        at += 4;
+        let mut addresses = Vec::new();
+        for _ in 0..word(6)?.min(64) {
+            at = read_name(message, at)?.1;
+            let (kind, length) = (word(at)?, word(at + 8)? as usize);
+            at += 10;
+            let data = message.get(at..at + length)?;
+            match (kind, length) {
+                (1, 4) => addresses.push(IpAddr::from(<[u8; 4]>::try_from(data).ok()?)),
+                (28, 16) => addresses.push(IpAddr::from(<[u8; 16]>::try_from(data).ok()?)),
+                _ => {}
+            }
+            at += length;
+        }
+        Some((name, addresses))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn answers_name_the_addresses_including_through_a_cname() {
+            let mut message = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0];
+            for label in ["api", "example", "org"] {
+                message.push(label.len() as u8);
+                message.extend_from_slice(label.as_bytes());
+            }
+            message.extend_from_slice(&[0, 0, 1, 0, 1]);
+            // CNAME api.example.org -> edge.example.org (compressed)
+            message.extend_from_slice(&[0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 60, 0, 7, 4, b'e', b'd', b'g', b'e', 0xc0, 16]);
+            // A edge.example.org 203.0.113.7
+            message.extend_from_slice(&[0xc0, 45, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 203, 0, 113, 7]);
+            super::learn(&message);
+            assert_eq!(super::lookup("203.0.113.7").as_deref(), Some("api.example.org"));
+            // A query teaches nothing.
+            message[2] = 0x01;
+            assert!(super::answers(&message).is_none());
+            assert!(super::lookup("not an address").is_none());
+        }
+    }
+}
+
 pub mod app_usage {
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1537,6 +1646,9 @@ async fn handle_socks_client(
             logs,
             "SOCKS: local fake-IP destination restored from TLS server name",
         );
+        if let Ok(ip) = request.host.parse() {
+            dns_names::remember(ip, &recovered.0);
+        }
         recovered
     } else {
         (request.host.clone(), Vec::new())
@@ -1823,6 +1935,9 @@ async fn relay_udp_association(
                 if let Some(endpoint) = endpoint {
                     socket.send_to(datagram, endpoint).await.map_err(|e| e.to_string())?;
                     let parsed = udp_protocol::parse_packet(datagram).map_err(|e| e.to_string())?;
+                    if parsed.address.port() == 53 {
+                        dns_names::learn(parsed.payload);
+                    }
                     counters.add_rx(parsed.payload.len() as u64);
                     if let Some(usage) = &usage { usage.add_rx(parsed.payload.len() as u64); }
                 }

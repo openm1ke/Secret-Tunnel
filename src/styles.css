@@ -281,6 +281,10 @@ details.advanced > label { margin-bottom: 10px; }
 .notice a { color: inherit; }
 .notices { display: grid; gap: 8px; }
 .leakNotice { display: grid; gap: 6px; }
+.followNotice { display: grid; gap: 6px; }
+.followList { display: flex; flex-wrap: wrap; gap: 6px; }
+.followChip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; background: var(--panel); border: 1px solid #c7dbef; font-size: 12px; }
+.followChip code { font-weight: 600; }
 .leakNotice > span { color: inherit; opacity: .85; }
 .leakList { margin: 2px 0 4px; padding-left: 18px; display: grid; gap: 2px; }
 .leakList code { font-weight: 600; }
@@ -356,6 +360,27 @@ input.switch:checked::after { transform: translateX(14px); }
 .logLine.error time { color: #ff9a90; }
 .logLine.warn .logText span { color: #f6c86b; }
 .logEmpty { padding: 14px; color: #7f95a3; font-family: inherit; }
+.logKinds { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.logBar .logKinds button.kind { min-height: 26px; padding: 0 9px; border-radius: 999px; gap: 6px; color: #8ea3b0; border-color: #2a3e4c; }
+.logBar .logKinds button.kind span { font-size: 11px; color: #6f8796; font-variant-numeric: tabular-nums; }
+.logBar .logKinds button.kind.on { color: #fff; background: #1d3644; border-color: #3f6275; }
+.logBar .logKinds button.kind.on span { color: #a9c2cf; }
+.logBar .logKinds button.kind.error.on { background: #3a1f22; border-color: #7a3b3b; }
+.logBar button.icon.on { background: #1d3644; border-color: #3f6275; color: #fff; }
+.logText { grid-template-columns: minmax(0, 1fr) auto; column-gap: 8px; }
+.logText code { grid-column: 1 / -1; }
+.logText .repeat { font-weight: 600; color: #8ea3b0; font-size: 11px; align-self: start; }
+.flow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 18px; }
+.logLine.connection { align-items: center; }
+.flow strong { font-weight: 600; color: #e8eff3; }
+.flow .arrow { color: #6f8796; }
+.flow small { color: #7f95a3; font-size: 11.5px; }
+.flow .proto { color: #5f7684; }
+.via { margin: 0; display: inline-block; font-style: normal; font-size: 10.5px; font-weight: 700; letter-spacing: .02em; padding: 0 6px; border-radius: 4px; line-height: 16px; font-family: system-ui, sans-serif; }
+.via.tunnel { background: #12403d; color: #7fe0cf; }
+.via.direct { background: #3d3216; color: #f6c86b; }
+.via.block { background: #4a1f22; color: #ff9a90; }
+.logLine.service .logText span { color: #8ea3b0; }
 .logFollow { position: absolute; right: 18px; bottom: 12px; min-height: 28px; background: var(--ping) !important; color: #fff !important; border-color: var(--ping) !important; font-size: 12px; }
 
 /* Domains (DomainsPanel) */

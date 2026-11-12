@@ -14,6 +14,8 @@ use std::{
 
 pub const EXECUTABLE: &str = "/Applications/ProxyBridge.app/Contents/MacOS/ProxyBridge";
 const GUARDIAN_ARG: &str = "--macos-redirect-guardian";
+/// Guardian command: hand the running rules over to the next CLI.
+const HANDOFF: &str = "handoff";
 const PROXY_ID: &str = "secret-tunnel-socks";
 const BYPASS: &[&str] = &[
     "dev.secrettunnel.desktop",
@@ -148,6 +150,17 @@ pub struct Selection {
     pub covered: HashSet<String>,
 }
 
+/// What the rules are built from.
+#[derive(Clone)]
+pub struct Plan {
+    pub ids: Vec<String>,
+    pub host: String,
+    pub port: u16,
+    pub udp: bool,
+    /// Add programs the selected applications start, while running.
+    pub follow: bool,
+}
+
 /// A program started by a selected application whose connections went direct.
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Leak {
@@ -159,6 +172,26 @@ pub struct Leak {
     pub flows: u64,
 }
 
+/// A program of a selected application that was given a rule while running.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Followed {
+    pub app: String,
+    pub process: String,
+    pub rule: String,
+}
+
+/// Shells and small utilities an application runs to do its work. They make
+/// no connections of their own, and a rule naming them would send every
+/// shell on the Mac through the tunnel.
+const NOT_FOLLOWED: &[&str] = &[
+    "zsh", "bash", "sh", "dash", "fish", "tcsh", "csh", "ksh", "login", "env", "sudo", "su", "nohup",
+    "xargs", "sleep", "cat", "ls", "grep", "sed", "awk", "ps", "kill", "tee", "head", "tail", "sort",
+    "uniq", "wc", "tr", "cut", "find", "mkdir", "rm", "cp", "mv", "chmod", "which", "dirname",
+    "basename", "date", "uname", "sw_vers", "defaults", "open", "osascript", "launchctl", "codesign",
+    "security", "plutil", "mdfind", "pgrep", "pkill", "lsof", "sysctl", "id", "whoami", "stat",
+    "getconf", "locale", "arch", "ioreg", "hostname", "tput", "stty", "xattr", "ditto", "tar", "unzip",
+];
+
 #[derive(Default)]
 pub struct RedirectState {
     child: Option<Child>,
@@ -168,6 +201,22 @@ pub struct RedirectState {
     selection: Selection,
     /// Connections the engine let go direct, by process name.
     direct: Arc<Mutex<HashMap<String, u64>>>,
+    /// Running programs of the selected applications: process name → app.
+    related: Arc<Mutex<HashMap<String, String>>>,
+    executable: Option<PathBuf>,
+    logs: Option<Arc<Mutex<Vec<String>>>>,
+    plan: Option<Plan>,
+    followed: Vec<Followed>,
+    /// Signing identifiers already read, by executable path.
+    identities: HashMap<PathBuf, Option<String>>,
+    /// Changes whenever interception starts or stops; ends a follow loop.
+    generation: u64,
+    /// Programs followed since the app started, applied again on the next
+    /// start so short-lived tools are covered from their first connection.
+    learned: Vec<Followed>,
+    /// Set when a connection went direct: the follow loop looks right away.
+    wake: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    watch: Option<Arc<Watch>>,
 }
 
 /// The executable of a running process.
@@ -181,26 +230,224 @@ fn executable_path(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(buffer).ok()?))
 }
 
-/// One `ps -axo pid=,ppid=,comm=` line. Columns are right-aligned, so fields
-/// are separated by runs of spaces; the path itself may contain spaces.
-fn process_line(line: &str) -> Option<(u32, (u32, PathBuf))> {
-    let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
-    let (ppid, path) = rest.trim_start().split_once(char::is_whitespace)?;
-    let path = path.trim_start();
-    (!path.is_empty()).then(|| Some((pid.parse().ok()?, (ppid.parse().ok()?, PathBuf::from(path)))))?
+/// A running program that belongs to a selected application: inside its
+/// bundle, or started by one of its processes.
+#[derive(Clone)]
+struct Member {
+    pid: u32,
+    app: String,
+    name: String,
+    path: PathBuf,
 }
 
-/// The process of an engine line that went direct:
-/// `[12:00:00] TCP node -> 1.2.3.4:443 via Direct`.
-fn direct_process(line: &str) -> Option<&str> {
-    let (left, right) = line.split_once(" -> ")?;
-    if !right.ends_with(" via Direct") {
-        return None;
+/// Every process with its parent and executable, read from the kernel
+/// without starting `ps`, so following can look often.
+fn processes() -> HashMap<u32, (u32, PathBuf)> {
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return HashMap::new();
     }
+    let mut pids = vec![0 as libc::pid_t; count as usize + 64];
+    let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    pids.truncate(count.max(0) as usize);
+    pids.into_iter()
+        .filter(|&pid| pid > 0)
+        .filter_map(|pid| {
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            let read = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+            if read != size {
+                return None;
+            }
+            Some((pid as u32, (info.pbi_ppid, executable_path(pid as u32)?)))
+        })
+        .collect()
+}
+
+/// Every running program of the selected applications.
+fn members(bundles: &[(String, PathBuf)]) -> Vec<Member> {
+    let processes = processes();
+    let owner = |path: &Path| bundles.iter().find(|(_, bundle)| path.starts_with(bundle)).map(|(name, _)| name.clone());
+    let mut found = Vec::new();
+    for (pid, (_, path)) in &processes {
+        let mut app = owner(path);
+        let mut current = *pid;
+        for _ in 0..32 {
+            if app.is_some() {
+                break;
+            }
+            let Some((parent, _)) = processes.get(&current) else { break };
+            let Some((_, parent_path)) = processes.get(parent) else { break };
+            app = owner(parent_path);
+            current = *parent;
+        }
+        let Some(app) = app else { continue };
+        let path = path.clone();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else { continue };
+        found.push(Member { pid: *pid, app, name, path });
+    }
+    found
+}
+
+/// Programs the selected applications start, reported by the kernel as
+/// they start (kqueue process events), so even a tool that connects and
+/// exits within a moment is seen and gets a rule for its next run.
+#[derive(Default)]
+struct Watch {
+    /// Processes of the selected applications to watch, with their app.
+    roots: Mutex<HashMap<u32, String>>,
+    /// Programs started since the follow loop last looked.
+    spawned: Mutex<Vec<Member>>,
+    alive: std::sync::atomic::AtomicBool,
+}
+
+fn child_pids(pid: u32) -> Vec<u32> {
+    let mut pids = vec![0 as libc::pid_t; 256];
+    let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let count = unsafe { libc::proc_listchildpids(pid as libc::pid_t, pids.as_mut_ptr().cast(), size) };
+    pids.truncate(count.max(0) as usize);
+    pids.into_iter().filter(|&p| p > 0).map(|p| p as u32).collect()
+}
+
+fn watch_processes(watch: Arc<Watch>, wake: Arc<(Mutex<bool>, std::sync::Condvar)>) {
+    use std::sync::atomic::Ordering;
+    let queue = unsafe { libc::kqueue() };
+    if queue < 0 {
+        return;
+    }
+    let register = |pid: u32| {
+        let event = libc::kevent {
+            ident: pid as usize,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_CLEAR,
+            fflags: libc::NOTE_FORK | libc::NOTE_EXEC | libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        unsafe { libc::kevent(queue, &event, 1, std::ptr::null_mut(), 0, std::ptr::null()) == 0 }
+    };
+    let note = |pid: u32, app: &str| {
+        let Some(path) = executable_path(pid) else { return };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else { return };
+        if NOT_FOLLOWED.contains(&name.as_str()) {
+            return;
+        }
+        if let Ok(mut spawned) = watch.spawned.lock() {
+            if spawned.len() < 256 {
+                spawned.push(Member { pid, app: app.to_owned(), name, path });
+            }
+        }
+        let (flag, signal) = &*wake;
+        if let Ok(mut flag) = flag.lock() {
+            *flag = true;
+            signal.notify_one();
+        }
+    };
+    let mut watched: HashMap<u32, String> = HashMap::new();
+    let mut events: Vec<libc::kevent> = vec![unsafe { std::mem::zeroed() }; 64];
+    while watch.alive.load(Ordering::Relaxed) {
+        let roots = watch.roots.lock().map(|r| r.clone()).unwrap_or_default();
+        for (pid, app) in roots {
+            if !watched.contains_key(&pid) && register(pid) {
+                watched.insert(pid, app);
+            }
+        }
+        let timeout = libc::timespec { tv_sec: 1, tv_nsec: 0 };
+        let count = unsafe { libc::kevent(queue, std::ptr::null(), 0, events.as_mut_ptr(), events.len() as libc::c_int, &timeout) };
+        for event in events.iter().take(count.max(0) as usize) {
+            let pid = event.ident as u32;
+            let Some(app) = watched.get(&pid).cloned() else { continue };
+            if event.fflags & libc::NOTE_EXEC != 0 {
+                note(pid, &app);
+            }
+            if event.fflags & libc::NOTE_FORK != 0 {
+                for child in child_pids(pid) {
+                    if !watched.contains_key(&child) && register(child) {
+                        watched.insert(child, app.clone());
+                        // The child may have run its program already.
+                        note(child, &app);
+                    }
+                }
+            }
+            if event.fflags & libc::NOTE_EXIT != 0 {
+                watched.remove(&pid);
+            }
+        }
+        if watched.len() > 8192 {
+            watched.clear();
+        }
+    }
+    unsafe { libc::close(queue) };
+}
+
+#[derive(Debug, PartialEq)]
+enum Route {
+    Tunnel,
+    Direct,
+    Block,
+}
+
+/// A connection line of the engine:
+/// `[12:00:00] TCP node -> 1.2.3.4:443 via SOCKS5 127.0.0.1:1080`.
+#[derive(Debug, PartialEq)]
+struct FlowLine<'a> {
+    protocol: &'a str,
+    process: &'a str,
+    destination: &'a str,
+    port: &'a str,
+    route: Route,
+}
+
+fn flow_line(line: &str) -> Option<FlowLine<'_>> {
+    let (left, right) = line.split_once(" -> ")?;
     let left = left.trim_start();
     let left = if left.starts_with('[') { left.split_once("] ")?.1 } else { left };
-    let (_, process) = left.split_once(' ')?; // protocol
-    Some(process.trim()).filter(|process| !process.is_empty())
+    let (protocol, process) = left.split_once(' ')?;
+    if !matches!(protocol, "TCP" | "UDP") {
+        return None;
+    }
+    let (target, via) = right.split_once(" via ")?;
+    let (destination, port) = target.rsplit_once(':')?;
+    let route = match via {
+        "Direct" => Route::Direct,
+        "BLOCK" => Route::Block,
+        proxy if proxy.starts_with("SOCKS") => Route::Tunnel,
+        _ => return None,
+    };
+    let destination = destination.trim_start_matches('[').trim_end_matches(']');
+    Some(FlowLine { protocol, process: process.trim(), destination, port, route })
+}
+
+/// The process of an engine line that went direct.
+#[cfg(test)]
+fn direct_process(line: &str) -> Option<&str> {
+    flow_line(line).filter(|flow| flow.route == Route::Direct).map(|flow| flow.process)
+}
+
+/// A readable journal entry for a connection, with the host name the
+/// application looked up when the tunnel's DNS saw it.
+fn describe_flow(flow: &FlowLine<'_>, app: Option<&str>) -> String {
+    let verb = match flow.route {
+        Route::Tunnel => "через туннель",
+        Route::Direct => "напрямую",
+        Route::Block => "заблокировано",
+    };
+    let who = match app {
+        Some(app) if !flow.process.eq_ignore_ascii_case(app) && !flow.process.starts_with(app) => format!("{} ({app})", flow.process),
+        _ => flow.process.to_owned(),
+    };
+    #[cfg(feature = "embedded-ssh")]
+    let name = crate::embedded_ssh::dns_names::lookup(flow.destination);
+    #[cfg(not(feature = "embedded-ssh"))]
+    let name: Option<String> = None;
+    let target = match name {
+        Some(name) => format!("{name} ({})", flow.destination),
+        None if flow.destination == "unknown" => "неизвестный адрес".to_owned(),
+        None => flow.destination.to_owned(),
+    };
+    let port = if flow.port == "unknown" { String::new() } else { format!(":{}", flow.port) };
+    format!("Соединение {verb}: {who} → {target}{port} {}", flow.protocol)
 }
 
 impl RedirectState {
@@ -209,6 +456,8 @@ impl RedirectState {
             match child.try_wait() {
                 Ok(Some(exit)) => {
                     self.child = None;
+                    self.generation += 1;
+                    self.end_watch();
                     let detail = self
                         .progress
                         .lock()
@@ -250,24 +499,67 @@ impl RedirectState {
         }
     }
 
+    /// Start interception. Programs the applications are already running are
+    /// included from the start.
     pub fn start(
         &mut self,
         executable: &Path,
-        value: &Value,
+        plan: Plan,
         logs: Arc<Mutex<Vec<String>>>,
-        hide_sensitive: bool,
         selection: Selection,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         if self.child.is_some() {
             return Err("Перехват уже запущен или ожидает разрешения macOS".into());
         }
+        self.executable = Some(component(executable)?);
         self.selection = selection;
         self.direct = Arc::default();
-        let executable = component(executable)?;
+        self.followed.clear();
+        self.logs = Some(logs);
+        let follow = plan.follow;
+        self.plan = Some(plan);
+        self.end_watch();
+        if follow {
+            let watch = Arc::new(Watch::default());
+            watch.alive.store(true, std::sync::atomic::Ordering::Relaxed);
+            let (thread_watch, wake) = (watch.clone(), self.wake.clone());
+            std::thread::spawn(move || watch_processes(thread_watch, wake));
+            self.watch = Some(watch);
+        }
+        if follow {
+            // Programs followed earlier in this session, for applications
+            // still selected, then the ones running now.
+            let names: HashSet<&String> = self.selection.bundles.iter().map(|(name, _)| name).collect();
+            let learned: Vec<Followed> = self.learned.iter().filter(|f| names.contains(&f.app)).cloned().collect();
+            self.adopt(learned);
+            let found = self.unfollowed();
+            self.adopt(found);
+        } else {
+            self.refresh_related();
+        }
+        let value = self.profile()?;
         self.progress = Arc::new(Mutex::new(Progress {
             message: "Ожидаем запуск расширения. При первом запуске разрешите ProxyBridge в настройках macOS".into(),
             ..Default::default()
         }));
+        let child = self.spawn(&value)?;
+        self.started = Some(Instant::now());
+        self.child = Some(child);
+        self.error.clear();
+        self.generation += 1;
+        Ok(self.generation)
+    }
+
+    fn profile(&self) -> Result<Value, String> {
+        let plan = self.plan.as_ref().ok_or("Перехват не настроен")?;
+        let mut ids = plan.ids.clone();
+        ids.extend(self.followed.iter().map(|f| f.rule.clone()));
+        profile(&ids, &[], &plan.host, plan.port, plan.udp)
+    }
+
+    /// Start a guardian with a profile and read what it reports.
+    fn spawn(&self, value: &Value) -> Result<Child, String> {
+        let executable = self.executable.as_ref().ok_or("Не найден ProxyBridge")?;
         // This small process owns the CLI and watches our stdin pipe. EOF after
         // a GUI crash also sends SIGTERM, giving the extension time to clear rules.
         let mut child = super::background_command(
@@ -295,21 +587,38 @@ impl RedirectState {
             let _ = child.wait();
             return Err(e.to_string());
         }
+        let logs = self.logs.clone().unwrap_or_default();
         if let Some(stdout) = child.stdout.take() {
             let progress = self.progress.clone();
             let logs = logs.clone();
             let direct = self.direct.clone();
+            let related = self.related.clone();
+            let wake = self.wake.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if let Some(process) = direct_process(&line) {
-                        if let Ok(mut direct) = direct.lock() {
-                            if direct.len() < 2048 || direct.contains_key(process) {
-                                *direct.entry(process.to_owned()).or_default() += 1;
-                            }
-                        }
-                    }
                     #[cfg(feature = "embedded-ssh")]
                     crate::embedded_ssh::app_usage::note_route(&line);
+                    if let Some(flow) = flow_line(&line) {
+                        let app = related.lock().ok().and_then(|r| r.get(flow.process).cloned());
+                        if flow.route == Route::Direct {
+                            let (flag, signal) = &*wake;
+                            if let Ok(mut flag) = flag.lock() {
+                                *flag = true;
+                                signal.notify_one();
+                            }
+                            if let Ok(mut direct) = direct.lock() {
+                                if direct.len() < 2048 || direct.contains_key(flow.process) {
+                                    *direct.entry(flow.process.to_owned()).or_default() += 1;
+                                }
+                            }
+                            // Other programs going direct is the normal case.
+                            if app.is_none() {
+                                continue;
+                            }
+                        }
+                        super::log_line(&logs, describe_flow(&flow, app.as_deref()));
+                        continue;
+                    }
                     let lifecycle = line.starts_with("Extension:")
                         || line.starts_with("Network configuration:")
                         || line == "Redirecting traffic. Press Ctrl+C to stop."
@@ -319,14 +628,12 @@ impl RedirectState {
                             if line == "Redirecting traffic. Press Ctrl+C to stop." {
                                 p.ready = true;
                                 p.message = "Системное расширение перенаправляет новые соединения выбранных приложений".into();
-                            } else {
+                            } else if !p.ready {
                                 p.message = line.clone();
                             }
                         }
                     }
-                    if !hide_sensitive || lifecycle {
-                        super::log_line(&logs, format!("Redirect macOS: {line}"));
-                    }
+                    super::log_line(&logs, format!("Redirect macOS: {line}"));
                 }
             });
         }
@@ -339,23 +646,162 @@ impl RedirectState {
                             p.error = line.chars().take(1200).collect();
                         }
                     }
-                    if !hide_sensitive {
-                        super::log_line(&logs, format!("Redirect macOS: {line}"));
-                    }
+                    super::log_line(&logs, format!("Redirect macOS: {line}"));
                 }
             });
         }
-        self.started = Some(Instant::now());
+        Ok(child)
+    }
+
+    /// Apply the current rules without dropping connections: the running
+    /// CLI is killed without cleanup, so the extension keeps its tunnel and
+    /// rules, and a new CLI replaces only the rules (about a second).
+    fn reload(&mut self) -> Result<(), String> {
+        let value = self.profile()?;
+        let Some(mut old) = self.child.take() else {
+            return Err("Перехват не запущен".into());
+        };
+        if let Some(stdin) = old.stdin.as_mut() {
+            let _ = stdin.write_all(format!("{HANDOFF}\n").as_bytes());
+            let _ = stdin.flush();
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !matches!(old.try_wait(), Ok(Some(_))) {
+            if Instant::now() >= deadline {
+                let _ = old.kill();
+                let _ = old.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The rules are still active; the new CLI only replaces them.
+        self.progress = Arc::new(Mutex::new(Progress {
+            ready: true,
+            message: "Системное расширение перенаправляет новые соединения выбранных приложений".into(),
+            ..Default::default()
+        }));
+        let child = self.spawn(&value)?;
         self.child = Some(child);
-        self.error.clear();
         Ok(())
+    }
+
+    /// Programs of the selected applications that no rule covers yet.
+    fn unfollowed(&mut self) -> Vec<Followed> {
+        let mut members = members(&self.selection.bundles);
+        if let Some(watch) = &self.watch {
+            if let Ok(mut roots) = watch.roots.lock() {
+                roots.clear();
+                roots.extend(members.iter().map(|m| (m.pid, m.app.clone())));
+            }
+            // Programs that started, and perhaps already exited, since the last look.
+            if let Ok(mut spawned) = watch.spawned.lock() {
+                members.append(&mut spawned);
+            }
+        }
+        if let Ok(mut related) = self.related.lock() {
+            related.clear();
+            related.extend(members.iter().map(|m| (m.name.clone(), m.app.clone())));
+        }
+        let mut found: Vec<Followed> = Vec::new();
+        for member in members {
+            if NOT_FOLLOWED.contains(&member.name.as_str()) || self.selection.covered.contains(&member.name.to_ascii_lowercase()) {
+                continue;
+            }
+            let identity = self
+                .identities
+                .entry(member.path.clone())
+                .or_insert_with(|| crate::macos_apps::signing_identifier(&member.path))
+                .clone();
+            if identity.as_deref().is_some_and(|id| self.selection.covered.contains(&id.to_ascii_lowercase())) {
+                continue;
+            }
+            let rule = identity
+                .filter(|id| validate_ids(std::slice::from_ref(id)).is_ok())
+                .or_else(|| Some(member.name.clone()).filter(|n| validate_ids(std::slice::from_ref(n)).is_ok()));
+            let Some(rule) = rule else { continue };
+            if !found.iter().any(|f| f.rule == rule) {
+                found.push(Followed { app: member.app, process: member.name, rule });
+            }
+        }
+        found
+    }
+
+    fn refresh_related(&mut self) {
+        let members = members(&self.selection.bundles);
+        if let Ok(mut related) = self.related.lock() {
+            related.clear();
+            related.extend(members.into_iter().map(|m| (m.name, m.app)));
+        }
+    }
+
+    /// A rule matches a program by signing identifier or by file name, so
+    /// only the rule itself is covered: another program with the same file
+    /// name but a different signature is not.
+    fn adopt(&mut self, found: Vec<Followed>) {
+        for followed in found {
+            if !self.selection.covered.insert(followed.rule.to_ascii_lowercase()) {
+                continue;
+            }
+            if !self.learned.contains(&followed) {
+                self.learned.push(followed.clone());
+            }
+            self.followed.push(followed);
+        }
+    }
+
+    fn end_watch(&mut self) {
+        if let Some(watch) = self.watch.take() {
+            watch.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Lets the follow loop sleep until a connection goes direct.
+    pub fn waker(&self) -> Arc<(Mutex<bool>, std::sync::Condvar)> {
+        self.wake.clone()
+    }
+
+    /// One pass of following the applications: give new programs a rule
+    /// and apply it without dropping connections. Returns what was added.
+    pub fn follow(&mut self, generation: u64) -> Option<Vec<Followed>> {
+        if generation != self.generation || self.child.is_none() {
+            return None;
+        }
+        let ready = self.progress.lock().map(|p| p.ready).unwrap_or(false);
+        if !ready || !self.plan.as_ref().is_some_and(|plan| plan.follow) {
+            self.refresh_related();
+            return Some(Vec::new());
+        }
+        let found = self.unfollowed();
+        if found.is_empty() {
+            return Some(Vec::new());
+        }
+        self.adopt(found.clone());
+        if let Err(error) = self.reload() {
+            self.error = format!("Не удалось обновить правила перехвата: {error}");
+            if let Some(logs) = &self.logs {
+                super::log_line(logs, format!("Перехват: ошибка обновления правил: {error}"));
+            }
+            return None;
+        }
+        if let Some(logs) = &self.logs {
+            let names: Vec<String> = found.iter().map(|f| format!("{} ({})", f.process, f.app)).collect();
+            super::log_line(logs, format!("Перехват: без перезапуска добавлены {}", names.join(", ")));
+        }
+        Some(found)
+    }
+
+    pub fn followed(&self) -> Vec<Followed> {
+        if self.child.is_none() {
+            return Vec::new();
+        }
+        self.followed.clone()
     }
 
     /// Programs of the selected applications, or started by them, whose
     /// connections went direct because no rule names them. macOS reports a
     /// flow under the program's own signing identifier, not its parent's, so
     /// tools an application launches (node, uv, python, MCP servers) are not
-    /// covered by the application's rule.
+    /// covered by the application's rule unless they are followed.
     pub fn leaks(&self) -> Vec<Leak> {
         if self.child.is_none() || self.selection.bundles.is_empty() {
             return Vec::new();
@@ -364,41 +810,23 @@ impl RedirectState {
         if direct.is_empty() {
             return Vec::new();
         }
-        let Ok(output) = std::process::Command::new("/bin/ps").args(["-axo", "pid=,ppid=,comm="]).output() else {
-            return Vec::new();
-        };
-        let processes: HashMap<u32, (u32, PathBuf)> =
-            String::from_utf8_lossy(&output.stdout).lines().filter_map(process_line).collect();
-        let owner = |path: &Path| {
-            self.selection.bundles.iter().find(|(_, bundle)| path.starts_with(bundle)).map(|(name, _)| name.clone())
-        };
         let mut leaks: HashMap<String, Leak> = HashMap::new();
-        for (pid, (_, path)) in &processes {
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            let Some(&flows) = direct.get(name) else { continue };
-            // `ps` shows a program started through PATH by its bare name.
-            let path = &(if path.is_absolute() { None } else { executable_path(*pid) }).unwrap_or_else(|| path.clone());
-            // The application it belongs to, or the nearest selected ancestor.
-            let mut app = owner(path);
-            let mut current = *pid;
-            for _ in 0..32 {
-                if app.is_some() {
-                    break;
-                }
-                let Some((parent, _)) = processes.get(&current) else { break };
-                let Some((_, parent_path)) = processes.get(parent) else { break };
-                app = owner(parent_path);
-                current = *parent;
-            }
-            let Some(app) = app else { continue };
-            let rule = crate::macos_apps::signing_identifier(path)
+        for member in members(&self.selection.bundles) {
+            let Some(&flows) = direct.get(&member.name) else { continue };
+            let rule = crate::macos_apps::signing_identifier(&member.path)
                 .filter(|id| validate_ids(std::slice::from_ref(id)).is_ok())
-                .or_else(|| Some(name.to_owned()).filter(|n| validate_ids(std::slice::from_ref(n)).is_ok()));
+                .or_else(|| Some(member.name.clone()).filter(|n| validate_ids(std::slice::from_ref(n)).is_ok()));
             let Some(rule) = rule else { continue };
-            if self.selection.covered.contains(&rule.to_ascii_lowercase()) || self.selection.covered.contains(&name.to_ascii_lowercase()) {
+            if self.selection.covered.contains(&rule.to_ascii_lowercase()) || self.selection.covered.contains(&member.name.to_ascii_lowercase()) {
                 continue;
             }
-            leaks.entry(rule.clone()).or_insert(Leak { app, process: name.to_owned(), path: path.to_string_lossy().into_owned(), rule, flows });
+            leaks.entry(rule.clone()).or_insert(Leak {
+                app: member.app,
+                process: member.name,
+                path: member.path.to_string_lossy().into_owned(),
+                rule,
+                flows,
+            });
         }
         let mut leaks: Vec<_> = leaks.into_values().collect();
         leaks.sort_by(|a, b| b.flows.cmp(&a.flows).then_with(|| a.rule.cmp(&b.rule)));
@@ -409,6 +837,8 @@ impl RedirectState {
         let Some(mut child) = self.child.take() else {
             return Ok(());
         };
+        self.generation += 1;
+        self.end_watch();
         // Closing the pipe is also the guardian's stop command.
         drop(child.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -496,16 +926,26 @@ pub fn guardian_if_requested() -> bool {
                 let _ = writer.flush();
             }
         });
+        // EOF stops the CLI, which clears the rules. A `handoff` line instead
+        // leaves the rules and the extension's tunnel running for the next CLI,
+        // so rules change without dropping any connection.
         let (closed, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = input.read(&mut [0u8; 1]);
-            let _ = closed.send(());
+            let mut line = String::new();
+            let handoff = input.read_line(&mut line).is_ok_and(|n| n > 0 && line.trim() == HANDOFF);
+            let _ = closed.send(handoff);
         });
         let outcome = loop {
             if let Some(exit) = cli.try_wait().map_err(|e| e.to_string())? {
                 break Ok(exit.code().unwrap_or(1));
             }
-            if rx.try_recv().is_ok() {
+            if let Ok(handoff) = rx.try_recv() {
+                if handoff {
+                    let _ = cli.kill(); // SIGKILL: no cleanup, the rules stay.
+                    let _ = cli.wait();
+                    let _ = output_reader.join();
+                    std::process::exit(0);
+                }
                 break terminate_cli(&mut cli);
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -607,13 +1047,48 @@ mod tests {
         .is_err());
     }
     #[test]
-    fn process_lines_with_aligned_columns_and_spaces_in_paths() {
-        assert_eq!(
-            process_line("  801     1 /Applications/Secret Tunnel.app/Contents/MacOS/secret-tunnel"),
-            Some((801, (1, PathBuf::from("/Applications/Secret Tunnel.app/Contents/MacOS/secret-tunnel"))))
-        );
-        assert_eq!(process_line("88417 88335 codex"), Some((88417, (88335, PathBuf::from("codex")))));
-        assert_eq!(process_line("  12  "), None);
+    fn processes_are_read_from_the_kernel_with_their_parents() {
+        let all = processes();
+        let (parent, path) = all.get(&std::process::id()).expect("this test process");
+        assert_eq!(Some(path.clone()), std::env::current_exe().ok());
+        assert_eq!(*parent, std::os::unix::process::parent_id());
+    }
+
+    #[test]
+    fn programs_a_watched_process_starts_are_reported_even_after_they_exit() {
+        let watch = Arc::new(Watch::default());
+        watch.alive.store(true, std::sync::atomic::Ordering::Relaxed);
+        watch.roots.lock().unwrap().insert(std::process::id(), "Test".into());
+        let wake: Arc<(Mutex<bool>, std::sync::Condvar)> = Arc::default();
+        let thread = { let (w, k) = (watch.clone(), wake.clone()); std::thread::spawn(move || watch_processes(w, k)) };
+        std::thread::sleep(Duration::from_millis(300));
+        // A program that runs for a moment, like `nc -z`.
+        std::process::Command::new("/usr/bin/true").status().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let seen = loop {
+            let seen = watch.spawned.lock().unwrap().iter().any(|m| m.name == "true" && m.app == "Test");
+            if seen || Instant::now() > deadline {
+                break seen;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        watch.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        thread.join().unwrap();
+        assert!(seen, "{:?}", watch.spawned.lock().unwrap().iter().map(|m| m.name.clone()).collect::<Vec<_>>());
+        assert!(*wake.0.lock().unwrap());
+    }
+
+    #[test]
+    fn a_rule_covers_its_identifier_not_every_program_with_that_name() {
+        let mut state = RedirectState::default();
+        state.adopt(vec![Followed { app: "Claude".into(), process: "python".into(), rule: "python-0123abcd".into() }]);
+        assert!(state.selection.covered.contains("python-0123abcd"));
+        // Homebrew's Python has another signature and still needs its own rule.
+        assert!(!state.selection.covered.contains("python"));
+        // Adopting the same rule twice keeps one entry.
+        state.adopt(vec![Followed { app: "Claude".into(), process: "python".into(), rule: "python-0123abcd".into() }]);
+        assert_eq!(state.followed.len(), 1);
+        assert_eq!(state.learned.len(), 1);
     }
 
     #[test]
@@ -645,6 +1120,35 @@ mod tests {
         let leaks = state.leaks();
         let _ = state.child.take().map(|mut c| { let _ = c.kill(); c.wait() });
         assert!(leaks.iter().any(|leak| leak.process == name && leak.flows == 3 && leak.app == "Test"), "{leaks:?}");
+    }
+
+    #[test]
+    fn connection_lines_are_parsed_and_described() {
+        let flow = flow_line("[14:15:49] TCP Discord Helper (Renderer) -> 162.159.135.232:443 via SOCKS5 127.0.0.1:1080").unwrap();
+        assert_eq!(flow, FlowLine { protocol: "TCP", process: "Discord Helper (Renderer)", destination: "162.159.135.232", port: "443", route: Route::Tunnel });
+        assert_eq!(describe_flow(&flow, Some("Discord")), "Соединение через туннель: Discord Helper (Renderer) → 162.159.135.232:443 TCP");
+        let flow = flow_line("[14:15:49] UDP node -> [2606:4700::1]:53 via Direct").unwrap();
+        assert_eq!((flow.destination, &flow.route), ("2606:4700::1", &Route::Direct));
+        assert_eq!(describe_flow(&flow, Some("ChatGPT")), "Соединение напрямую: node (ChatGPT) → 2606:4700::1:53 UDP");
+        let flow = flow_line("[14:15:49] UDP x -> unknown:unknown via BLOCK").unwrap();
+        assert_eq!(describe_flow(&flow, None), "Соединение заблокировано: x → неизвестный адрес UDP");
+        assert!(flow_line("Profile \"Secret Tunnel\": 1 proxies, 3 rules applied").is_none());
+    }
+
+    #[test]
+    fn programs_of_a_selected_app_without_a_rule_are_followed() {
+        // This test binary stands in for a tool the selected app started.
+        let me = std::env::current_exe().unwrap();
+        let name = me.file_name().unwrap().to_str().unwrap().to_owned();
+        let mut state = RedirectState::default();
+        state.selection = Selection { bundles: vec![("Test".into(), me.parent().unwrap().to_path_buf())], covered: HashSet::new() };
+        let found = state.unfollowed();
+        let mine = found.iter().find(|f| f.process == name).expect("the running test binary");
+        assert_eq!(mine.app, "Test");
+        assert_eq!(state.related.lock().unwrap().get(&name).map(String::as_str), Some("Test"));
+        // Once adopted it is covered and not found again.
+        state.adopt(found);
+        assert!(state.unfollowed().iter().all(|f| f.process != name));
     }
 
     #[test]

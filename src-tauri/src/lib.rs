@@ -113,6 +113,10 @@ struct AppSettings {
     /// macOS: SSH to the server bypasses other VPNs' TUN interfaces.
     #[serde(default = "default_true")]
     bypass_vpn_for_ssh: bool,
+    /// macOS: programs the selected applications start get a rule while
+    /// running, applied without dropping connections.
+    #[serde(default = "default_true")]
+    follow_child_processes: bool,
 }
 
 impl Default for AppSettings {
@@ -131,6 +135,7 @@ impl Default for AppSettings {
             start_tunnel_on_launch: false,
             clear_logs_on_start: false,
             bypass_vpn_for_ssh: true,
+            follow_child_processes: true,
         }
     }
 }
@@ -358,8 +363,8 @@ fn log_line(logs: &Arc<Mutex<Vec<String>>>, message: impl Into<String>) {
     let line = format!("[{}] {}", now_epoch(), message.into());
     if let Ok(mut items) = logs.lock() {
         items.push(line);
-        if items.len() > 1000 {
-            let overflow = items.len() - 1000;
+        if items.len() > 4000 {
+            let overflow = items.len() - 4000;
             items.drain(0..overflow);
         }
     }
@@ -1868,6 +1873,21 @@ fn stop_application_redirect(state: &AppState) -> Result<(), String> {
     }
 }
 
+/// Programs the selected applications started that were given a rule while running.
+#[tauri::command]
+fn redirect_followed(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let followed = state.redirect.lock().map_err(|e| e.to_string())?.followed();
+        return Ok(followed.into_iter().filter_map(|f| serde_json::to_value(f).ok()).collect());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        Ok(Vec::new())
+    }
+}
+
 /// Programs of the selected applications that went around the tunnel.
 #[tauri::command]
 fn redirect_leaks(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
@@ -1884,7 +1904,7 @@ fn redirect_leaks(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, 
 }
 
 #[tauri::command(async)]
-fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
+fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let config = load_config()?;
     let proxy = {
         let mut runtime = state.runtime.lock().map_err(|e| e.to_string())?;
@@ -1915,29 +1935,51 @@ fn start_redirect(state: State<'_, AppState>) -> Result<String, String> {
             bundles: apps.iter().map(|app| (app.name.clone(), PathBuf::from(&app.executable))).collect(),
             covered: seen,
         };
-        let value = macos_redirect::profile(
-            &ids,
-            &config.settings.domain_rules,
-            &proxy.host,
-            proxy.port,
-            udp,
-        )?;
+        // Checks the rules and refuses domain rules, which macOS lacks.
+        macos_redirect::profile(&ids, &config.settings.domain_rules, &proxy.host, proxy.port, udp)?;
         let executable = if config.settings.redirect_cli_path.trim().is_empty() {
             default_redirect_cli()
         } else {
             config.settings.redirect_cli_path.clone()
         };
-        state.redirect.lock().map_err(|e| e.to_string())?.start(
+        let rules = ids.len();
+        let plan = macos_redirect::Plan {
+            ids,
+            host: proxy.host.clone(),
+            port: proxy.port,
+            udp,
+            follow: config.settings.follow_child_processes,
+        };
+        let generation = state.redirect.lock().map_err(|e| e.to_string())?.start(
             Path::new(&executable),
-            &value,
+            plan,
             Arc::clone(&state.logs),
-            config.settings.hide_sensitive,
             selection,
         )?;
         log_line(
             &state.logs,
-            format!("Запрошен запуск перехвата macOS: {} приложений, {} правил; ожидаем подтверждение расширения", apps.len(), ids.len()),
+            format!("Запрошен запуск перехвата macOS: {} приложений, {} правил; ожидаем подтверждение расширения", apps.len(), rules),
         );
+        // Follow the applications: programs they start get a rule within a
+        // couple of seconds, without dropping connections.
+        let wake = state.redirect.lock().map_err(|e| e.to_string())?.waker();
+        std::thread::spawn(move || loop {
+            // Look every second, or right away when a connection went
+            // direct: the program that made it is usually still running.
+            {
+                let (flag, signal) = &*wake;
+                let Ok(guard) = flag.lock() else { break };
+                let Ok((mut guard, _)) = signal.wait_timeout_while(guard, std::time::Duration::from_secs(1), |woken| !*woken) else { break };
+                *guard = false;
+            }
+            let state = app.state::<AppState>();
+            let Ok(mut redirect) = state.redirect.lock() else { break };
+            if redirect.follow(generation).is_none() {
+                break;
+            }
+            drop(redirect);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
         Ok("Запускаем расширение ProxyBridge. При первом запуске разрешите расширение и сетевую конфигурацию в настройках macOS".into())
     }
     #[cfg(not(target_os = "macos"))]
@@ -2035,6 +2077,7 @@ pub fn run() {
             session_history,
             clear_session_history,
             redirect_leaks,
+            redirect_followed,
             start_redirect,
             stop_redirect,
             save_server,

@@ -84,6 +84,7 @@ type AppSettings = {
   start_tunnel_on_launch: boolean;
   clear_logs_on_start: boolean;
   bypass_vpn_for_ssh?: boolean;
+  follow_child_processes?: boolean;
 };
 
 type AppConfig = {
@@ -119,6 +120,8 @@ type TunnelStatus = {
 
 /** A program started by a selected application that went around the tunnel. */
 type Leak = { app: string; process: string; path: string; rule: string; flows: number };
+/** A program a selected application started that was given a rule while running. */
+type Followed = { app: string; process: string; rule: string };
 type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "settings";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
@@ -279,6 +282,7 @@ function App() {
   const [appSearch, setAppSearch] = useState("");
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [leaks, setLeaks] = useState<Leak[]>([]);
+  const [followed, setFollowed] = useState<Followed[]>([]);
   const [selectedAppsOnly, setSelectedAppsOnly] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
@@ -524,9 +528,13 @@ function App() {
   useEffect(() => {
     if (activeTab !== "applications" || !redirect.running || !isMac) {
       setLeaks([]);
+      setFollowed([]);
       return;
     }
-    const load = () => invoke<Leak[]>("redirect_leaks").then(setLeaks).catch(() => undefined);
+    const load = () => {
+      invoke<Leak[]>("redirect_leaks").then(setLeaks).catch(() => undefined);
+      invoke<Followed[]>("redirect_followed").then(setFollowed).catch(() => undefined);
+    };
     load();
     const timer = window.setInterval(load, 4000);
     return () => window.clearInterval(timer);
@@ -890,6 +898,14 @@ function App() {
               </header>
 
               <div className="notices">
+                {followed.length > 0 && (
+                  <div className="notice info followNotice">
+                    <strong>Подхвачены на ходу, без перезапуска перехвата:</strong>
+                    <span className="followList">
+                      {followed.map((item) => <span key={item.rule} className="followChip" title={item.rule}><code>{item.process}</code> из {item.app}</span>)}
+                    </span>
+                  </div>
+                )}
                 {leaks.length > 0 && (
                   <div className="notice leakNotice">
                     <strong>Мимо туннеля идут программы, которые запустили выбранные приложения.</strong>
@@ -1044,6 +1060,8 @@ function App() {
                 </label>
                 {isMac && <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.bypass_vpn_for_ssh ?? true} onChange={(event) => updateSettings("bypass_vpn_for_ssh", event.target.checked)} />
                   <SettingLabel hint="SSH-соединение к серверу идёт напрямую через Wi-Fi или Ethernet, даже если включён другой VPN (Clash, v2RayTun). Иначе туннель окажется внутри чужого VPN: двойное шифрование и ниже скорость. Выключите, если сервер доступен только через тот VPN.">SSH мимо других VPN</SettingLabel></label>}
+                {isMac && <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.follow_child_processes ?? true} onChange={(event) => updateSettings("follow_child_processes", event.target.checked)} />
+                  <SettingLabel hint="Программы, которые запускают выбранные приложения (node, python, MCP-серверы, программы обновления), macOS опознаёт по их собственной подписи. Перехват замечает их за пару секунд и добавляет правило, не обрывая соединения. Командные оболочки и мелкие утилиты не добавляются.">Подхватывать программы, запущенные выбранными приложениями</SettingLabel></label>}
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.auto_reconnect} onChange={(event) => updateSettings("auto_reconnect", event.target.checked)} />
                   <SettingLabel hint="Если соединение оборвалось, приложение подключится снова с выбранным сервером и прокси.">Переподключаться автоматически</SettingLabel></label>
                 <label className="inlineNumber">
@@ -1125,7 +1143,7 @@ function App() {
           )}
         </div>
 
-        <LogDock logs={logs} busy={busy !== null}
+        <LogDock logs={logs} busy={busy !== null} hideAddresses={config.settings.hide_sensitive}
           onClear={() => runAction("logs", async () => { await invoke<void>("clear_logs"); return "Журнал очищен"; })}
           onCopied={(text) => copyText(text, "logs")} />
       </section>

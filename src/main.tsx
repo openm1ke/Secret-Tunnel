@@ -1,6 +1,7 @@
 import DomainsPanel from "./DomainsPanel";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
+import AboutPanel, { Release } from "./AboutPanel";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
@@ -19,6 +20,7 @@ import {
   Gauge,
   Globe,
   HelpCircle,
+  Info,
   LayoutGrid,
   Network,
   Play,
@@ -89,8 +91,10 @@ type AppSettings = {
   bypass_vpn_for_ssh?: boolean;
   follow_child_processes?: boolean;
   close_to_tray?: boolean;
+  check_updates?: boolean;
   udp_receive_window?: UdpWindow | null;
   agent_udp_receive_window?: UdpWindow | null;
+  app_added_at?: Record<string, number>;
 };
 
 type UdpWindow = { bytes: number; slots: number };
@@ -136,7 +140,7 @@ type TunnelStatus = {
 type Leak = { app: string; process: string; path: string; rule: string; flows: number };
 /** A program a selected application started that was given a rule while running. */
 type Followed = { app: string; process: string; rule: string };
-type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "speed" | "settings";
+type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "speed" | "settings" | "about";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
 type RedirectStatus = { running: boolean; starting: boolean; platform: string; requires_administrator: boolean; supports_system_ssh: boolean; supports_domains: boolean; setup_message: string; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
@@ -310,10 +314,18 @@ function plural(count: number, one: string, few: string, many: string) {
   return many;
 }
 
+type AppView = "tiles" | "table" | "cards";
+const appViews: { id: AppView; title: string; hint: string }[] = [
+  { id: "tiles", title: "Плитки", hint: "Компактные плитки: значок, название, папка" },
+  { id: "table", title: "Таблица", hint: "Путь, число процессов, трафик и дата включения в одну строку" },
+  { id: "cards", title: "Карточки", hint: "Крупные карточки с путём, трафиком за 30 дней и датой включения" },
+];
+const formatDay = (epoch: number) => new Date(epoch * 1000).toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+
 function appSubtitle(app: InstalledApp) {
   if (app.source === "manual") return "добавлено вручную";
   const helpers = app.patterns.length - 1;
-  const place = app.executable.startsWith("/System/") ? "Системное" : app.executable.startsWith("/Applications/") ? "Программы" : app.executable.replace(/\/[^/]+$/, "");
+  const place = app.executable.startsWith("/System/") ? "Системное" : app.executable.startsWith("/Applications/") ? "Программы" : app.executable.replace(/[\\/][^\\/]+$/, "");
   return helpers > 0 ? `${place} · +${helpers} ${plural(helpers, "процесс", "процесса", "процессов")}` : place;
 }
 
@@ -344,7 +356,17 @@ function App() {
   const [leaks, setLeaks] = useState<Leak[]>([]);
   const [followed, setFollowed] = useState<Followed[]>([]);
   const [selectedAppsOnly, setSelectedAppsOnly] = useState(false);
+  const [appView, setAppView] = useState<AppView>(() => {
+    try { const saved = localStorage.getItem("secret-tunnel.app-view"); return saved === "table" || saved === "cards" ? saved : "tiles"; } catch { return "tiles"; }
+  });
+  const [appMenu, setAppMenu] = useState<{ app: InstalledApp; x: number; y: number } | null>(null);
+  const appMenuRef = useRef<HTMLDivElement>(null);
+  const [appTip, setAppTip] = useState<{ app: InstalledApp; x: number; y: number } | null>(null);
+  const appTipTimer = useRef<number>();
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [release, setRelease] = useState<Release | null>(null);
+  const [updatePrompt, setUpdatePrompt] = useState<Release | null>(null);
+  const [serverCheck, setServerCheck] = useState<{ id: string; state: "running" | "ok" | "error"; text: string; at: number } | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [showServerHost, setShowServerHost] = useState(false);
   const [showIpinfoToken, setShowIpinfoToken] = useState(false);
@@ -362,6 +384,9 @@ function App() {
   const connected = status.state === "running";
   const sessionActive = ["running", "starting", "reconnecting", "stopping"].includes(status.state);
   const isMac = redirect.platform === "macos";
+  // Before the first status arrives the browser's guess names the device.
+  const deviceLabel = isMac || (redirect.platform === "unknown" && navigator.userAgent.includes("Mac")) ? "Этот Mac"
+    : redirect.platform === "windows" || navigator.userAgent.includes("Windows") ? "Этот ПК" : "Этот компьютер";
   const redirectActive = redirect.running || redirect.starting;
   const redirectSupported = isMac || redirect.platform === "windows";
   const canRedirect = redirectSupported && connected && !redirectActive && redirect.component_available &&
@@ -385,6 +410,28 @@ function App() {
     .filter((app) => (!selectedAppsOnly || isAppSelected(app)) && `${app.name} ${app.executable}`.toLowerCase().includes(appSearch.toLowerCase()))
     .sort((a, b) => Number(isAppSelected(b)) - Number(isAppSelected(a)));
   const selectedApps = appChoices.filter(isAppSelected);
+  const domainRulesOn = (settingsDraft.domain_rules || []).some((rule) => rule.enabled);
+  const canStartInterception = busy === null && canRedirect && (selectedApps.length > 0 || domainRulesOn) && !(isMac && domainRulesOn);
+  const emptyAppsHint = appsScanning ? "Ищем установленные программы…" : selectedAppsOnly ? "Пока ничего не выбрано. Переключитесь на «Все» и отметьте программы." : `Ничего не найдено. Измените запрос или добавьте ${isMac ? ".app" : ".exe"} вручную.`;
+  // Traffic of each listed program over 30 days, matched the way the statistics match it.
+  const appTraffic = useMemo(() => {
+    const match = knownAppMatcher(appChoices);
+    const from = Math.floor(Date.now() / 1000) - 30 * 86400;
+    const totals = new Map<string, { rx: number; tx: number; sessions: number }>();
+    for (const session of sessions) {
+      if (session.ended_at < from && !session.active) continue;
+      const seen = new Set<string>();
+      for (const usage of session.apps) {
+        const app = match(usage.name);
+        if (!app) continue;
+        const entry = totals.get(app.id) ?? { rx: 0, tx: 0, sessions: 0 };
+        entry.rx += usage.rx; entry.tx += usage.tx;
+        if (!seen.has(app.id)) { entry.sessions += 1; seen.add(app.id); }
+        totals.set(app.id, entry);
+      }
+    }
+    return totals;
+  }, [sessions, appChoices]);
   // Installed applications that appear in the session history, for icons.
   const statsKnownApps = useMemo(() => {
     const match = knownAppMatcher(installedApps);
@@ -400,7 +447,7 @@ function App() {
   const chain = serverChain(currentServer, config.servers) ?? [currentServer.name];
   const routeNames = connected && status.ssh_route?.length ? status.ssh_route : chain;
   const routeNodes: RouteNode[] = [
-    { label: isMac ? "Этот Mac" : redirect.platform === "windows" ? "Этот ПК" : "Этот компьютер", kind: "device" },
+    { label: deviceLabel, kind: "device" },
     ...routeNames.filter(Boolean).map((name, index, all) => ({ label: name, kind: index === all.length - 1 ? "exit" as const : "hop" as const })),
     { label: "Интернет", kind: "internet", flag: connected ? status.country_code : undefined },
   ];
@@ -443,8 +490,15 @@ function App() {
       .catch(() => undefined);
   }, [activeTab, isMac, visibleApps.map((app) => app.id).join("|"), statsKnownApps.map((app) => app.executable).join("|"), appIcons]);
 
+  function markAdded(app: InstalledApp, added: boolean) {
+    const dates = { ...(settingsDraft.app_added_at ?? {}) };
+    if (added) dates[app.id] = Math.floor(Date.now() / 1000); else delete dates[app.id];
+    updateSettings("app_added_at", dates);
+  }
+
   function toggleApplication(app: InstalledApp, checked: boolean) {
     const current = settingsDraft.redirect_processes;
+    markAdded(app, checked);
     if (checked) {
       updateSettings("redirect_processes", dedupePatterns([...current, ...app.patterns]));
       return;
@@ -453,6 +507,65 @@ function App() {
     const stillNeeded = new Set(appChoices.filter((other) => other.id !== app.id && isAppSelected(other)).flatMap(appAliases));
     const remove = new Set([...appAliases(app).filter((pattern) => !stillNeeded.has(pattern)), ...appOwnKeys(app)]);
     updateSettings("redirect_processes", current.filter((pattern) => !remove.has(normalizeAppPattern(pattern))));
+  }
+
+  function chooseAppView(view: AppView) {
+    setAppView(view);
+    try { localStorage.setItem("secret-tunnel.app-view", view); } catch { /* the choice just is not remembered */ }
+  }
+
+  // The full path shows after a short hover, above the list so scrolling does not clip it.
+  function showAppTip(event: React.MouseEvent, app: InstalledApp) {
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    window.clearTimeout(appTipTimer.current);
+    appTipTimer.current = window.setTimeout(() => {
+      const below = box.bottom + 6 + 96 < window.innerHeight;
+      setAppTip({ app, x: Math.min(box.left, window.innerWidth - 440), y: below ? box.bottom + 6 : box.top - 102 });
+    }, 450);
+  }
+
+  function hideAppTip() {
+    window.clearTimeout(appTipTimer.current);
+    setAppTip(null);
+  }
+
+  function openAppMenu(event: React.MouseEvent, app: InstalledApp) {
+    hideAppTip();
+    event.preventDefault();
+    setAppMenu({ app, x: Math.min(event.clientX, window.innerWidth - 260), y: Math.min(event.clientY, window.innerHeight - 280) });
+  }
+
+  // The keyboard's menu key and Shift+F10 open the same menu.
+  function appMenuKey(event: React.KeyboardEvent, app: InstalledApp) {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    setAppMenu({ app, x: Math.min(box.left + 24, window.innerWidth - 260), y: Math.min(box.bottom - 8, window.innerHeight - 280) });
+  }
+
+  function appMenuItems(app: InstalledApp): ({ label: string; run: () => void; disabled?: boolean; danger?: boolean } | "-")[] {
+    const selected = isAppSelected(app);
+    const fileMissing = app.source === "manual" && !/^([A-Za-z]:[\\/]|\/)/.test(app.executable);
+    return [
+      { label: isMac ? "Показать в Finder" : "Показать в проводнике", disabled: fileMissing,
+        run: () => invoke("reveal_path", { path: app.executable }).catch((error) => notify(String(error), true)) },
+      { label: "Запустить", disabled: fileMissing,
+        run: () => invoke("launch_application", { path: app.executable }).then(() => notify(`${app.name} запускается`)).catch((error) => notify(String(error), true)) },
+      { label: "Копировать путь", run: () => copyText(app.executable, "logs").then(() => notify("Путь скопирован")) },
+      "-",
+      { label: selected ? "Не направлять через туннель" : "Направлять через туннель", disabled: busy !== null, run: () => toggleApplication(app, !selected) },
+      { label: "Только эта программа через туннель", disabled: busy !== null, run: () => {
+        const others = new Set(appChoices.filter((other) => other.id !== app.id).flatMap(appAliases));
+        const own = new Set(appAliases(app));
+        updateSettings("redirect_processes", dedupePatterns([...settingsDraft.redirect_processes.filter((pattern) => own.has(normalizeAppPattern(pattern)) || !others.has(normalizeAppPattern(pattern))), ...app.patterns]));
+        updateSettings("app_added_at", { [app.id]: settingsDraft.app_added_at?.[app.id] ?? Math.floor(Date.now() / 1000) });
+      } },
+      { label: "Трафик в статистике", run: () => setActiveTab("stats") },
+      ...(app.source === "manual" ? ["-" as const, { label: "Убрать из списка", danger: true, run: () => {
+        toggleApplication(app, false);
+        setInstalledApps((current) => current.filter((other) => other.id !== app.id));
+      } }] : []),
+    ];
   }
 
   async function addApplicationFile() {
@@ -464,6 +577,8 @@ function App() {
         ({ id: normalizeAppPattern(path), name: path.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || path, executable: path, patterns: [path], source: "manual" }));
       setInstalledApps((current) => [...current.filter((app) => !entries.some((entry) => entry.id === app.id)), ...entries]);
       updateSettings("redirect_processes", [...new Set([...settingsDraft.redirect_processes, ...entries.flatMap((app) => app.patterns)])]);
+      const now = Math.floor(Date.now() / 1000);
+      updateSettings("app_added_at", { ...(settingsDraft.app_added_at ?? {}), ...Object.fromEntries(entries.map((app) => [app.id, now])) });
     } catch (error) {
       notify(String(error), true);
     }
@@ -503,6 +618,37 @@ function App() {
       notify(String(error), true);
     } finally {
       refreshInFlightRef.current = false;
+    }
+  }
+
+  /** Saves the picked programs and starts interception; used on «Приложения» and «Подключение». */
+  function startInterception() {
+    return runAction("connect", async () => {
+      const settings = applicationSettings();
+      await invoke<AppConfig>("save_settings", { settings });
+      setSettingsDraft(settings);
+      settingsDirtyRef.current = false;
+      return invoke<string>("start_redirect");
+    });
+  }
+
+  const checksAgent = (server: ServerProfile) =>
+    Boolean(server.jump_server_id || config.settings.ssh_engine === "embedded") && !config.servers.some((profile) => profile.jump_server_id === server.id);
+
+  /** The check shows its result under the buttons: it takes up to half a minute. */
+  async function checkServer(server: ServerProfile) {
+    const started = Math.floor(Date.now() / 1000);
+    setBusy("test");
+    setServerCheck({ id: server.id, state: "running", at: started,
+      text: checksAgent(server) ? `Подключаемся к ${server.host}:${server.port}, проверяем ключ и агент. Это занимает до ${server.connect_timeout + 15} с.` : `Подключаемся к ${server.host}:${server.port} и проверяем ключ.` });
+    try {
+      const output = await invoke<string>("test_server", { server });
+      setServerCheck({ id: server.id, state: "ok", at: Math.floor(Date.now() / 1000), text: messageText[output] ?? output });
+    } catch (error) {
+      setServerCheck({ id: server.id, state: "error", at: Math.floor(Date.now() / 1000), text: String(error) });
+    } finally {
+      await refreshAll();
+      setBusy(null);
     }
   }
 
@@ -644,9 +790,36 @@ function App() {
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [activeTab, speedLive.running]);
 
+  useEffect(() => {
+    if (!appMenu) return;
+    appMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+    const close = (event: Event) => { if (!appMenuRef.current?.contains(event.target as Node)) setAppMenu(null); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setAppMenu(null); };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", escape);
+    return () => { window.removeEventListener("mousedown", close); window.removeEventListener("scroll", close, true); window.removeEventListener("keydown", escape); };
+  }, [appMenu]);
+
+  // Once per launch: a newer release is offered unless the user skipped it.
+  const updateChecked = useRef(false);
+  useEffect(() => {
+    if (updateChecked.current || !status.app_version || config.settings.check_updates === false) return;
+    const timer = window.setTimeout(() => {
+      updateChecked.current = true;
+      invoke<Release>("check_update").then((found) => {
+        setRelease(found);
+        let skipped = "";
+        try { skipped = localStorage.getItem("secret-tunnel.skip-version") ?? ""; } catch { /* nothing skipped */ }
+        if (found.newer && skipped !== found.version) setUpdatePrompt(found);
+      }).catch(() => undefined);
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [status.app_version, config.settings.check_updates]);
+
   // Session history refreshes while the statistics are on screen.
   useEffect(() => {
-    if (activeTab !== "stats") return;
+    if (activeTab !== "stats" && activeTab !== "applications") return;
     const load = () => invoke<SessionRecord[]>("session_history").then(setSessions).catch(() => undefined);
     load();
     const timer = window.setInterval(load, 3000);
@@ -675,6 +848,7 @@ function App() {
     { tab: "stats", label: "Статистика", icon: <ChartColumn size={17} /> },
     { tab: "speed", label: "Скорость", icon: <Gauge size={17} />, badge: speedLive.running ? "тест" : undefined },
     { tab: "settings", label: "Настройки", icon: <Settings size={17} /> },
+    { tab: "about", label: "О программе", icon: <Info size={17} />, badge: release?.newer ? "новое" : undefined },
   ];
 
   return (
@@ -710,12 +884,6 @@ function App() {
       </aside>
 
       <section className="workspace">
-        {message && (
-          <div className={message.error ? "toast error" : "toast"} role={message.error ? "alert" : "status"}>
-            <span>{message.text}</span>
-            <button onClick={() => setMessage(null)} aria-label="Скрыть сообщение">×</button>
-          </div>
-        )}
         <div className={activeTab === "connect" ? "workspaceContent fill" : "workspaceContent"}>
           {activeTab === "connect" && (
             <section className="connect">
@@ -744,6 +912,16 @@ function App() {
                   <button className="ghost" disabled={busy !== null || !currentServer.id || !currentProxy.id} onClick={() => runAction("restart", () => invoke<string>("restart_tunnel"))}>
                     <RefreshCcw size={15} />Переподключить
                   </button>
+                  {redirectSupported && (selectedApps.length > 0 || redirectActive) && (!redirectActive ? (
+                    <button className="ghost" disabled={!canStartInterception} onClick={startInterception}
+                      title={!connected ? "Сначала подключите туннель" : !redirect.component_available ? "Компонент перехвата не найден — подробности на вкладке «Приложения»" : `Направить ${selectedApps.length} ${plural(selectedApps.length, "программу", "программы", "программ")} через туннель`}>
+                      <LayoutGrid size={15} />Включить перехват · {selectedApps.length}
+                    </button>
+                  ) : (
+                    <button className="ghost" disabled={busy !== null} onClick={() => runAction("disconnect", () => invoke<string>("stop_redirect"))}>
+                      <CircleStop size={15} />{redirect.starting ? "Отменить перехват" : "Выключить перехват"}
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -901,10 +1079,9 @@ function App() {
                     setServerDraft(saved);
                     return `Сервер «${saved.name}» сохранён`;
                   })}><Save size={15} />Сохранить</button>
-                  <button disabled={busy !== null || !serverDraft.id} onClick={() => runAction("test", () => invoke<string>("test_server", { server: serverDraft }))}>
+                  <button disabled={busy !== null || !serverDraft.id} onClick={() => checkServer(serverDraft)}>
                     <Terminal size={15} />
-                    {(serverDraft.jump_server_id || config.settings.ssh_engine === "embedded") && !config.servers.some((profile) => profile.jump_server_id === serverDraft.id)
-                      ? "Проверить SSH и агент" : "Проверить SSH"}
+                    {busy === "test" ? "Проверяем…" : checksAgent(serverDraft) ? "Проверить SSH и агент" : "Проверить SSH"}
                   </button>
                   <button className="quietDanger" disabled={busy !== null || !serverDraft.id || sessionActive} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_server", { id: serverDraft.id });
@@ -913,6 +1090,13 @@ function App() {
                     return "Сервер удалён";
                   })}><Trash2 size={15} />Удалить</button>
                 </div>
+                {serverCheck && serverCheck.id === serverDraft.id && (
+                  <div className={`checkResult ${serverCheck.state}`} role={serverCheck.state === "error" ? "alert" : "status"}>
+                    <strong>{serverCheck.state === "running" ? "Проверяем…" : serverCheck.state === "ok" ? "Проверка пройдена" : "Проверка не прошла"}</strong>
+                    <span>{serverCheck.text}</span>
+                    {serverCheck.state !== "running" && <small>{new Date(serverCheck.at * 1000).toLocaleTimeString("ru-RU")} · подробности в журнале внизу</small>}
+                  </div>
+                )}
               </section>
             </div>
           )}
@@ -985,15 +1169,9 @@ function App() {
                     {redirect.starting ? "Ждём разрешения macOS" : redirect.running ? `Перехват включён · ${selectedApps.length}` : "Перехват выключен"}
                   </span>
                   {!redirectActive ? (
-                    <button className="primary" disabled={busy !== null || !canRedirect || (selectedApps.length === 0 && !(settingsDraft.domain_rules || []).some((r) => r.enabled)) || (isMac && (settingsDraft.domain_rules || []).some((r) => r.enabled))}
+                    <button className="primary" disabled={!canStartInterception}
                       title={!connected ? "Сначала подключите туннель" : undefined}
-                      onClick={() => runAction("connect", async () => {
-                        const settings = applicationSettings();
-                        await invoke<AppConfig>("save_settings", { settings });
-                        setSettingsDraft(settings);
-                        settingsDirtyRef.current = false;
-                        return invoke<string>("start_redirect");
-                      })}><Play size={15} />Включить перехват</button>
+                      onClick={startInterception}><Play size={15} />Включить перехват</button>
                   ) : (
                     <button className="danger" disabled={busy !== null} onClick={() => runAction("disconnect", () => invoke<string>("stop_redirect"))}>
                       <CircleStop size={15} />{redirect.starting ? "Отменить" : "Выключить"}
@@ -1057,26 +1235,83 @@ function App() {
                 </div>
                 <button className="ghost" disabled={appsScanning} onClick={scanApplications} title="Найти установленные программы заново"><RefreshCcw size={15} />{appsScanning ? "Ищем…" : "Обновить"}</button>
                 <button className="ghost" disabled={busy !== null} onClick={addApplicationFile}><Plus size={15} />Добавить {isMac ? ".app" : ".exe"}</button>
+                <div className="segmented viewSwitch" role="group" aria-label="Вид списка">
+                  {appViews.map((view) => (
+                    <button key={view.id} className={appView === view.id ? "on" : ""} title={view.hint} aria-pressed={appView === view.id} onClick={() => chooseAppView(view.id)}>{view.title}</button>
+                  ))}
+                </div>
               </div>
               {appsError && <div className="notice bad">{appsError}</div>}
 
-              <div className="appGrid" aria-label="Установленные программы" aria-busy={appsScanning}>
-                {visibleApps.map((app) => {
-                  const selected = isAppSelected(app);
-                  return (
-                    <label key={app.id} className={selected ? "appTile selected" : "appTile"} title={app.executable}>
-                      <AppIcon app={app} icon={appIcons[app.executable]} />
-                      <span className="appText">
-                        <strong>{app.name}</strong>
-                        <small>{appSubtitle(app)}</small>
-                      </span>
-                      <input type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)}
-                        aria-label={`Направлять ${app.name} через туннель`} />
-                    </label>
-                  );
-                })}
-                {!visibleApps.length && <p className="emptyHint">{appsScanning ? "Ищем установленные программы…" : selectedAppsOnly ? "Пока ничего не выбрано. Переключитесь на «Все» и отметьте программы." : `Ничего не найдено. Измените запрос или добавьте ${isMac ? ".app" : ".exe"} вручную.`}</p>}
-              </div>
+              {appView === "table" ? (
+                <div className="appTableWrap" aria-busy={appsScanning}>
+                  <table className="appTable" aria-label="Установленные программы">
+                    <thead><tr><th>Программа</th><th>Путь</th><th className="num">Процессов</th><th className="num">Трафик, 30 дней</th><th>Через туннель с</th><th aria-label="Через туннель" /></tr></thead>
+                    <tbody>
+                      {visibleApps.map((app) => {
+                        const selected = isAppSelected(app);
+                        const usage = appTraffic.get(app.id);
+                        const added = settingsDraft.app_added_at?.[app.id];
+                        return (
+                          <tr key={app.id} className={selected ? "selected" : undefined} onContextMenu={(event) => openAppMenu(event, app)} onKeyDown={(event) => appMenuKey(event, app)}>
+                            <td><span className="appName"><AppIcon app={app} icon={appIcons[app.executable]} /><strong>{app.name}</strong></span></td>
+                            <td className="path" title={app.executable}>{app.executable}</td>
+                            <td className="num">{app.patterns.length}</td>
+                            <td className="num">{usage ? formatBytes(usage.rx + usage.tx) : "—"}</td>
+                            <td>{selected && added ? formatDay(added) : "—"}</td>
+                            <td><input type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)} aria-label={`Направлять ${app.name} через туннель`} /></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {!visibleApps.length && <p className="emptyHint">{emptyAppsHint}</p>}
+                </div>
+              ) : (
+                <div className={appView === "cards" ? "appGrid large" : "appGrid"} aria-label="Установленные программы" aria-busy={appsScanning}>
+                  {visibleApps.map((app) => {
+                    const selected = isAppSelected(app);
+                    const usage = appTraffic.get(app.id);
+                    const added = settingsDraft.app_added_at?.[app.id];
+                    return (
+                      <label key={app.id} className={selected ? "appTile selected" : "appTile"} onContextMenu={(event) => openAppMenu(event, app)} onKeyDown={(event) => appMenuKey(event, app)}
+                        onMouseEnter={(event) => showAppTip(event, app)} onMouseLeave={hideAppTip}>
+                        <AppIcon app={app} icon={appIcons[app.executable]} />
+                        <span className="appText">
+                          <strong>{app.name}</strong>
+                          <small>{appSubtitle(app)}</small>
+                          {appView === "cards" && (
+                            <span className="appFacts">
+                              <span className="path">{app.executable}</span>
+                              <span>{usage ? `${formatBytes(usage.rx + usage.tx)} за 30 дней · ${usage.sessions} ${plural(usage.sessions, "сеанс", "сеанса", "сеансов")}` : "Через туннель ещё не ходила"}</span>
+                              <span>{selected ? (added ? `Через туннель с ${formatDay(added)}` : "Через туннель") : "Работает напрямую"} · {app.patterns.length} {plural(app.patterns.length, "процесс", "процесса", "процессов")}</span>
+                            </span>
+                          )}
+                        </span>
+                        <input type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)}
+                          aria-label={`Направлять ${app.name} через туннель`} />
+                      </label>
+                    );
+                  })}
+                  {!visibleApps.length && <p className="emptyHint">{emptyAppsHint}</p>}
+                </div>
+              )}
+              {appTip && !appMenu && (
+                <div className="appTip" role="tooltip" style={{ left: appTip.x, top: appTip.y }}>
+                  <span className="path">{appTip.app.executable}</span>
+                  <span>{appTip.app.patterns.length > 1 ? `Правила: ${appTip.app.patterns.map((pattern) => pattern.split(/[\\/]/).pop()).join(", ")}` : "Правило: сама программа"}</span>
+                  <span className="tipHint">Правая кнопка — действия с программой</span>
+                </div>
+              )}
+              {appMenu && (
+                <div className="contextMenu" role="menu" aria-label={appMenu.app.name} style={{ left: appMenu.x, top: appMenu.y }} ref={appMenuRef}
+                  onKeyDown={(event) => { if (event.key === "Escape") setAppMenu(null); }}>
+                  <strong>{appMenu.app.name}</strong>
+                  {appMenuItems(appMenu.app).map((item) => item === "-" ? <hr key={Math.random()} /> : (
+                    <button key={item.label} role="menuitem" className={item.danger ? "danger" : undefined} disabled={item.disabled} onClick={() => { setAppMenu(null); item.run(); }}>{item.label}</button>
+                  ))}
+                </div>
+              )}
 
               <footer className="appsFooter">
                 <details className="advanced">
@@ -1142,7 +1377,7 @@ function App() {
           )}
 
           {activeTab === "speed" && (
-            <SpeedPanel connected={connected} live={speedLive} history={speedHistory} serverPing={connected ? latestPing : null}
+            <SpeedPanel deviceLabel={deviceLabel} connected={connected} live={speedLive} history={speedHistory} serverPing={connected ? latestPing : null}
               tunnelRoute={connected && status.ssh_route?.length ? status.ssh_route : chain.length > 1 ? chain : []} tunnelServer={currentServer.name}
               tunnelCountry={connected ? status.country_code : ""} hideAddresses={config.settings.hide_sensitive}
               onStart={(kind, direct, provider) => invoke("speedtest_start", { kind, direct, provider }).then(() => invoke<SpeedLive>("speedtest_status").then(setSpeedLive)).catch((error) => setMessage({ text: String(error), error: true }))}
@@ -1157,6 +1392,19 @@ function App() {
                 setSessions(await invoke<SessionRecord[]>("clear_session_history"));
                 return "История сеансов очищена";
               })} />
+          )}
+
+          {activeTab === "about" && (
+            <AboutPanel platform={redirect.platform} version={status.app_version || "—"} checkUpdates={config.settings.check_updates ?? true}
+              onCheckUpdates={(value) => runAction("save", async () => {
+                const settings = { ...config.settings, check_updates: value };
+                const next = await invoke<AppConfig>("save_settings", { settings });
+                setConfig(next);
+                if (!settingsDirtyRef.current) setSettingsDraft(next.settings);
+                return value ? "Обновления будут проверяться при запуске" : "Проверка обновлений при запуске выключена";
+              })}
+              servers={config.servers.map((server) => ({ id: server.id, name: server.name }))}
+              selectedServerId={config.selected_server_id} release={release} onRelease={setRelease} />
           )}
 
           {activeTab === "settings" && (
@@ -1188,6 +1436,13 @@ function App() {
                   <SettingLabel hint="При открытии приложения сразу подключает выбранный сервер. Включайте, когда туннель уже проверен.">Подключаться при запуске приложения</SettingLabel></label>
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.verify_proxy_on_start} onChange={(event) => updateSettings("verify_proxy_on_start", event.target.checked)} />
                   <SettingLabel hint="После подключения делает пробный запрос через прокси, чтобы сразу увидеть, что трафик проходит.">Проверять прокси после подключения</SettingLabel></label>
+              </fieldset>
+
+              <fieldset>
+                <legend>Обновления</legend>
+                <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.check_updates ?? true} onChange={(event) => updateSettings("check_updates", event.target.checked)} />
+                  <SettingLabel hint="При запуске приложение спрашивает GitHub о новом релизе и предлагает скачать и установить его. Без вашего согласия ничего не скачивается.">Проверять обновления при запуске</SettingLabel></label>
+                <p className="fieldNote">Проверить вручную, обновить агент на сервере и почитать справку — в разделе «О программе».</p>
               </fieldset>
 
               <fieldset>
@@ -1265,6 +1520,40 @@ function App() {
           )}
         </div>
 
+        {updatePrompt && (
+          <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setUpdatePrompt(null); }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-labelledby="update-title" onKeyDown={(event) => { if (event.key === "Escape") setUpdatePrompt(null); }}>
+              <h2 id="update-title">Доступна версия {updatePrompt.version}</h2>
+              <p>Установлена {updatePrompt.current}. {updatePrompt.app && updatePrompt.installable ? "После загрузки и проверки SHA256 можно установить обновление." : "Сборки доступны на странице релиза."}</p>
+              <div className="actions">
+                {updatePrompt.app && updatePrompt.installable ? (
+                  <button className="primary" autoFocus onClick={() => {
+                    setUpdatePrompt(null);
+                    invoke("start_update_download", { version: updatePrompt.version })
+                      .catch((error) => notify(String(error), true))
+                      .finally(() => setActiveTab("about"));
+                  }}>Скачать обновление</button>
+                ) : (
+                  <button className="primary" autoFocus onClick={() => {
+                    setUpdatePrompt(null);
+                    invoke("open_external", { url: updatePrompt.page }).catch((error) => notify(String(error), true));
+                  }}>Открыть страницу релиза</button>
+                )}
+                <button onClick={() => setUpdatePrompt(null)}>Позже</button>
+                <button className="ghost" onClick={() => { try { localStorage.setItem("secret-tunnel.skip-version", updatePrompt.version); } catch { /* asks again next time */ } setUpdatePrompt(null); }}>Пропустить эту версию</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Messages sit above the journal, clear of the buttons at the top right. */}
+        <div className="toastLane">
+          {message && (
+            <div className={message.error ? "toast error" : "toast"} role={message.error ? "alert" : "status"}>
+              <span>{message.text}</span>
+              <button onClick={() => setMessage(null)} aria-label="Скрыть сообщение">×</button>
+            </div>
+          )}
+        </div>
         <LogDock logs={logs} busy={busy !== null} hideAddresses={config.settings.hide_sensitive}
           onClear={() => runAction("logs", async () => { await invoke<void>("clear_logs"); return "Журнал очищен"; })}
           onCopied={(text) => copyText(text, "logs")} />

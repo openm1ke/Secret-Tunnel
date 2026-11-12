@@ -28,6 +28,7 @@ fn background_command(program: &str) -> Command {
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
 mod speedtest;
+mod updater;
 mod icon_png;
 mod stats;
 #[cfg(windows)]
@@ -133,6 +134,12 @@ struct AppSettings {
     /// UDP receive window asked of the agent, for uploads; `None` keeps the agent's own.
     #[serde(default)]
     agent_udp_receive_window: Option<UdpWindowSetting>,
+    /// When each application was marked for the tunnel, by its picker id.
+    #[serde(default)]
+    app_added_at: std::collections::BTreeMap<String, u64>,
+    /// Look for a new release on start and offer to install it.
+    #[serde(default = "default_true")]
+    check_updates: bool,
 }
 
 /// A UDP flow window as the Android app stores it: bytes and datagram slots.
@@ -174,6 +181,8 @@ impl Default for AppSettings {
             close_to_tray: true,
             udp_receive_window: None,
             agent_udp_receive_window: None,
+            app_added_at: Default::default(),
+            check_updates: true,
         }
     }
 }
@@ -1287,6 +1296,16 @@ fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 
 #[tauri::command(async)]
 fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<String, String> {
+    // Every failure reaches the journal, including ones before the connection starts.
+    let result = check_server(&server, &state);
+    if let Err(error) = &result {
+        log_line(&state.logs, format!("Проверка сервера «{}» не прошла: {error}", server.name));
+    }
+    result
+}
+
+fn check_server(server: &ServerProfile, state: &State<'_, AppState>) -> Result<String, String> {
+    let server = server.clone();
     validate_server(&server)?;
     let config = load_config()?;
     if server.jump_server_id.is_some() || config.settings.ssh_engine == "embedded" {
@@ -1300,9 +1319,8 @@ fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<Stri
             let result = embedded_ssh::diagnose_server_with_options(
                 embedded_server(&server), embedded_route(&config, &server)?, !is_relay,
             );
-            match &result {
-                Ok(message) => log_line(&state.logs, message),
-                Err(error) => log_line(&state.logs, error),
+            if let Ok(message) = &result {
+                log_line(&state.logs, message);
             }
             return result;
         }
@@ -1317,9 +1335,7 @@ fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<Stri
         ),
     );
     if !tcp_connects(&server.host, server.port, Duration::from_secs(3)) {
-        let message = format!("Cannot connect to {}:{}", server.host, server.port);
-        log_line(&state.logs, &message);
-        return Err(message);
+        return Err(format!("Нет TCP-соединения с {}:{} — сервер выключен, порт закрыт или адрес неверный", server.host, server.port));
     }
     log_line(&state.logs, "TCP reachability OK");
 
@@ -1360,7 +1376,6 @@ fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<Stri
         } else {
             stderr
         };
-        log_line(&state.logs, format!("SSH test failed: {message}"));
         Err(message)
     }
 }
@@ -1951,6 +1966,196 @@ fn resolve_application_paths(paths: Vec<String>) -> Result<Vec<InstalledApp>, St
     Err("Чтение .app доступно только на macOS".into())
 }
 
+/// The running tunnel's local proxy, for reaching GitHub when it is blocked directly.
+fn tunnel_proxy(state: &State<'_, AppState>) -> Option<(String, u16)> {
+    let mut runtime = state.runtime.lock().ok()?;
+    let runtime = runtime.as_mut()?;
+    if runtime.try_wait().ok().flatten().is_some() {
+        return None;
+    }
+    Some((runtime.proxy.host.clone(), runtime.proxy.port))
+}
+
+#[tauri::command(async)]
+fn check_update(state: State<'_, AppState>) -> Result<updater::Release, String> {
+    let proxy = tunnel_proxy(&state);
+    let release = updater::latest(proxy.as_ref().map(|(h, p)| (h.as_str(), *p)))?;
+    if release.newer {
+        log_line(&state.logs, format!("Доступна версия {} (установлена {})", release.version, release.current));
+    }
+    Ok(release)
+}
+
+#[tauri::command(async)]
+fn start_update_download(version: String, state: State<'_, AppState>) -> Result<(), String> {
+    let proxy = tunnel_proxy(&state);
+    let release = updater::release_for(&version, proxy.as_ref().map(|(h, p)| (h.as_str(), *p)))?;
+    if !release.newer {
+        return Err(format!("Для установленной версии {} требуется более новый релиз", release.current));
+    }
+    if !release.installable {
+        return Err(format!("Установите обновление вручную со страницы {}", release.page));
+    }
+    log_line(&state.logs, format!("Скачиваем обновление {}…", release.version));
+    updater::start_download(release, proxy)
+}
+
+#[tauri::command]
+fn update_status() -> updater::Download {
+    updater::status()
+}
+
+/// Installs the downloaded update: a helper waits for the app to quit,
+/// replaces it and starts the new version.
+#[tauri::command(async)]
+fn install_update(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    updater::install()?;
+    log_line(&state.logs, "Устанавливаем обновление и перезапускаем приложение");
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        app.exit(0);
+    });
+    Ok(())
+}
+
+#[cfg(feature = "embedded-ssh")]
+fn server_by_id(config: &AppConfig, id: &str) -> Result<ServerProfile, String> {
+    config.servers.iter().find(|server| server.id == id).cloned().ok_or_else(|| "Сервер не найден".to_string())
+}
+
+/// The agent version on a server, read over SSH.
+#[tauri::command]
+async fn agent_version(server_id: String, state: State<'_, AppState>) -> Result<String, String> {
+    #[cfg(feature = "embedded-ssh")]
+    {
+        let config = load_config()?;
+        let server = server_by_id(&config, &server_id)?;
+        let (status, stdout, stderr) = embedded_ssh::run_on_server(embedded_server(&server), embedded_route(&config, &server)?,
+            updater::AGENT_VERSION_COMMAND, Vec::new(), Duration::from_secs(15)).await?;
+        if status != 0 {
+            return Err(format!("Не удалось прочитать версию агента (код {status}). {}", stderr.trim()));
+        }
+        let version = updater::agent_version_from_output(&stdout)?.unwrap_or_default().to_owned();
+        log_line(&state.logs, format!("Агент на «{}»: {}", server.name, stdout.trim()));
+        return Ok(version);
+    }
+    #[cfg(not(feature = "embedded-ssh"))]
+    {
+        let _ = (server_id, state);
+        Err("Встроенный SSH недоступен в этой сборке".into())
+    }
+}
+
+/// Installs the desktop release's matching agent on a server: downloaded and checked
+/// here, sent over SSH, installed by its own script with self-test and backup.
+#[tauri::command]
+async fn update_agent(server_id: String, state: State<'_, AppState>) -> Result<String, String> {
+    #[cfg(feature = "embedded-ssh")]
+    {
+        let config = load_config()?;
+        let server = server_by_id(&config, &server_id)?;
+        let route = embedded_route(&config, &server)?;
+        let proxy = tunnel_proxy(&state);
+        let logs = Arc::clone(&state.logs);
+        let server_name = server.name.clone();
+        let (version, archive) = tauri::async_runtime::spawn_blocking(move || {
+            let proxy = proxy.as_ref().map(|(h, p)| (h.as_str(), *p));
+            let release = updater::release_for(env!("CARGO_PKG_VERSION"), proxy)?;
+            let asset = release.agent.as_ref().ok_or("В релизе нет агента для Linux x86_64")?;
+            log_line(&logs, format!("Скачиваем агент {} для «{server_name}»…", release.version));
+            let file = updater::fetch_verified(&release, asset, proxy, |_| {})?;
+            let archive = std::fs::read(file.path()).map_err(|e| e.to_string())?;
+            Ok::<_, String>((release.version, archive))
+        }).await.map_err(|e| e.to_string())??;
+        log_line(&state.logs, format!("Контрольная сумма совпала. Устанавливаем агент на «{}»…", server.name));
+        let (status, stdout, stderr) = embedded_ssh::run_on_server(embedded_server(&server), route,
+            &updater::agent_install_command(&version), archive, Duration::from_secs(90)).await?;
+        if status != 0 {
+            let reason = stderr.trim();
+            log_line(&state.logs, format!("Агент не установлен: {reason}"));
+            return Err(if reason.contains("archive requires Linux x86_64") { "Для сервера нет готового агента. Требуется Linux x86_64.".into() } else { format!("Агент не установлен (код {status}). {reason}") });
+        }
+        let installed = updater::agent_version_from_output(&stdout)?
+            .filter(|installed| *installed == version)
+            .ok_or_else(|| format!("Сервер не подтвердил установку агента {version}"))?
+            .to_owned();
+        log_line(&state.logs, format!("Агент {installed} установлен на «{}». Новые подключения используют его", server.name));
+        return Ok(installed);
+    }
+    #[cfg(not(feature = "embedded-ssh"))]
+    {
+        let _ = (server_id, state);
+        Err("Встроенный SSH недоступен в этой сборке".into())
+    }
+}
+
+/// Opens a web link from the help or «О программе» in the default browser.
+/// Only https links: the help comes from the network.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let valid = url.starts_with("https://") && url.len() < 2048 && !url.chars().any(|c| c.is_whitespace() || c == '"' || c.is_control());
+    if !valid {
+        return Err("Открываются только ссылки https".into());
+    }
+    #[cfg(windows)]
+    let mut command = std::process::Command::new("explorer.exe");
+    #[cfg(not(windows))]
+    let mut command = background_command("open");
+    command.arg(&url).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// An existing program or bundle the picker shows; anything else is refused.
+fn picked_path(path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !path.exists() {
+        return Err("Файл программы не найден — возможно, её удалили или переместили".into());
+    }
+    Ok(path)
+}
+
+/// «Показать в проводнике» / «Показать в Finder» from the picker's menu.
+#[tauri::command(async)]
+fn reveal_path(path: String) -> Result<(), String> {
+    let path = picked_path(&path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Explorer wants the path glued to /select, in its own quotes.
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        background_command("open").arg("-R").arg(&path).spawn().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("Недоступно на этой системе".into())
+}
+
+/// «Запустить» from the picker's menu. On Windows the program starts through
+/// Explorer, so it runs as the user, not with this app's administrator rights.
+#[tauri::command(async)]
+fn launch_application(path: String) -> Result<(), String> {
+    let path = picked_path(&path)?;
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer.exe").arg(&path).spawn().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        background_command("open").arg(&path).spawn().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("Недоступно на этой системе".into())
+}
+
 /// PNG data URLs of application icons by path, for the application picker.
 #[tauri::command(async)]
 fn application_icons(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
@@ -2190,6 +2395,15 @@ pub fn run() {
             scan_installed_applications,
             resolve_application_paths,
             application_icons,
+            reveal_path,
+            launch_application,
+            open_external,
+            check_update,
+            start_update_download,
+            update_status,
+            install_update,
+            agent_version,
+            update_agent,
             session_history,
             clear_session_history,
             speedtest_start,

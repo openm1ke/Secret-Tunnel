@@ -21,6 +21,7 @@ enum Mode {
     Oversized,
     Hung,
     RejectAuth,
+    Upload,
 }
 struct Handler {
     mode: Mode,
@@ -90,7 +91,22 @@ impl server::Handler for Handler {
         let command = std::str::from_utf8(command).unwrap();
         self.commands.lock().unwrap().push(command.into());
         session.channel_success(id)?;
-        if command == agent::QUERY_COMMAND {
+        if matches!(self.mode, Mode::Upload) {
+            assert_eq!(command, "fixture upload");
+            let mut stream = self.channels.remove(&id).unwrap().into_stream();
+            let handle = session.handle();
+            tokio::spawn(async move {
+                // Force the client to drain output while the server waits to read stdin.
+                stream.write_all(&vec![b'x'; 4 * 1024 * 1024]).await.unwrap();
+                let mut input = Vec::new();
+                stream.read_to_end(&mut input).await.unwrap();
+                assert_eq!(input, vec![0xa5; 1024 * 1024]);
+                handle.extended_data(id, 1, b"fixture stderr".to_vec()).await.unwrap();
+                handle.exit_status_request(id, 7).await.unwrap();
+                handle.eof(id).await.unwrap();
+                handle.close(id).await.unwrap();
+            });
+        } else if command == agent::QUERY_COMMAND {
             let (exit, stdout, stderr) = match self.mode {
                 Mode::Missing => (200, vec![], vec![]),
                 Mode::NoExecute => (201, vec![], vec![]),
@@ -305,6 +321,21 @@ async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) ->
         path,
         commands,
     }
+}
+
+#[tokio::test]
+async fn remote_command_drains_output_during_upload_and_returns_exit_status() {
+    let fixture = fixture(Mode::Upload).await;
+    let (status, stdout, stderr) = run_on_server(
+        fixture.server.clone(),
+        fixture.options.clone(),
+        "fixture upload",
+        vec![0xa5; 1024 * 1024],
+        Duration::from_secs(5),
+    ).await.unwrap();
+    assert_eq!(status, 7);
+    assert_eq!(stdout, "x".repeat(64 * 1024));
+    assert_eq!(stderr, "fixture stderr");
 }
 
 #[tokio::test]

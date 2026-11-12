@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.24 — 2026-11-13
+
+- Desktop: «О программе» checks for updates and downloads the selected release with SHA-256 verification. On macOS it keeps the previous bundle and restores it if macOS rejects the launch request. On Windows the installed edition waits for the installer to finish successfully before reopening. The portable edition links to the release page.
+- Desktop: check, install, or update the agent on a configured SSH server. The client downloads the agent that matches its own version, verifies it, and sends it over SSH. The server installer runs its self-test and preserves a copy of the previous binary for rollback.
+- Desktop: searchable setup instructions and knowledge base, with an offline copy bundled in the app.
+- Desktop: the application picker offers tiles, a table, and cards, with traffic and selection dates in the detailed views. The server screen shows the latest check result.
+
 ## 0.3.23 — 2026-11-12
 
 - Android: «Скорость» with the desktop's tests — quick, full, bandwidth, browsing, mixed, latency and UDP, M-Lab NDT7 — through the tunnel or straight from the phone, on Cloudflare or the nearest LibreSpeed server, with history, exit country and a tunnel-vs-direct comparison. History uses the desktop's `speedtests.json` fields.

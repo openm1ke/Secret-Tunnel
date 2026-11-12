@@ -231,8 +231,8 @@ function Comparison({ history }: { history: SpeedRun[] }) {
   );
 }
 
-export default function SpeedPanel({ connected, live, history, serverPing, tunnelRoute, tunnelServer, tunnelCountry, hideAddresses, onStart, onCancel, onClear }: {
-  connected: boolean; live: SpeedLive; history: SpeedRun[]; serverPing: number | null;
+export default function SpeedPanel({ deviceLabel, connected, live, history, serverPing, tunnelRoute, tunnelServer, tunnelCountry, hideAddresses, onStart, onCancel, onClear }: {
+  deviceLabel: string; connected: boolean; live: SpeedLive; history: SpeedRun[]; serverPing: number | null;
   tunnelRoute: string[]; tunnelServer: string; tunnelCountry: string; hideAddresses: boolean;
   onStart: (kind: string, direct: boolean, provider: string) => void; onCancel: () => void; onClear: () => void;
 }) {
@@ -256,7 +256,7 @@ export default function SpeedPanel({ connected, live, history, serverPing, tunne
   const hops = pathDirect ? [] : tunnelRoute.length ? tunnelRoute : tunnelServer ? [tunnelServer] : [];
   const exitCountry = current?.exit_country || (!pathDirect ? tunnelCountry : "");
   const nodes: RouteNode[] = [
-    { label: "Этот Mac", kind: "device" },
+    { label: deviceLabel, kind: "device" },
     ...(pathDirect ? [{ label: "Текущее соединение", kind: "hop" as const }] : hops.map((hop) => ({ label: hop, kind: "hop" as const }))),
     { label: "Интернет", kind: "internet", flag: exitCountry || undefined },
   ];

@@ -1500,6 +1500,51 @@ pub fn register_device_key(
     })
 }
 
+/// Runs `command` on the last server of the route, feeding it `input`, and
+/// returns its exit status, stdout and stderr. Used to read and update the agent.
+pub async fn run_on_server(
+    server: EmbeddedServer,
+    options: EmbeddedOptions,
+    command: &str,
+    input: Vec<u8>,
+    limit: Duration,
+) -> Result<(u32, String, String), String> {
+    const OUTPUT_LIMIT: usize = 64 * 1024;
+    let timeout = route_connect_timeout(&options) + limit;
+    tokio::time::timeout(timeout, async {
+        let route = connect_route(&server, options).await?;
+        let channel = route.destination.channel_open_session().await.map_err(|e| e.to_string())?;
+        channel.exec(true, command).await.map_err(|e| e.to_string())?;
+        let (mut reader, writer) = channel.split();
+        // SSH windows can stall either side if we send before reading output.
+        let send = async {
+            writer.data_bytes(input).await.map_err(|e| e.to_string())?;
+            writer.eof().await.map_err(|e| e.to_string())
+        };
+        let receive = async {
+            let (mut stdout, mut stderr, mut status) = (Vec::new(), Vec::new(), None);
+            while let Some(message) = reader.wait().await {
+                match message {
+                    russh::ChannelMsg::Data { data } => {
+                        stdout.extend_from_slice(&data[..data.len().min(OUTPUT_LIMIT - stdout.len())]);
+                    }
+                    russh::ChannelMsg::ExtendedData { data, .. } => {
+                        stderr.extend_from_slice(&data[..data.len().min(OUTPUT_LIMIT - stderr.len())]);
+                    }
+                    russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                    russh::ChannelMsg::Failure => return Err("Сервер отклонил запуск команды".into()),
+                    _ => {}
+                }
+            }
+            let status = status.ok_or("Сервер закрыл SSH-канал без кода завершения")?;
+            Ok((status, String::from_utf8_lossy(&stdout).into_owned(), String::from_utf8_lossy(&stderr).into_owned()))
+        };
+        let result = tokio::try_join!(send, receive).map(|(_, result)| result);
+        route.disconnect().await;
+        result
+    }).await.map_err(|_| "Сервер не ответил вовремя".to_string())?
+}
+
 #[cfg(test)]
 async fn connect_ssh<A: ToSocketAddrs>(
     server: &EmbeddedServer,

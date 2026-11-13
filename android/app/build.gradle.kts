@@ -8,12 +8,13 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 32400
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.24"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 32500
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.25"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/help-assets"))
     val keyPath = System.getenv("ANDROID_KEYSTORE_FILE")
     if (!keyPath.isNullOrBlank()) signingConfigs.create("release") {
         storeFile = file(keyPath)
@@ -28,11 +29,17 @@ android {
     packaging { jniLibs { useLegacyPackaging = false; keepDebugSymbols += "**/*.so" } }
 }
 dependencies {
+    implementation("androidx.core:core:1.13.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
+val copyHelpAssets by tasks.registering(Copy::class) {
+    from(rootProject.file("../docs/help/knowledge.md"))
+    into(layout.buildDirectory.dir("generated/help-assets"))
+}
+tasks.named("preBuild").configure { dependsOn(copyHelpAssets) }
 tasks.register("checkNativeLibraries") {
     doLast {
         listOf("arm64-v8a", "x86_64").forEach { abi ->

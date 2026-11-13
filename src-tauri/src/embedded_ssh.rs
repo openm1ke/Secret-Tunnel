@@ -1545,6 +1545,21 @@ pub async fn run_on_server(
     }).await.map_err(|_| "Сервер не ответил вовремя".to_string())?
 }
 
+/// Android calls this from a worker thread outside the tunnel runtime.
+pub fn run_on_server_blocking(
+    server: EmbeddedServer,
+    options: EmbeddedOptions,
+    command: &str,
+    input: Vec<u8>,
+    limit: Duration,
+) -> Result<(u32, String, String), String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?
+        .block_on(run_on_server(server, options, command, input, limit))
+}
+
 #[cfg(test)]
 async fn connect_ssh<A: ToSocketAddrs>(
     server: &EmbeddedServer,

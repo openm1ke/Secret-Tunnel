@@ -113,6 +113,9 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     var hideSensitive:Boolean get()=prefs.getBoolean("hide_sensitive",true);set(v){prefs.edit().putBoolean("hide_sensitive",v).apply()}
     /** After connecting, ask through the tunnel where it comes out: exit IP and country. */
     var verifyProxy:Boolean get()=prefs.getBoolean("verify_proxy",true);set(v){prefs.edit().putBoolean("verify_proxy",v).apply()}
+    var checkUpdates: Boolean
+        get() = prefs.getBoolean("check_updates", true)
+        set(value) { prefs.edit().putBoolean("check_updates", value).apply() }
     private fun ids():List<String> {val a=org.json.JSONArray(prefs.getString("server_ids","[]"));return (0 until a.length()).map{a.getString(it)}}
     private fun currentId()=profileId ?: activeProxy?.serverId ?: ids().firstOrNull().orEmpty()
     private fun scoped(field:String)="server.${currentId()}.$field"

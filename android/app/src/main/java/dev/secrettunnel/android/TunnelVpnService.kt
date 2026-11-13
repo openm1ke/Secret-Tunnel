@@ -17,6 +17,8 @@ class TunnelVpnService : VpnService() {
         @Volatile var phase = "Остановлен"
         @Volatile var detail = ""
         @Volatile var active = false
+        @Volatile var connectedSocksPort: Int? = null
+            private set
         val traffic=TrafficHistory()
         @Volatile internal var appTraffic: AppTrafficAccounting? = null
             private set
@@ -115,6 +117,7 @@ class TunnelVpnService : VpnService() {
                             if(newNetwork)recovery.reset()
                             else if(!beginRecovery(status.optString("error").ifBlank{"SSH connection stopped"})){main.postDelayed(this,1500);return@execute}
                             phase=if(newNetwork)"Смена сети" else "Переподключение";detail="Восстанавливаем SSH. Трафик остаётся в VPN.";notifyState()
+                            connectedSocksPort = null
                             NativeBridge.stop()
                             if(!stopping.get())connectSsh()
                             if(!stopping.get()){startPacketEngine();markReady()}
@@ -281,6 +284,7 @@ class TunnelVpnService : VpnService() {
                 .put("ssh_tuning",current.ssh.toNativeJson())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
+            connectedSocksPort = current.socksPort
             underlying.connectedOn(networkWhenConnecting)
         }
     }
@@ -300,6 +304,7 @@ class TunnelVpnService : VpnService() {
     }
     private fun notifyState() { if (active) getSystemService(NotificationManager::class.java).notify(NOTICE, notification()) }
     private fun cleanup() {
+        connectedSocksPort = null
         main.removeCallbacks(monitor)
         sampling.shutdownNow()
         sampling.awaitTermination(1, TimeUnit.SECONDS)

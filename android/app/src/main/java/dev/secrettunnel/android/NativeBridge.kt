@@ -5,6 +5,7 @@ object NativeBridge {
     external fun start(config: String, service: TunnelVpnService): String
     external fun probe(config: String): String
     external fun checkServer(config: String): String
+    external fun manageAgent(config: String, version: String, archivePath: String): String
     external fun generateKey(): String
     external fun registerKey(config: String, publicKey: String): String
     external fun cancel()

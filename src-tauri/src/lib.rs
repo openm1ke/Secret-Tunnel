@@ -29,6 +29,8 @@ fn background_command(program: &str) -> Command {
 mod embedded_ssh;
 mod speedtest;
 mod updater;
+#[cfg_attr(not(feature = "embedded-ssh"), allow(dead_code))]
+mod agent_update;
 mod icon_png;
 mod stats;
 #[cfg(windows)]
@@ -2031,11 +2033,11 @@ async fn agent_version(server_id: String, state: State<'_, AppState>) -> Result<
         let config = load_config()?;
         let server = server_by_id(&config, &server_id)?;
         let (status, stdout, stderr) = embedded_ssh::run_on_server(embedded_server(&server), embedded_route(&config, &server)?,
-            updater::AGENT_VERSION_COMMAND, Vec::new(), Duration::from_secs(15)).await?;
+            agent_update::AGENT_VERSION_COMMAND, Vec::new(), Duration::from_secs(15)).await?;
         if status != 0 {
             return Err(format!("Не удалось прочитать версию агента (код {status}). {}", stderr.trim()));
         }
-        let version = updater::agent_version_from_output(&stdout)?.unwrap_or_default().to_owned();
+        let version = agent_update::agent_version_from_output(&stdout)?.unwrap_or_default().to_owned();
         log_line(&state.logs, format!("Агент на «{}»: {}", server.name, stdout.trim()));
         return Ok(version);
     }
@@ -2069,13 +2071,13 @@ async fn update_agent(server_id: String, state: State<'_, AppState>) -> Result<S
         }).await.map_err(|e| e.to_string())??;
         log_line(&state.logs, format!("Контрольная сумма совпала. Устанавливаем агент на «{}»…", server.name));
         let (status, stdout, stderr) = embedded_ssh::run_on_server(embedded_server(&server), route,
-            &updater::agent_install_command(&version), archive, Duration::from_secs(90)).await?;
+            &agent_update::agent_install_command(&version), archive, Duration::from_secs(90)).await?;
         if status != 0 {
             let reason = stderr.trim();
             log_line(&state.logs, format!("Агент не установлен: {reason}"));
             return Err(if reason.contains("archive requires Linux x86_64") { "Для сервера нет готового агента. Требуется Linux x86_64.".into() } else { format!("Агент не установлен (код {status}). {reason}") });
         }
-        let installed = updater::agent_version_from_output(&stdout)?
+        let installed = agent_update::agent_version_from_output(&stdout)?
             .filter(|installed| *installed == version)
             .ok_or_else(|| format!("Сервер не подтвердил установку агента {version}"))?
             .to_owned();

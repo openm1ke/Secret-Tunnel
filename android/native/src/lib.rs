@@ -3,6 +3,7 @@ use jni::{
     sys::jstring,
     JNIEnv,
 };
+use secret_tunnel_core::agent_update;
 use secret_tunnel_core::embedded_ssh::{
     self, EmbeddedJump, EmbeddedOptions, EmbeddedProxy, EmbeddedServer, EmbeddedTunnelHandle, FlowWindow,
 };
@@ -12,6 +13,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct Config {
@@ -387,6 +389,76 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_checkServer(
             Err(error) => json!({"ok":false,"error":error}).to_string(),
         },
     )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_manageAgent(
+    mut env: JNIEnv,
+    _: JObject,
+    config: JString,
+    version: JString,
+    archive: JString,
+) -> jstring {
+    let result = (|| -> Result<Option<String>, String> {
+        let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();
+        let cfg: Config = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let version: String = env.get_string(&version).map_err(|e| e.to_string())?.into();
+        let archive: String = env.get_string(&archive).map_err(|e| e.to_string())?.into();
+        if cfg.host.trim().is_empty() || cfg.port == 0 || cfg.user.trim().is_empty()
+            || cfg.host_key_sha256.is_empty() || cfg.key_path.is_empty()
+        {
+            return Err("Укажите сервер, ключ и подтверждённый отпечаток".into());
+        }
+        let server = EmbeddedServer {
+            name: cfg.name,
+            host: cfg.host,
+            port: cfg.port,
+            user: cfg.user,
+            key_path: cfg.key_path,
+            strict_host_key_checking: "yes".into(),
+        };
+        let options = EmbeddedOptions {
+            host_key_sha256: Some(cfg.host_key_sha256),
+            jumps: ssh_jumps(cfg.ssh_jumps)?,
+            ..Default::default()
+        };
+        let installing = !archive.is_empty();
+        let (command, input, limit) = if installing {
+            use std::io::Read;
+            const MAX_ARCHIVE: u64 = 32 * 1024 * 1024;
+            if !agent_update::valid_version(&version) {
+                return Err("Некорректная версия агента".into());
+            }
+            let mut input = Vec::new();
+            std::fs::File::open(archive).map_err(|e| e.to_string())?
+                .take(MAX_ARCHIVE + 1).read_to_end(&mut input).map_err(|e| e.to_string())?;
+            if input.is_empty() || input.len() as u64 > MAX_ARCHIVE {
+                return Err("Некорректный размер архива агента".into());
+            }
+            (agent_update::agent_install_command(&version), input, 90)
+        } else {
+            (agent_update::AGENT_VERSION_COMMAND.into(), Vec::new(), 15)
+        };
+        let (status, stdout, stderr) = embedded_ssh::run_on_server_blocking(
+            server, options, &command, input, Duration::from_secs(limit),
+        )?;
+        if status != 0 {
+            return Err(if stderr.contains("archive requires Linux x86_64") {
+                "Для этого сервера нет готового агента. Требуется Linux x86_64.".into()
+            } else {
+                format!("Операция с агентом завершилась с кодом {status}. {}", stderr.trim())
+            });
+        }
+        let installed = agent_update::agent_version_from_output(&stdout)?.map(str::to_owned);
+        if installing && installed.as_deref() != Some(version.as_str()) {
+            return Err(format!("Сервер не подтвердил установку агента {version}"));
+        }
+        Ok(installed)
+    })();
+    output(&mut env, match result {
+        Ok(version) => json!({"version":version}).to_string(),
+        Err(error) => json!({"error":error}).to_string(),
+    })
 }
 
 #[no_mangle]

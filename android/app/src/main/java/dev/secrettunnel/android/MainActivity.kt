@@ -15,6 +15,7 @@ import org.json.JSONObject
 import java.util.UUID
 
 class MainActivity:Activity() {
+    private companion object { const val UPDATE_INSTALL_REQUEST = 104 }
     private lateinit var store:SettingsStore
     private lateinit var content:FrameLayout
     private lateinit var body:LinearLayout
@@ -63,6 +64,20 @@ class MainActivity:Activity() {
     private var speedProvider="cloudflare"
     private var speedViews:SpeedViews?=null
     private var speedWasRunning=false
+    private var aboutUpdate: AboutUpdateViews? = null
+    private var updateNotice: Button? = null
+    private var shownUpdate: MobileUpdates.Status? = null
+    private var agentServerId: String? = null
+    private var agentBusy = false
+    private var agentResult = ""
+    private var agentError = false
+    private var helpText: String? = null
+    private var helpOnline = false
+    private var helpLoading = false
+    private var helpQuery = ""
+    private var helpSection = "setup"
+    private val installedVersion by lazy { MobileUpdates.installedVersion(this) }
+    private class AboutUpdateViews(val status: TextView, val check: Button, val actions: LinearLayout)
     private class SpeedViews(val status:TextView,val steps:TextView,val down:TextView,val up:TextView,val ping:TextView,val start:Button)
     private val speedTick=object:Runnable{
         override fun run(){
@@ -97,6 +112,12 @@ class MainActivity:Activity() {
                 update(exitView,exitLine())
                 if(page=="home")refreshTraffic()
                 if(page=="logs")update(logView,diagnostics())
+                if(page=="about")refreshUpdateCard()
+                updateNotice?.let { notice ->
+                    val version = newerRelease()?.version
+                    notice.visibility = if (version == null) View.GONE else View.VISIBLE
+                    if (version != null) update(notice, "Доступна версия $version")
+                }
             }catch(e:Exception){update(heroDetail,e.message.orEmpty())}
             main.postDelayed(this,1000)
         }
@@ -105,6 +126,9 @@ class MainActivity:Activity() {
         super.onCreate(savedInstanceState);window.statusBarColor=Palette.background;window.navigationBarColor=Palette.background
         store=SettingsStore(this);selected.addAll(store.packages)
         page=savedInstanceState?.getString("page")?:"home";editingId=savedInstanceState?.getString("editingId").orEmpty()
+        helpSection=savedInstanceState?.getString("helpSection")?:"setup"
+        helpQuery=savedInstanceState?.getString("helpQuery").orEmpty()
+        agentServerId=savedInstanceState?.getString("agentServerId")
         chartRange=ChartRange.entries.firstOrNull{it.name==savedInstanceState?.getString("chartRange")}?:ChartRange.MINUTE
         importId=savedInstanceState?.getString("importId").orEmpty();pendingProxy=savedInstanceState?.getString("pendingProxy").orEmpty()
         searchQuery=savedInstanceState?.getString("search").orEmpty();formDraft=savedInstanceState?.getBundle("draft")
@@ -113,6 +137,7 @@ class MainActivity:Activity() {
         listOf("enrollment-key.runtime","device-key.runtime").forEach{java.io.File(filesDir,it).delete()}
         if(Build.VERSION.SDK_INT>=33)onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT){handleBack()}
         render();scanApps()
+        if (store.checkUpdates) MobileUpdates.check(automatic = true)
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"),101)
     }
     override fun onResume(){super.onResume();main.removeCallbacks(poll);main.post(poll);if(page=="speed"){main.removeCallbacks(speedTick);main.post(speedTick)}}
@@ -120,6 +145,8 @@ class MainActivity:Activity() {
     override fun onSaveInstanceState(out:Bundle){
         out.putString("page",page);out.putString("editingId",editingId);out.putString("importId",importId);out.putString("pendingProxy",pendingProxy);out.putString("search",searchQuery)
         out.putString("chartRange",chartRange.name)
+        out.putString("helpSection",helpSection);out.putString("helpQuery",helpQuery)
+        out.putString("agentServerId",agentServerId)
         out.putString("statsPeriod",statsPeriod);out.putString("speedKind",speedKind);out.putBoolean("speedDirect",speedDirect);out.putString("speedProvider",speedProvider)
         if(page.endsWith("Editor"))out.putBundle("draft",Bundle().apply{
             putString("name",nameField?.text.toString());putString("host",hostField?.text.toString())
@@ -135,11 +162,12 @@ class MainActivity:Activity() {
     override fun onBackPressed(){handleBack()}
     private fun handleBack(){when{
         page.endsWith("Editor")->go(if(page=="serverEditor")"servers" else "proxies")
+        page=="help"->go("about")
         page in moreSections->go("more")
         page!="home"->go("home")
         else->finish()
     }}
-    private val moreSections=setOf("servers","proxies","settings","logs")
+    private val moreSections=setOf("servers","proxies","settings","logs","about","help")
     private fun go(destination:String){
         if(checking||pendingTrust){toast("Дождитесь завершения проверки");return}
         if(page.endsWith("Editor")&&formSignature()!=formSnapshot)AlertDialog.Builder(this).setTitle("Сохранить изменения?").setMessage("В форме есть несохранённые данные.")
@@ -151,6 +179,7 @@ class MainActivity:Activity() {
         heroTitle=null;heroDetail=null;connectButton=null;downSpeed=null;upSpeed=null;downTotal=null;upTotal=null;chart=null;logView=null
         chartPeaks=null;appTrafficList=null;appTrafficEmpty=null;appTrafficTitle=null;appTrafficRows.clear()
         nameField=null;hostField=null;portField=null;userField=null;serverSpinner=null;exitView=null;speedViews=null
+        aboutUpdate=null;shownUpdate=null;updateNotice=null
         main.removeCallbacks(speedTick)
         proxyUdpReceive=null;proxyUdpAgentReceive=null
         val root=column().apply{setBackgroundColor(Palette.background);isFocusableInTouchMode=true}
@@ -174,7 +203,8 @@ class MainActivity:Activity() {
         if(page=="apps")appsPage()else{
             val scroll=ScrollView(this).apply{isFillViewport=true;clipToPadding=false};body=column().apply{setPadding(dp(20),dp(8),dp(20),dp(20))};scroll.addView(body);content.addView(scroll)
             when(page){"servers"->serversPage();"proxies"->proxiesPage();"logs"->logsPage();"serverEditor"->serverEditor();"proxyEditor"->proxyEditor()
-                "speed"->speedPage();"stats"->statsPage();"more"->morePage();"settings"->settingsPage();else->{page="home";homePage()}}
+                "speed"->speedPage();"stats"->statsPage();"more"->morePage();"settings"->settingsPage()
+                "about"->aboutPage();"help"->helpPage();else->{page="home";homePage()}}
         };root.requestFocus()
     }
     private fun homePage(){
@@ -182,6 +212,10 @@ class MainActivity:Activity() {
         heroTitle=label("Готов к подключению",23,true).also{hero.addView(it)}
         heroDetail=label("Выберите профиль и приложения",14,false,Palette.muted).also{hero.addView(it,spaced(8))}
         connectButton=button("Подключить",true){connectOrStop()};hero.addView(connectButton,spaced(18));body.addView(hero,spaced(12))
+        updateNotice = button("Обновления") { go("about") }.apply {
+            visibility = View.GONE
+            body.addView(this, spaced(12))
+        }
         val proxy=store.activeProxy;val server=proxy?.let{store.server(it.serverId)};val profile=card()
         profile.addView(label((proxy?.name?:"Профиль не выбран")+"  ›",16,true,Palette.accent))
         profile.addView(label(server?.let{"${it.name} · ${it.host.ifBlank{"адрес не указан"}}"}?:"Добавьте сервер и прокси",13,false,Palette.muted),spaced(4))
@@ -499,12 +533,10 @@ class MainActivity:Activity() {
         item("proxies","Прокси","Профили подключения и локальный порт SOCKS5 · ${store.proxies().size}")
         item("settings","Настройки","Шифрование, приоритет звонков, окна UDP, показ IP-адресов")
         item("logs","Журнал","Диагностика подключения и ошибок")
+        item("about","О программе","Версия ${MobileUpdates.versionName(this)} · обновления, агент и справка")
     }
 
-    private fun settingsPage(){
-        heading("Настройки","Общие для всех подключений, как в приложении для компьютера")
-        val connection=card();connection.addView(label("Подключение",16,true))
-        fun toggle(parent:LinearLayout,title:String,hint:String,value:Boolean,change:(Boolean)->Unit){
+    private fun settingsToggle(parent:LinearLayout,title:String,hint:String,value:Boolean,change:(Boolean)->Unit){
             val line=row().apply{gravity=Gravity.CENTER_VERTICAL}
             val texts=column();texts.addView(label(title,15,true));texts.addView(label(hint,12,false,Palette.muted),spaced(4))
             line.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
@@ -514,14 +546,284 @@ class MainActivity:Activity() {
                 setOnCheckedChangeListener{_,on->change(on)}}
             line.addView(switch);line.setOnClickListener{switch.isChecked=!switch.isChecked}
             parent.addView(line,spaced(14))
-        }
-        toggle(connection,"Проверять прокси после подключения","Сразу после подключения запрашивает через туннель внешний IP и страну выхода.",store.verifyProxy){store.verifyProxy=it}
+    }
+
+    private fun settingsPage(){
+        heading("Настройки","Общие для всех подключений, как в приложении для компьютера")
+        val connection=card();connection.addView(label("Подключение",16,true))
+        settingsToggle(connection,"Проверять прокси после подключения","Сразу после подключения запрашивает через туннель внешний IP и страну выхода.",store.verifyProxy){store.verifyProxy=it}
         connection.addView(label("Переподключение после обрыва и смены сети работает всегда. Чтобы туннель поднимался сам, включите «Постоянная VPN» для Secret Tunnel в настройках Android.",12,false,Palette.muted),spaced(14))
         body.addView(connection,spaced(16))
         val privacy=card();privacy.addView(label("Конфиденциальность",16,true))
-        toggle(privacy,"Скрывать IP-адреса","Адреса закрыты точками, пока не нажать на них. Удобно для скриншотов.",store.hideSensitive){store.hideSensitive=it;revealIp=false}
+        settingsToggle(privacy,"Скрывать IP-адреса","Адреса закрыты точками, пока не нажать на них. Удобно для скриншотов.",store.hideSensitive){store.hideSensitive=it;revealIp=false}
         body.addView(privacy,spaced(12))
+        val updates = card()
+        updates.addView(label("Обновления",16,true))
+        startupUpdateToggle(updates)
+        updates.addView(button("О программе") { go("about") }, spaced(12))
+        body.addView(updates, spaced(12))
         body.addView(tuningCard(),spaced(12))
+    }
+
+    private fun startupUpdateToggle(parent: LinearLayout) =
+        settingsToggle(parent, "Проверять обновления при запуске",
+            "При запуске проверяется версия на GitHub. APK скачивается по кнопке.",
+            store.checkUpdates) { store.checkUpdates = it }
+
+    private fun newerRelease() =
+        MobileUpdates.status.release?.takeIf { compareReleaseVersions(it.version, installedVersion) > 0 }
+
+    private fun aboutPage() {
+        heading("О программе", "Secret Tunnel · версия ${MobileUpdates.versionName(this)}")
+        val updates = card()
+        updates.addView(label("Обновления", 18, true))
+        val updateStatus = label("", 14, false, Palette.muted).apply {
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        updates.addView(updateStatus, spaced(8))
+        val updateActions = column()
+        updates.addView(updateActions)
+        val check = button("Проверить", true) {
+            MobileUpdates.check()
+            refreshUpdateCard()
+        }
+        updates.addView(check, spaced(12))
+        startupUpdateToggle(updates)
+        aboutUpdate = AboutUpdateViews(updateStatus, check, updateActions)
+        body.addView(updates, spaced(16))
+        refreshUpdateCard()
+
+        val agent = card()
+        agent.addView(label("Агент на сервере", 18, true))
+        agent.addView(label("Приложение скачивает агент своей версии и передаёт его на сервер по SSH.", 13, false, Palette.muted), spaced(8))
+        val servers = store.servers().filter { it.host.isNotBlank() && it.user.isNotBlank() }
+        val server = servers.firstOrNull { it.id == agentServerId }
+            ?: servers.firstOrNull { it.id == store.activeProxy?.serverId } ?: servers.firstOrNull()
+        agentServerId = server?.id
+        if (server == null) {
+            agent.addView(button("Добавить сервер") { go("servers") }, spaced(12))
+        } else {
+            agent.addView(button("Сервер · ${server.name}") {
+                val selectedIndex = servers.indexOf(server)
+                AlertDialog.Builder(this).setTitle("Сервер")
+                    .setSingleChoiceItems(servers.map { it.name }.toTypedArray(), selectedIndex) { dialog, index ->
+                        dialog.dismiss()
+                        agentServerId = servers[index].id
+                        agentResult = ""
+                        render()
+                    }.setNegativeButton("Отмена", null).show()
+            }.apply { isEnabled = !agentBusy }, spaced(12))
+            agent.addView(button("Проверить версию") { manageServerAgent(server, false) }
+                .apply { isEnabled = !agentBusy }, spaced(8))
+            agent.addView(button("Установить агент $installedVersion") {
+                AlertDialog.Builder(this).setTitle("Установить агент $installedVersion?")
+                    .setMessage("Сервер «${server.name}». Новые подключения будут использовать установленную версию.")
+                    .setNegativeButton("Отмена", null)
+                    .setPositiveButton("Установить") { _, _ -> attempt { manageServerAgent(server, true) } }.show()
+            }.apply { isEnabled = !agentBusy }, spaced(8))
+            if (agentResult.isNotEmpty()) agent.addView(label(agentResult, 13, false,
+                if (agentError) Palette.error else Palette.text).apply {
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            }, spaced(12))
+        }
+        body.addView(agent, spaced(12))
+
+        val help = card()
+        help.addView(label("Справка", 18, true))
+        for ((section, title) in listOf("setup" to "Установка", "knowledge" to "База знаний")) {
+            help.addView(button(title) { helpSection = section; helpQuery = ""; go("help") }, spaced(8))
+        }
+        body.addView(help, spaced(12))
+
+        val links = card()
+        links.addView(label("Проект", 18, true))
+        for ((title, url) in listOf("Сайт" to PROJECT_SITE, "GitHub" to PROJECT_URL,
+            "Все релизы" to "$PROJECT_URL/releases", "Сообщить о проблеме" to "$PROJECT_URL/issues")) {
+            links.addView(button(title) { openProjectLink(url) }, spaced(8))
+        }
+        body.addView(links, spaced(12))
+    }
+
+    private fun refreshUpdateCard() {
+        val views = aboutUpdate ?: return
+        val status = MobileUpdates.status
+        if (status == shownUpdate) return
+        val previous = shownUpdate
+        shownUpdate = status
+        val release = status.release
+        val newer = newerRelease() != null
+        val total = release?.apk?.size ?: 0L
+        val message = when {
+            status.checking -> "Проверяем обновления…"
+            status.downloading -> "Скачиваем ${TrafficMeter.bytes(status.received.toDouble())} из ${TrafficMeter.bytes(total.toDouble())}"
+            status.error.isNotEmpty() -> status.error
+            status.ready -> "APK скачан. Контрольная сумма и подпись совпали."
+            newer && release != null -> listOfNotNull("Доступна версия ${release.version}",
+                release.publishedAt.takeIf { it.isNotEmpty() },
+                release.apk?.let { TrafficMeter.bytes(it.size.toDouble()) }).joinToString(" · ")
+            release != null && compareReleaseVersions(release.version, installedVersion) < 0 ->
+                "Установлена версия $installedVersion. Последний публичный релиз — ${release.version}."
+            release != null -> "Установлена актуальная версия $installedVersion."
+            else -> "Проверьте, есть ли новая версия."
+        }
+        update(views.status, message)
+        views.status.setTextColor(if (status.error.isNotEmpty()) Palette.error else Palette.muted)
+        views.check.isEnabled = !status.checking && !status.downloading
+        if (status.downloading && previous?.downloading == true) {
+            (views.actions.getChildAt(0) as? ProgressBar)?.progress = updatePercent(status.received, total)
+            return
+        }
+        views.actions.removeAllViews()
+        if (status.downloading) {
+            views.actions.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = 100
+                progress = updatePercent(status.received, total)
+                progressTintList = ColorStateList.valueOf(Palette.accent)
+                contentDescription = "Загрузка обновления"
+            }, spaced(8))
+        } else if (newer && release != null) {
+            if (release.notes.isNotBlank()) views.actions.addView(button("Что нового") {
+                AlertDialog.Builder(this).setTitle("Версия ${release.version}").setMessage(release.notes)
+                    .setPositiveButton("Закрыть", null).show()
+            }, spaced(8))
+            val action = when {
+                status.ready -> button("Установить обновление", true) {
+                    if (!packageManager.canRequestPackageInstalls()) {
+                        toast("Разрешите установку для Secret Tunnel, затем нажмите кнопку снова.")
+                    }
+                    MobileUpdates.install(this, UPDATE_INSTALL_REQUEST)
+                    refreshUpdateCard()
+                }
+                release.apk != null && release.checksums != null -> button("Скачать обновление", true) {
+                    MobileUpdates.download(this)
+                    refreshUpdateCard()
+                }
+                else -> button("Открыть страницу релиза") { openProjectLink(release.page) }
+            }
+            views.actions.addView(action, spaced(8))
+        }
+    }
+
+    private fun updatePercent(received: Long, total: Long) =
+        if (total > 0) (received * 100 / total).toInt().coerceIn(0, 100) else 0
+
+    private fun manageServerAgent(server: ServerProfile, install: Boolean) {
+        if (agentBusy) return
+        val route = store.route(server.id)
+        require(route.all { validPin(it.fingerprint) }) { "Подтвердите отпечатки в разделе «Серверы» → «Проверить SSH и агент»." }
+        agentBusy = true
+        agentError = false
+        agentResult = if (install) "Скачиваем и проверяем архив агента…" else "Подключаемся к серверу…"
+        render()
+        val proxy = MobileUpdates.proxy()
+        Thread {
+            val result = runCatching {
+                var archive: java.io.File? = null
+                try {
+                    if (install) {
+                        val release = ReleaseUpdates.exact(installedVersion, proxy)
+                        val asset = release.agent ?: error("В релизе нет агента для Linux x86_64")
+                        archive = java.io.File.createTempFile("agent-update-", ".tar.gz", cacheDir)
+                        ReleaseUpdates.download(release, asset, archive, proxy)
+                        runOnUiThread {
+                            agentResult = "Передаём проверенный архив на сервер по SSH…"
+                            if (page == "about" && !isDestroyed && !isFinishing) render()
+                        }
+                    }
+                    store.withSshConfig(route) { config ->
+                        val response = JSONObject(NativeBridge.manageAgent(config.toString(), installedVersion, archive?.path.orEmpty()))
+                        require(!response.has("error")) { friendlyError(response.optString("error")) }
+                        when {
+                            response.isNull("version") -> "Агент на сервере не найден."
+                            install -> "Установлен агент ${response.getString("version")}. Новые подключения используют его."
+                            response.getString("version") == installedVersion -> "Агент $installedVersion — та же версия, что у приложения."
+                            else -> "На сервере агент ${response.getString("version")}, приложение $installedVersion."
+                        }
+                    }
+                } finally {
+                    archive?.delete()
+                }
+            }
+            runOnUiThread {
+                agentBusy = false
+                agentError = result.isFailure
+                agentResult = result.getOrElse { it.message ?: "Не удалось выполнить операцию с агентом" }
+                if (page == "about" && !isDestroyed && !isFinishing) render()
+            }
+        }.start()
+    }
+
+    private fun helpPage() {
+        val title = if (helpSection == "setup") "Установка" else "База знаний"
+        heading(title, if (helpOnline) "Свежая версия с GitHub" else "Копия, встроенная в приложение")
+        val bundledHelp = assets.open("knowledge.md").bufferedReader().use { it.readText() }
+        if (!helpLoading && !helpOnline) {
+            helpLoading = true
+            val port = MobileUpdates.proxy()
+            Thread {
+                val refreshed = runCatching { ReleaseUpdates.help(port) }.getOrNull()
+                runOnUiThread {
+                    helpLoading = false
+                    if (!refreshed.isNullOrBlank()) {
+                        helpOnline = true
+                        helpText = refreshed
+                        if (page == "help" && !isDestroyed && !isFinishing) render()
+                    }
+                }
+            }.start()
+        }
+        val search = EditText(this).apply {
+            isSingleLine = true
+            hint = "Поиск по справке"
+            contentDescription = hint
+            setTextColor(Palette.text)
+            setHintTextColor(Palette.muted)
+            setText(helpQuery)
+        }
+        body.addView(search, spaced(12))
+        body.addView(button("Открыть на сайте") {
+            openProjectLink(PROJECT_SITE + "knowledge.html" + if (helpSection == "setup") "#android-start" else "")
+        }, spaced(8))
+        val articles = column()
+        body.addView(articles)
+        fun sections(markdown: String) = markdown.split(Regex("(?m)(?=^## )")).drop(1)
+        val articlesByTitle = sections(bundledHelp).associateBy { it.substringBefore('\n') }.toMutableMap()
+        sections(helpText.orEmpty()).forEach { articlesByTitle[it.substringBefore('\n')] = it }
+        fun showArticles() {
+            articles.removeAllViews()
+            val words = helpQuery.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            val filtered = articlesByTitle.values.filter { article ->
+                val heading = article.lineSequence().first()
+                (helpSection != "setup" || heading.removePrefix("## ") in
+                    listOf("Установка и подключение", "Выбор приложений", "Настройки на телефоне",
+                        "Обновления на телефоне", "Цепочка на телефоне", "Частые проблемы")) &&
+                    words.all { article.contains(it, ignoreCase = true) }
+            }
+            if (filtered.isEmpty()) articles.addView(label("По этому запросу ничего не найдено.", 14, false, Palette.muted), spaced(16))
+            for (article in filtered) {
+                val name = article.substringBefore('\n').removePrefix("## ")
+                articles.addView(button(name) {
+                    val content = article.substringAfter('\n').lineSequence()
+                        .filterNot { it.startsWith("<") || it.startsWith("![") || it.startsWith("```") }.joinToString("\n")
+                        .replace(Regex("""\[([^\]]+)]\([^)]+\)"""), "$1").replace("**", "").replace("`", "").trim()
+                    AlertDialog.Builder(this).setTitle(name).setMessage(content)
+                        .setPositiveButton("Закрыть", null).show()
+                }, spaced(8))
+            }
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                helpQuery = s.toString()
+                showArticles()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        showArticles()
+    }
+
+    private fun openProjectLink(url: String) {
+        startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
     }
 
     // Exit address and country: the same facts the desktop shows on «Подключение».
@@ -921,7 +1223,12 @@ class MainActivity:Activity() {
     }
     @Deprecated("Platform activity result")
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
-        super.onActivityResult(requestCode,resultCode,data);if(resultCode!=RESULT_OK)return
+        super.onActivityResult(requestCode,resultCode,data)
+        if (requestCode == UPDATE_INSTALL_REQUEST) {
+            if (resultCode == RESULT_FIRST_USER) message("Android не смог установить обновление. Можно повторить установку из «О программе».")
+            return
+        }
+        if(resultCode!=RESULT_OK)return
         if(requestCode==103){attempt{startTunnel()};return}
         if(requestCode==102){val id=importId;val uri=data?.data?:return;checking=true
             Thread{

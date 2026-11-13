@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.25 — 2026-11-14
+
+- Android: «Ещё» → «О программе» shows the installed version and checks GitHub for stable releases manually or at startup. New releases show their notes and download progress. The app verifies the APK checksum, version and signature before opening Android's installer.
+- Android: check the agent version and install the matching Linux x86_64 agent through the configured SSH route.
+- Android: setup instructions and a searchable knowledge base with an offline copy.
+
 ## 0.3.24 — 2026-11-13
 
 - Desktop: «О программе» checks for updates and downloads the selected release with SHA-256 verification. On macOS it keeps the previous bundle and restores it if macOS rejects the launch request. On Windows the installed edition waits for the installer to finish successfully before reopening. The portable edition links to the release page.

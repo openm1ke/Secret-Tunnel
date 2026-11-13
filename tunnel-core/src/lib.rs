@@ -3,6 +3,8 @@
 pub mod embedded_ssh;
 #[path = "../../src-tauri/src/udp_protocol.rs"]
 pub mod udp_protocol;
+#[path = "../../src-tauri/src/agent_update.rs"]
+pub mod agent_update;
 
 pub fn log_line(logs: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: impl Into<String>) {
     if let Ok(mut logs) = logs.lock() {

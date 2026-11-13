@@ -650,6 +650,7 @@ object Http {
 
     class Response(private val input: InputStream, val status: Int, private val headers: Map<String, String>) : Closeable {
         val keepAlive get() = !headers["connection"].orEmpty().equals("close", true)
+        fun header(name: String): String? = headers[name.lowercase()]
         private var done = false
         /** Reads the body, reporting each piece; `more` returning false stops early. */
         fun body(capture: OutputStream? = null, more: (Int) -> Boolean) {
@@ -710,7 +711,12 @@ object Http {
             while (true) { val line = readLine(input); if (line.isEmpty()) break; headers[line.substringBefore(':').trim().lowercase()] = line.substringAfter(':').trim() }
             return Response(input, status, headers)
         }
-        fun get(path: String, close: Boolean = false): Response { output.write(head("GET", path, close, "").toByteArray()); output.flush(); return response() }
+        fun get(path: String, close: Boolean = false): Response {
+            require(path.startsWith("/") && path.none { it <= ' ' || it == '\u007f' }) { "Некорректный HTTP-путь" }
+            output.write(head("GET", path, close, "").toByteArray())
+            output.flush()
+            return response()
+        }
         fun post(path: String, length: Long, write: (OutputStream, Long) -> Unit): Response {
             output.write(head("POST", path, false, "Content-Type: application/octet-stream\r\nContent-Length: $length\r\n").toByteArray())
             var sent = 0L

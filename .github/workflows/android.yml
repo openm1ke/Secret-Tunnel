@@ -2,9 +2,9 @@ name: Android APK
 on:
   workflow_dispatch:
   push:
-    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'scripts/build-android.sh', '.github/workflows/android.yml']
+    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/agent_update.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'docs/help/knowledge.md', 'scripts/build-android.sh', '.github/workflows/android.yml']
   pull_request:
-    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'scripts/build-android.sh', '.github/workflows/android.yml']
+    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/agent_update.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'docs/help/knowledge.md', 'scripts/build-android.sh', '.github/workflows/android.yml']
 jobs:
   apk:
     runs-on: ubuntu-latest

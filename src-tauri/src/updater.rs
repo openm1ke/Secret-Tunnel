@@ -1,6 +1,7 @@
 //! Updates from the project's GitHub releases: the desktop app (the macOS
 //! zip, the Windows installer) and the server agent. Downloads are checked
 //! against the release's SHA256SUMS.txt before anything is installed.
+use crate::agent_update::valid_version;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -201,16 +202,6 @@ fn installed_with_installer() -> bool {
 /// The latest published release, tried directly and then through the tunnel.
 pub fn latest(proxy: Option<(&str, u16)>) -> Result<Release, String> {
     fetch_release("latest", None, proxy)
-}
-
-fn valid_version(version: &str) -> bool {
-    let parts: Vec<_> = version.split('.').collect();
-    parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && part.parse::<u64>().is_ok()
-        })
 }
 
 pub fn release_for(version: &str, proxy: Option<(&str, u16)>) -> Result<Release, String> {
@@ -630,48 +621,11 @@ fn prepare_install() -> Result<(), String> {
     Err("Автообновление доступно на macOS и Windows".into())
 }
 
-/// Installs the verified archive arriving on stdin in an isolated workspace.
-#[cfg(feature = "embedded-ssh")]
-pub fn agent_install_command(version: &str) -> String {
-    assert!(valid_version(version));
-    format!(
-        r#"set -eu
-umask 077
-d=$(mktemp -d)
-trap 'rm -rf -- "$d"' EXIT
-trap 'exit 130' HUP INT TERM
-cd "$d"
-cat > agent.tar.gz
-case "$(uname -s):$(uname -m)" in Linux:x86_64|Linux:amd64) ;; *) echo 'This server archive requires Linux x86_64.' >&2; exit 1;; esac
-tar xzf agent.tar.gz
-[ "$(./secret-tunnel-agent-linux-x86_64 --version)" = 'secret-tunnel-agent {version}' ] || {{ echo 'Agent archive has an unexpected version.' >&2; exit 1; }}
-ST_AGENT_INSTALL_DIR="$HOME/.local/bin" sh install-server-agent.sh >install.log 2>&1 || {{ tail -n 20 install.log >&2; exit 1; }}
-"$HOME/.local/bin/secret-tunnel-agent" --version"#
-    )
-}
-
-#[cfg(feature = "embedded-ssh")]
-pub const AGENT_VERSION_COMMAND: &str = r#"agent="$HOME/.local/bin/secret-tunnel-agent"
-if [ -e "$agent" ]; then "$agent" --version; else echo 'secret-tunnel-agent нет'; fi"#;
-
-#[cfg(feature = "embedded-ssh")]
-pub fn agent_version_from_output(output: &str) -> Result<Option<&str>, String> {
-    output
-        .lines()
-        .find_map(|line| {
-            let value = line.trim().strip_prefix("secret-tunnel-agent ")?;
-            if value == "нет" {
-                Some(Ok(None))
-            } else {
-                valid_version(value).then_some(Ok(Some(value)))
-            }
-        })
-        .unwrap_or_else(|| Err("Агент вернул неизвестную версию".into()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "embedded-ssh")]
+    use crate::agent_update::agent_version_from_output;
 
     #[cfg(target_os = "macos")]
     fn mac_swap_fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {

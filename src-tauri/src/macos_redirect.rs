@@ -167,6 +167,11 @@ fn is_discord_process(id: &str) -> bool {
         || id.starts_with("discord helper (")
 }
 
+#[cfg(feature = "macos-discord-udp-test")]
+pub(crate) fn discord_trace_enabled() -> bool {
+    std::env::var_os("ST_MACOS_DISCORD_TRACE").is_some()
+}
+
 #[derive(Default)]
 struct Progress {
     ready: bool,
@@ -624,7 +629,8 @@ impl RedirectState {
         let logs = self.logs.clone().unwrap_or_default();
         if let Some(stdout) = child.stdout.take() {
             #[cfg(feature = "macos-discord-udp-test")]
-            let trace_discord = self.plan.as_ref().is_some_and(|p| p.discord_udp_port.is_some());
+            let trace_discord = discord_trace_enabled()
+                || self.plan.as_ref().is_some_and(|p| p.discord_udp_port.is_some());
             let progress = self.progress.clone();
             let logs = logs.clone();
             let direct = self.direct.clone();

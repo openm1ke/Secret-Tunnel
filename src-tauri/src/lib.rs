@@ -313,21 +313,38 @@ impl TunnelRuntime {
             #[cfg(feature = "embedded-ssh")]
             TunnelHandle::Embedded(handle) => {
                 #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-                if let Some((port, udp)) = &self.discord_udp {
+                if self.discord_udp.is_some() || macos_redirect::discord_trace_enabled() {
+                    self.log_discord_sample("main", self.proxy.port, handle);
+                    if let Some((port, udp)) = &self.discord_udp {
+                        self.log_discord_sample("discord-udp", *port, udp);
+                    }
+                }
+                #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+                if let Some((_, udp)) = &self.discord_udp {
                     let (rx, tx) = handle.traffic_totals();
                     let (udp_rx, udp_tx) = udp.traffic_totals();
-                    let main_stats = handle.transport_stats();
-                    let voice_stats = udp.transport_stats();
-                    eprintln!("DISCORD_UDP_TEST port={port} main_rx={rx} main_tx={tx} main_udp_rx={} main_udp_tx={} main_agent={:?} voice_rx={udp_rx} voice_tx={udp_tx} voice_udp_rx={} voice_udp_tx={} voice_agent={:?}",
-                        main_stats.diagnostics.udp_received, main_stats.diagnostics.udp_tx_attempts,
-                        main_stats.peer.and_then(|p| p.diagnostics).map(|d| d.process_id),
-                        voice_stats.diagnostics.udp_received, voice_stats.diagnostics.udp_tx_attempts,
-                        voice_stats.peer.and_then(|p| p.diagnostics).map(|d| d.process_id));
                     return Ok(Some((rx.saturating_add(udp_rx), tx.saturating_add(udp_tx))));
                 }
                 Ok(Some(handle.traffic_totals()))
             }
         }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+    fn log_discord_sample(&self, role: &str, port: u16, handle: &embedded_ssh::EmbeddedTunnelHandle) {
+        let (rx, tx) = handle.traffic_totals();
+        let stats = handle.transport_stats();
+        let peer = stats.peer.as_ref();
+        eprintln!("DISCORD_SAMPLE {}", serde_json::json!({
+            "at_ms": secret_tunnel_mux::unix_millis(),
+            "role": role, "port": port, "rx": rx, "tx": tx, "active_flows": stats.active,
+            "outer_tcp": handle.ssh_stats().outer_tcp,
+            "client_queue_peak": stats.send_queue_peak, "client_udp_drops": stats.udp_drops,
+            "client": stats.diagnostics,
+            "agent_queue_peak": peer.map(|p| p.send_queue_peak),
+            "agent_udp_drops": peer.map(|p| p.udp_drops),
+            "agent": peer.and_then(|p| p.diagnostics.as_ref()),
+        }));
     }
 
     fn stop(self, logs: &Arc<Mutex<Vec<String>>>) {

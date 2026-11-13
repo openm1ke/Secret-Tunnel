@@ -39,6 +39,9 @@ class MainActivity:Activity() {
     private var heroTitle:TextView?=null
     private var heroDetail:TextView?=null
     private var connectButton:Button?=null
+    private var connectionLayers:TextView?=null
+    private var connectionProbes:TextView?=null
+    private var checkConnectionButton:Button?=null
     private var downSpeed:TextView?=null
     private var upSpeed:TextView?=null
     private var downTotal:TextView?=null
@@ -95,6 +98,7 @@ class MainActivity:Activity() {
                 update(downSpeed,TrafficMeter.bytes(rate.down)+"/с");update(upSpeed,TrafficMeter.bytes(rate.up)+"/с")
                 update(downTotal,"Всего: "+TrafficMeter.bytes(rx.toDouble()));update(upTotal,"Всего: "+TrafficMeter.bytes(tx.toDouble()))
                 update(exitView,exitLine())
+                refreshConnectionHealth()
                 if(page=="home")refreshTraffic()
                 if(page=="logs")update(logView,diagnostics())
             }catch(e:Exception){update(heroDetail,e.message.orEmpty())}
@@ -149,6 +153,7 @@ class MainActivity:Activity() {
     private fun navigate(destination:String){page=destination;formDraft=null;render()}
     private fun render(){
         heroTitle=null;heroDetail=null;connectButton=null;downSpeed=null;upSpeed=null;downTotal=null;upTotal=null;chart=null;logView=null
+        connectionLayers=null;connectionProbes=null;checkConnectionButton=null
         chartPeaks=null;appTrafficList=null;appTrafficEmpty=null;appTrafficTitle=null;appTrafficRows.clear()
         nameField=null;hostField=null;portField=null;userField=null;serverSpinner=null;exitView=null;speedViews=null
         main.removeCallbacks(speedTick)
@@ -182,6 +187,18 @@ class MainActivity:Activity() {
         heroTitle=label("Готов к подключению",23,true).also{hero.addView(it)}
         heroDetail=label("Выберите профиль и приложения",14,false,Palette.muted).also{hero.addView(it,spaced(8))}
         connectButton=button("Подключить",true){connectOrStop()};hero.addView(connectButton,spaced(18));body.addView(hero,spaced(12))
+        val health=card()
+        connectionLayers=label("",14,true).also{health.addView(it)}
+        connectionProbes=label("",13,false,Palette.muted).also{health.addView(it,spaced(6))}
+        checkConnectionButton=button("Проверить соединение"){
+            val error=NativeBridge.checkConnection()
+            if(error.isNotBlank())toast(error)
+            else { lastStatus=JSONObject(NativeBridge.status());refreshConnectionHealth() }
+        }.also{health.addView(it,spaced(8))}
+        health.addView(label("TCP и IPv6 проверяют открытие соединения. UDP и DNS используют запрос к 1.1.1.1. Проверки через SOCKS не проверяют захват приложений.",12,false,Palette.muted),spaced(6))
+        health.addView(label("После остановки VPN трафик приложений снова может идти напрямую.",12,false,Palette.muted),spaced(4))
+        body.addView(health,spaced(12))
+        refreshConnectionHealth()
         val proxy=store.activeProxy;val server=proxy?.let{store.server(it.serverId)};val profile=card()
         profile.addView(label((proxy?.name?:"Профиль не выбран")+"  ›",16,true,Palette.accent))
         profile.addView(label(server?.let{"${it.name} · ${it.host.ifBlank{"адрес не указан"}}"}?:"Добавьте сервер и прокси",13,false,Palette.muted),spaced(4))
@@ -226,6 +243,36 @@ class MainActivity:Activity() {
         body.addView(apps,spaced(12))
         refreshTraffic()
         body.addView(button(if(store.packages.isEmpty())"Выбрать приложения" else "Выбрать приложения · ${store.packages.size}"){go("apps")},spaced(12))
+    }
+
+    private fun refreshConnectionHealth() {
+        val phase=TunnelVpnService.phase
+        val connected=lastStatus.optBoolean("running")
+        val ssh=when {
+            phase=="Ожидание сети" || phase=="Смена сети" || phase=="Переподключение" -> phase
+            phase=="Остановка" -> "Отключается"
+            connected -> "Подключён"
+            lastStatus.optBoolean("starting") || phase=="Подключение" -> "Подключается"
+            else -> "Отключён"
+        }
+        val interception=if(TunnelVpnService.interceptionActive) "Включён" else "Выключен"
+        update(connectionLayers,"SSH · $ssh\nПерехват VPN · $interception")
+        val checks=lastStatus.optJSONObject("checks")
+        val usable=connected && phase=="Работает"
+        val running=usable && checks?.optBoolean("running")==true
+        val report=if(usable)checks?.optJSONObject("report") else null
+        val labels=listOf("tcp" to "TCP","udp" to "UDP","dns" to "DNS","ipv6" to "IPv6")
+        val summary=labels.joinToString("\n") { (key,label) ->
+            val result=report?.optJSONObject(key)
+            val value=if(running)"Проверяем…" else when(result?.optString("status")) {
+                "passed" -> "${result.optLong("ms")} мс"
+                "failed" -> result.optString("detail").ifBlank{"Нет ответа"}
+                else -> "Нет проверки"
+            }
+            "$label · $value"
+        }
+        update(connectionProbes,summary)
+        checkConnectionButton?.isEnabled=usable && !running
     }
 
     private fun refreshTraffic() {
@@ -515,7 +562,7 @@ class MainActivity:Activity() {
             line.addView(switch);line.setOnClickListener{switch.isChecked=!switch.isChecked}
             parent.addView(line,spaced(14))
         }
-        toggle(connection,"Проверять прокси после подключения","Сразу после подключения запрашивает через туннель внешний IP и страну выхода.",store.verifyProxy){store.verifyProxy=it}
+        toggle(connection,"Проверять прокси после подключения","Проверяет TCP, UDP, DNS и IPv6 через локальный SOCKS и запрашивает внешний IP и страну.",store.verifyProxy){store.verifyProxy=it}
         connection.addView(label("Переподключение после обрыва и смены сети работает всегда. Чтобы туннель поднимался сам, включите «Постоянная VPN» для Secret Tunnel в настройках Android.",12,false,Palette.muted),spaced(14))
         body.addView(connection,spaced(16))
         val privacy=card();privacy.addView(label("Конфиденциальность",16,true))
@@ -794,7 +841,7 @@ class MainActivity:Activity() {
         logView=label(diagnostics(),11,false,Palette.muted).apply{typeface=Typeface.MONOSPACE;setTextIsSelectable(true)}.also{body.addView(it,spaced(16))}
     }
     private fun activeTunnelDetails(): String {
-        val status = "TCP и UDP выбранных приложений идут через туннель"
+        val status = TunnelVpnService.detail
         val windows = lastStatus.optJSONObject("transport")?.let(TransportDiagnostics::windows)
         val heartbeat = lastStatus.optJSONObject("transport")?.optJSONObject("diagnostics")?.optJSONObject("heartbeat")
         val measuredAt = heartbeat?.optLong("last_ack_at_ms")?:0

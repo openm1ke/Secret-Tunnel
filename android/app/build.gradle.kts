@@ -10,6 +10,7 @@ android {
         targetSdk = 34
         versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 32400
         versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.24"
+        manifestPlaceholders["appLabel"] = "Secret Tunnel"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -21,10 +22,19 @@ android {
         keyAlias = System.getenv("ANDROID_KEY_ALIAS")
         keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
     }
-    buildTypes { getByName("release") {
-        isMinifyEnabled = false
-        if (!keyPath.isNullOrBlank()) signingConfig = signingConfigs.getByName("release")
-    } }
+    buildTypes {
+        getByName("debug") {
+            if (System.getenv("ST_ANDROID_LOCAL_TEST") == "1") {
+                applicationIdSuffix = ".testbuild"
+                versionNameSuffix = "-test"
+                manifestPlaceholders["appLabel"] = "Secret Tunnel Test"
+            }
+        }
+        getByName("release") {
+            isMinifyEnabled = false
+            if (!keyPath.isNullOrBlank()) signingConfig = signingConfigs.getByName("release")
+        }
+    }
     packaging { jniLibs { useLegacyPackaging = false; keepDebugSymbols += "**/*.so" } }
 }
 dependencies {

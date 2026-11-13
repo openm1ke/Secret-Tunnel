@@ -27,6 +27,7 @@ fn background_command(program: &str) -> Command {
 
 #[cfg(feature = "embedded-ssh")]
 mod embedded_ssh;
+mod connection_checks;
 mod speedtest;
 mod updater;
 mod icon_png;
@@ -58,7 +59,6 @@ pub fn application_catalog() -> Result<Vec<InstalledApp>, String> {
 }
 mod traffic_relay;
 
-#[cfg(feature = "embedded-ssh")]
 mod udp_protocol;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -220,6 +220,7 @@ struct TunnelStatus {
     rx_total: u64,
     tx_total: u64,
     last_error: String,
+    checks: connection_checks::Snapshot,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -260,9 +261,17 @@ struct TunnelRuntime {
     started_at: u64,
     last_error: String,
     last_traffic: Option<TrafficSample>,
+    checks: Arc<connection_checks::Checks>,
 }
 
 impl TunnelRuntime {
+    fn check_connection(&self) -> Result<bool, String> {
+        let ip = self.proxy.host.parse::<std::net::IpAddr>().map_err(|e| e.to_string())?;
+        self.checks
+            .start((ip, self.proxy.port).into(), self.ssh_engine() == "embedded")
+            .map_err(|e| e.to_string())
+    }
+
     fn ssh_engine(&self) -> String {
         match &self.handle {
             TunnelHandle::System(..) => "system".to_string(),
@@ -1013,53 +1022,6 @@ fn fetch_ipinfo(token: &str, proxy: Option<&ProxyProfile>) -> Result<Option<IpIn
     }))
 }
 
-fn verify_proxy_cancellable(
-    proxy: &ProxyProfile,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<String, String> {
-    let mut child = background_command("curl")
-        .arg("-sS")
-        .arg("--max-time")
-        .arg("8")
-        .arg("--socks5-hostname")
-        .arg(format!("{}:{}", proxy.host, proxy.port))
-        .arg("https://api.ipify.org")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
-
-    let deadline = Instant::now() + Duration::from_secs(9);
-    loop {
-        if cancelled() || Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Proxy verification cancelled or timed out".into());
-        }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("curl exited with {}", output.status)
-        } else {
-            stderr
-        });
-    }
-
-    let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if ip.is_empty() {
-        Err("Proxy verification returned empty response".to_string())
-    } else {
-        Ok(ip)
-    }
-}
-
 fn status_emoji(state: &str) -> String {
     match state {
         "running" => "🟢",
@@ -1158,6 +1120,7 @@ fn build_status(
         last_error: runtime
             .map(|runtime| runtime.last_error.clone())
             .unwrap_or_default(),
+        checks: Default::default(),
     }
 }
 
@@ -1526,27 +1489,17 @@ fn start_session_workers(app: tauri::AppHandle) {
                 }
             };
             if let Some(runtime) = retired {
-                let generation = runtime.generation;
+                if let Some(error) = failure {
+                    let retry = snapshot.plan.as_ref()
+                        .filter(|plan| plan.settings.auto_reconnect && secret_tunnel_session_control::retryable(&error))
+                        .map(|plan| Duration::from_secs(plan.settings.reconnect_delay_seconds.max(1).into()));
+                    log_line(&state.logs, format!("Tunnel failed: {error}"));
+                    state.control.failed(runtime.generation, error, retry, Instant::now());
+                }
                 runtime.stop(&state.logs);
                 finish_session(&state);
                 if let Err(error) = stop_application_redirect(&state) {
                     log_line(&state.logs, error);
-                }
-                if let Some(error) = failure {
-                    log_line(&state.logs, format!("Tunnel failed: {error}"));
-                    let retry = snapshot
-                        .plan
-                        .as_ref()
-                        .filter(|plan| {
-                            plan.settings.auto_reconnect
-                                && secret_tunnel_session_control::retryable(&error)
-                        })
-                        .map(|plan| {
-                            Duration::from_secs(plan.settings.reconnect_delay_seconds.max(1).into())
-                        });
-                    state
-                        .control
-                        .failed(generation, error, retry, Instant::now());
                 }
             }
             if let Some(attempt) = state.control.attempt(Instant::now()) {
@@ -1560,7 +1513,7 @@ fn start_session_workers(app: tauri::AppHandle) {
                     let engine = if server.jump_server_id.is_some() { "embedded" } else { plan.settings.ssh_engine.as_str() };
                     match engine {
                         "system" => {
-                            start_system_ssh_tunnel(&state, plan.clone(), server, proxy, generation)
+                            start_system_ssh_tunnel(&state, server, proxy, generation)
                         }
                         "embedded" => start_embedded_ssh_tunnel(
                             &state,
@@ -1574,6 +1527,11 @@ fn start_session_workers(app: tauri::AppHandle) {
                 })();
                 match result {
                     Ok(runtime) => {
+                        if plan.settings.verify_proxy_on_start && state.control.current(generation) {
+                            if let Err(error) = runtime.check_connection() {
+                                log_line(&state.logs, format!("Проверка соединения: {error}"));
+                            }
+                        }
                         let mut runtime = Some(runtime);
                         if !state.control.publish(generation, || {
                             *state.runtime.lock().unwrap() = runtime.take();
@@ -1672,12 +1630,12 @@ fn start_embedded_ssh_tunnel(
         started_at: now_epoch(),
         last_error: String::new(),
         last_traffic: None,
+        checks: Default::default(),
     })
 }
 
 fn start_system_ssh_tunnel(
     state: &AppState,
-    config: AppConfig,
     server: ServerProfile,
     proxy: ProxyProfile,
     generation: u64,
@@ -1787,29 +1745,6 @@ fn start_system_ssh_tunnel(
         }
         if tcp_connects("127.0.0.1", upstream.port(), Duration::from_millis(200)) {
             log_line(&state.logs, format!("Tunnel is running, ssh pid={pid}"));
-            if config.settings.verify_proxy_on_start {
-                match verify_proxy_cancellable(&proxy, &|| {
-                    !state.control.current(generation) || state.closing.load(Ordering::SeqCst)
-                }) {
-                    Ok(ip) => {
-                        if config.settings.hide_sensitive {
-                            log_line(&state.logs, "Proxy verification OK, public IP hidden");
-                        } else {
-                            log_line(
-                                &state.logs,
-                                format!("Proxy verification OK, public IP {ip}"),
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let message = format!("Proxy verification failed: {error}");
-                        log_line(&state.logs, &message);
-                        return Err(message);
-                    }
-                }
-            }
             return Ok(TunnelRuntime {
                 generation,
                 handle: TunnelHandle::System(startup.0.take().unwrap(), relay),
@@ -1818,6 +1753,7 @@ fn start_system_ssh_tunnel(
                 started_at: now_epoch(),
                 last_error: String::new(),
                 last_traffic: None,
+                checks: Default::default(),
             });
         }
     }
@@ -1858,6 +1794,10 @@ fn tunnel_status(state: State<'_, AppState>) -> Result<TunnelStatus, String> {
         .clone();
     status.state = snapshot.phase.label().into();
     status.state_emoji = status_emoji(&status.state);
+    status.checks = state.runtime.lock().map_err(|e| e.to_string())?.as_ref()
+        .filter(|runtime| snapshot.phase == Phase::Running && runtime.generation == snapshot.generation)
+        .map(|runtime| runtime.checks.snapshot())
+        .unwrap_or_default();
     if snapshot.phase != Phase::Running {
         status.pid = None;
         status.started_at = None;
@@ -1870,6 +1810,17 @@ fn tunnel_status(state: State<'_, AppState>) -> Result<TunnelStatus, String> {
         status.last_error = snapshot.error;
     }
     Ok(status)
+}
+
+#[tauri::command]
+fn check_connection(state: State<'_, AppState>) -> Result<(), String> {
+    let snapshot = state.control.snapshot();
+    let runtime = state.runtime.lock().map_err(|e| e.to_string())?;
+    let runtime = runtime.as_ref()
+        .filter(|runtime| snapshot.phase == Phase::Running && runtime.generation == snapshot.generation)
+        .ok_or("Сначала подключите SSH")?;
+    runtime.check_connection()?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2429,6 +2380,7 @@ pub fn run() {
             stop_tunnel,
             restart_tunnel,
             tunnel_status,
+            check_connection,
             traffic_history,
             get_logs,
             clear_logs

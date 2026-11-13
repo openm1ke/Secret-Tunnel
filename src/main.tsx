@@ -2,6 +2,7 @@ import DomainsPanel from "./DomainsPanel";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import AboutPanel, { Release } from "./AboutPanel";
+import ConnectionHealth, { ConnectionChecks } from "./ConnectionHealth";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
@@ -134,6 +135,7 @@ type TunnelStatus = {
   rx_total: number;
   tx_total: number;
   last_error: string;
+  checks: ConnectionChecks;
 };
 
 /** A program started by a selected application that went around the tunnel. */
@@ -172,6 +174,7 @@ const emptyStatus: TunnelStatus = {
   state: "stopped", state_emoji: "", app_version: "", ssh_engine: "embedded", server_id: "", server_name: "", ssh_route: [],
   proxy_id: "", proxy_name: "", proxy_host: "127.0.0.1", proxy_port: 1080, pid: null, started_at: null, ip: "",
   country_code: "", country_name: "", country_flag: "", rx_total: 0, tx_total: 0, last_error: "",
+  checks: { running: false, report: null },
 };
 
 // Backend messages that are still in English, as people read them here.
@@ -891,8 +894,9 @@ function App() {
                 <div className="heroMain">
                   <h2>{stateTitle(status.state)}</h2>
                   <p className="heroSub">
-                    {connected ? <>Трафик выходит в интернет через {currentServer.name}{country ? <> · <Flag code={status.country_code} label={country} /> {country}</> : null}. В сети {formatUptime(status.started_at, now)}.</>
-                      : phase === "busy" ? "Устанавливаем SSH-соединение и проверяем агент на сервере."
+                    {connected ? <>SSH до {status.server_name || currentServer.name}{country ? <> · <Flag code={status.country_code} label={country} /> {country}</> : null}. В сети {formatUptime(status.started_at, now)}.</>
+                      : status.state === "stopping" ? "Закрываем SSH и останавливаем перехват."
+                      : phase === "busy" ? "Устанавливаем SSH-соединение."
                       : phase === "error" ? (status.last_error || "Соединение прервалось. Подробности в журнале ниже.")
                       : currentServer.id ? `Нажмите «Подключить», чтобы направить трафик через ${currentServer.name}.` : "Добавьте SSH-сервер во вкладке «Серверы»."}
                   </p>
@@ -924,6 +928,19 @@ function App() {
                   ))}
                 </div>
               </div>
+
+              <ConnectionHealth
+                ssh={stateTitle(status.state)}
+                connected={connected}
+                interception={redirect.running ? (connected ? "Включён" : "Без SSH") : redirect.starting ? "Запускается"
+                  : redirect.last_error ? "Ошибка" : redirect.platform === "unknown" ? "Проверяем"
+                  : !redirectSupported || !redirect.component_available ? "Компонент недоступен" : "Выключен"}
+                interceptionError={redirect.last_error}
+                directWarning={isMac && redirect.component_available
+                  ? "При остановке или сбое перехвата новые соединения могут идти напрямую." : ""}
+                checks={status.checks}
+                onCheck={() => invoke("check_connection").then(refreshAll).catch((error) => notify(String(error), true))}
+              />
 
               <div className="pickers">
                 <label>
@@ -1435,7 +1452,7 @@ function App() {
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.start_tunnel_on_launch} onChange={(event) => updateSettings("start_tunnel_on_launch", event.target.checked)} />
                   <SettingLabel hint="При открытии приложения сразу подключает выбранный сервер. Включайте, когда туннель уже проверен.">Подключаться при запуске приложения</SettingLabel></label>
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.verify_proxy_on_start} onChange={(event) => updateSettings("verify_proxy_on_start", event.target.checked)} />
-                  <SettingLabel hint="После подключения делает пробный запрос через прокси, чтобы сразу увидеть, что трафик проходит.">Проверять прокси после подключения</SettingLabel></label>
+                  <SettingLabel hint="Проверяет TCP, UDP, DNS и IPv6 через локальный SOCKS. Результаты видны в разделе «Подключение».">Проверять прокси после подключения</SettingLabel></label>
               </fieldset>
 
               <fieldset>

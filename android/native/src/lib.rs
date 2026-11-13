@@ -91,6 +91,8 @@ struct State {
     error: String,
     totals: (u64, u64),
     transport: Option<embedded_ssh::TransportSnapshot>,
+    checks: Arc<secret_tunnel_core::connection_checks::Checks>,
+    socks_port: u16,
 }
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 static LOGS: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
@@ -209,6 +211,8 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
     match result {
         Ok(tunnel) if GENERATION.load(Ordering::SeqCst) == generation => {
             s.tunnel = Some(tunnel);
+            s.socks_port = cfg.socks_port;
+            s.checks = Default::default();
             Ok(())
         }
         Ok(tunnel) => {
@@ -257,6 +261,8 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_stop(
     GENERATION.fetch_add(1, Ordering::SeqCst);
     let tunnel = {
         let mut s = state().lock().unwrap();
+        s.checks = Default::default();
+        s.socks_port = 0;
         let t = s.tunnel.take();
         if let Some(t) = &t {
             let (rx, tx) = t.traffic_totals();
@@ -302,8 +308,25 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         "frames_tx":stats.frames_tx,"frames_rx":stats.frames_rx,"write_batches":stats.write_batches,"udp_drops":stats.udp_drops,"protocol_errors":stats.protocol_errors,"diagnostics":stats.diagnostics});
     let mut transport = transport;
     transport["ssh"] = json!(s.tunnel.as_ref().map(|t| t.ssh_stats()));
-    let value=json!({"running":s.tunnel.is_some()&&s.error.is_empty(),"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.agent_summary()),"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
+    let running = s.tunnel.is_some() && s.error.is_empty();
+    let checks = if running { s.checks.snapshot() } else { Default::default() };
+    let value=json!({"running":running,"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.agent_summary()),"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.ipv6_supported()).unwrap_or(false),"checks":checks,"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_checkConnection(
+    mut env: JNIEnv,
+    _this: JObject,
+) -> jstring {
+    let state = state().lock().unwrap();
+    let result = if state.tunnel.is_some() && state.error.is_empty() {
+        state.checks.start(([127, 0, 0, 1], state.socks_port).into(), true)
+            .err().map(|error| error.to_string()).unwrap_or_default()
+    } else {
+        "Сначала подключите SSH".into()
+    };
+    output(&mut env, result)
 }
 
 #[no_mangle]

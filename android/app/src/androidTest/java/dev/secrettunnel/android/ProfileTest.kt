@@ -43,7 +43,7 @@ class ProfileTest {
             migrated.saveProxy(ProxyProfile("second-proxy","Другой порт","second",1081))
             migrated.activeProxyId="second-proxy"
             val running=migrated.snapshot()
-            assertEquals(1081,running.socksPort);assertEquals("second",running.serverId)
+            assertEquals(1081,running.socksPort);assertEquals("second",running.route.last().profile.id)
             migrated.activeProxyId="local"
             assertEquals(1080,migrated.snapshot().socksPort);assertEquals(1081,running.socksPort)
             var rejected=false

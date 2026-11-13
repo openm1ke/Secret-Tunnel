@@ -17,6 +17,8 @@ class TunnelVpnService : VpnService() {
         @Volatile var phase = "Остановлен"
         @Volatile var detail = ""
         @Volatile var active = false
+        @Volatile internal var interceptionActive = false
+            private set
         val traffic=TrafficHistory()
         @Volatile internal var appTraffic: AppTrafficAccounting? = null
             private set
@@ -44,12 +46,22 @@ class TunnelVpnService : VpnService() {
     private val underlying=UnderlyingNetworkTracker()
     private var recoveryNetworkHandle:Long?=null
     private val connectivity by lazy {getSystemService(android.net.ConnectivityManager::class.java)}
-    private val networkCallback=object:android.net.ConnectivityManager.NetworkCallback(){
-        override fun onAvailable(network:android.net.Network){
-            connectivity.getNetworkCapabilities(network)?.let{onCapabilitiesChanged(network,it)}
+    private fun observePhysicalNetwork() {
+        // The VPN app is outside its own allowlist, so its default is the
+        // physical network. Read it on the monitor worker, outside callbacks.
+        val network = connectivity.activeNetwork
+        val capabilities = network?.let(connectivity::getNetworkCapabilities)
+        val now = SystemClock.elapsedRealtime()
+        if (network != null && capabilities != null
+            && capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            && !capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)) {
+            underlying.available(network.networkHandle, now)
+        } else {
+            underlying.currentHandle()?.let { underlying.lost(it, now) }
         }
+    }
+    private val networkCallback=object:android.net.ConnectivityManager.NetworkCallback(){
         override fun onCapabilitiesChanged(network:android.net.Network,capabilities:android.net.NetworkCapabilities){
-            if(connectivity.activeNetwork!=network)return
             if(!capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)&&capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)){
                 if(underlying.currentHandle()!=network.networkHandle)android.util.Log.i("SecretTunnelNetwork","default_available handle=${network.networkHandle}")
                 underlying.available(network.networkHandle,SystemClock.elapsedRealtime())
@@ -82,7 +94,7 @@ class TunnelVpnService : VpnService() {
         sessionSavedAt=SystemClock.elapsedRealtime()
         if(!active)sessionId=null
     }
-    private fun readyDetail()="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"+
+    private fun readyDetail()="Маршруты VPN: ${if(engineIpv6==true)"IPv4 и IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"+
         if(reportedRejections>0)" · отказов по лимиту: $reportedRejections" else ""
     private val monitor = object:Runnable {
         override fun run(){
@@ -91,6 +103,8 @@ class TunnelVpnService : VpnService() {
                 if(stopping.get())return@execute
                 var recoveryAttempted=false
                 try {
+                    observePhysicalNetwork()
+                    interceptionActive = TProxyIsRunning()
                     val networkAction=underlying.action(SystemClock.elapsedRealtime())
                     if(networkAction==UnderlyingNetworkTracker.Action.OFFLINE||networkAction==UnderlyingNetworkTracker.Action.WAIT){
                         val waiting=if(networkAction==UnderlyingNetworkTracker.Action.OFFLINE)"Ожидание сети" else "Смена сети"
@@ -109,7 +123,7 @@ class TunnelVpnService : VpnService() {
                         if(phase=="Работает"&&rejected!=reportedRejections){reportedRejections=rejected;detail=readyDetail();notifyState()}
                     }
                     val newNetwork=moved&&recoveryNetworkHandle!=underlying.currentHandle()
-                    when(if(newNetwork)RecoveryPolicy.Action.RECONNECT_SSH else recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running")&&!moved,TProxyIsRunning())){
+                    when(if(newNetwork)RecoveryPolicy.Action.RECONNECT_SSH else recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running")&&!moved,interceptionActive)){
                         RecoveryPolicy.Action.RECONNECT_SSH->{
                             recoveryAttempted=!newNetwork
                             if(newNetwork)recovery.reset()
@@ -125,7 +139,12 @@ class TunnelVpnService : VpnService() {
                             phase="Восстановление";detail="Перезапускаем обработчик TCP/UDP. VPN остаётся включён.";notifyState()
                             startPacketEngine();if(!stopping.get())markReady()
                         }
-                        else->{}
+                        else->{
+                            // Android can restore the same Network handle after a brief outage.
+                            if(networkAction==UnderlyingNetworkTracker.Action.READY &&
+                                status.optBoolean("running") && interceptionActive &&
+                                (phase=="Ожидание сети" || phase=="Смена сети")) markReady()
+                        }
                     }
                 }catch(error:Exception){
                     if(!stopping.get()){
@@ -141,7 +160,6 @@ class TunnelVpnService : VpnService() {
     }
     override fun onCreate() {
         super.onCreate()
-        connectivity.activeNetwork?.let {network->connectivity.getNetworkCapabilities(network)?.let{networkCallback.onCapabilitiesChanged(network,it)}}
         connectivity.registerDefaultNetworkCallback(networkCallback,main)
         File(filesDir, "ssh-key.runtime").delete()
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "SSH-туннель", NotificationManager.IMPORTANCE_LOW))
@@ -215,7 +233,10 @@ class TunnelVpnService : VpnService() {
             UnderlyingNetworkTracker.Action.OFFLINE->{phase="Ожидание сети";detail="VPN включён. Ждём доступную сеть для SSH."}
             UnderlyingNetworkTracker.Action.WAIT,UnderlyingNetworkTracker.Action.RECONNECT->{phase="Смена сети";detail="VPN включён. Переподключаем SSH."}
             // A new SSH session starts its refusal counters from zero.
-            else->{phase="Работает";reportedRejections=0;detail=readyDetail()}
+            else->{
+                phase="Работает";reportedRejections=0;detail=readyDetail()
+                if (SettingsStore(this).verifyProxy) NativeBridge.checkConnection()
+            }
         }
         notifyState()
     }
@@ -226,6 +247,7 @@ class TunnelVpnService : VpnService() {
         check(status.optBoolean("running")){"SSH не готов для обработки пакетов"}
         val current=session?:error("Нет сеанса VPN")
         val packages=current.packages
+        interceptionActive = false
         TProxyStopService()
         if(stopping.get())return
         if(tun==null||engineIpv6!=ipv6||engineCapacity!=capacity){
@@ -266,9 +288,11 @@ class TunnelVpnService : VpnService() {
         if(stopping.get())return
         check(TProxyStartService(config.absolutePath, tun!!.fd)) { "Не удалось запустить обработчик TCP/UDP" }
         check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
+        interceptionActive = true
     }
     private fun connectSsh() {
         if (stopping.get()) return
+        observePhysicalNetwork()
         val networkWhenConnecting=underlying.currentHandle()
         recoveryNetworkHandle=networkWhenConnecting
         val current = session ?: error("Нет параметров сеанса")
@@ -305,6 +329,7 @@ class TunnelVpnService : VpnService() {
         sampling.awaitTermination(1, TimeUnit.SECONDS)
         recordSession(false)
         exitIp = ""; exitCountry = ""
+        interceptionActive = false
         TProxyStopService() // join native reader BEFORE closing its borrowed fd
         TProxySetAccounting(false)
         tun?.close(); tun = null;engineIpv6=null;engineCapacity=0

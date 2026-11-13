@@ -26,7 +26,7 @@ class VpnFixtureTest {
             val values = JSONObject(fixture.readText())
             val host = values.getString("host"); val port = values.getInt("port")
             val pin = values.getString("fingerprint")
-            val observed = JSONObject(NativeBridge.probe(host, port))
+            val observed = JSONObject(NativeBridge.probe(JSONObject().put("host",host).put("port",port).toString()))
             assertFalse("SSH key probe failed", observed.has("error"))
             assertTrue("Probe must match independently trusted OpenSSH key", pin == observed.getString("fingerprint"))
             val store = SettingsStore(context)
@@ -39,7 +39,7 @@ class VpnFixtureTest {
             store.activeProxyId = "emulator-test"
             check(store.prefs.edit().putStringSet("packages",setOf("dev.secrettunnel.probe")).commit())
             assertTrue(scoped.hasKey())
-            assertEquals("emulator-test",store.snapshot().serverId)
+            assertEquals("emulator-test",store.snapshot().route.last().profile.id)
             assertFalse(store.prefs.all.values.any { it is String && it.contains("PRIVATE KEY") })
         } finally { key.delete(); fixture.delete() }
     }

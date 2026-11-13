@@ -12,15 +12,16 @@ import org.json.JSONObject
 class ConnectionTest {
     private val context get()=InstrumentationRegistry.getInstrumentation().targetContext
     private val fixture get()=InstrumentationRegistry.getArguments()
+    private fun probe(host:String,port:Int)=JSONObject(NativeBridge.probe(JSONObject().put("host",host).put("port",port).toString()))
     private fun requireServer(){assumeTrue("Supply sshHost, sshPort, sshUser and sshFingerprint to run the real-server checks",fixture.containsKey("sshHost")&&fixture.containsKey("sshFingerprint"))}
     @Test fun testProbeDoesNotNeedCredentials() {
         requireServer()
-        val result=JSONObject(NativeBridge.probe(fixture.getString("sshHost")!!,fixture.getString("sshPort","22")!!.toInt()))
+        val result=probe(fixture.getString("sshHost")!!,fixture.getString("sshPort","22")!!.toInt())
         assertFalse(result.toString(),result.has("error"))
         assertTrue(result.getString("fingerprint").matches(Regex("SHA256:[A-Za-z0-9+/]{43}")))
     }
     @Test fun testInvalidPortRejected() {
-        assertTrue(JSONObject(NativeBridge.probe("localhost",0)).has("error"))
+        assertTrue(probe("localhost",0).has("error"))
     }
     @Test fun testDeviceKeyEncryptedRoundTrip() {
         val pair=JSONObject(NativeBridge.generateKey())
@@ -53,7 +54,7 @@ class ConnectionTest {
             val host=fixture.getString("sshHost")!!
             val port=fixture.getString("sshPort","22")!!.toInt()
             val user=fixture.getString("sshUser")?:error("Supply sshUser")
-            val pin=JSONObject(NativeBridge.probe(host,port)).getString("fingerprint")
+            val pin=probe(host,port).getString("fingerprint")
             assertEquals("Server fingerprint must match the independently verified fixture",fixture.getString("sshFingerprint"),pin)
             val cfg=JSONObject().put("host",host).put("port",port).put("user",user)
                 .put("key_path",bootstrap.absolutePath).put("device_key_path",device.absolutePath)

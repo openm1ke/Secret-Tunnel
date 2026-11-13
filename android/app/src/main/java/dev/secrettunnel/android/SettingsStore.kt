@@ -47,12 +47,18 @@ data class UdpWindow(val kib: Int, val slots: Int) {
         }
     }
 }
-data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, val qos:String="balanced") {
+data class SshSettings(
+    val cipher: String = "auto",
+    val smallQueue: Boolean = false,
+    val qos: String = "balanced",
+    val priorityUdpSsh: Boolean = false,
+) {
     init {
         require(cipher in listOf("auto","aes128_gcm","chacha20_poly1305")) { "Неизвестный шифр SSH" }
         require(qos in listOf("balanced","voice","throughput")) { "Неизвестный профиль трафика" }
     }
     fun toJson():JSONObject=JSONObject().put("cipher",cipher).put("smallQueue",smallQueue).put("qos",qos)
+        .put("priorityUdpSsh", priorityUdpSsh)
     fun toNativeJson():JSONObject=JSONObject().put("cipher",cipher)
         .put("channel_buffer_messages",if(smallQueue)8 else 32)
         .put("channel_receive_window_bytes",if(smallQueue)1024*1024 else 4*1024*1024)
@@ -62,7 +68,10 @@ data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, v
             else -> JSONObject.NULL
         })
     companion object {
-        fun fromJson(value:JSONObject)=SshSettings(value.optString("cipher","auto"),value.optBoolean("smallQueue",false),value.optString("qos","balanced"))
+        fun fromJson(value: JSONObject) = SshSettings(
+            value.optString("cipher", "auto"), value.optBoolean("smallQueue", false),
+            value.optString("qos", "balanced"), value.optBoolean("priorityUdpSsh", false),
+        )
     }
 }
 
@@ -79,7 +88,7 @@ data class Tuning(val ssh: SshSettings = SshSettings(), val udpReceive: UdpWindo
 data class ProxyProfile(val id:String, val name:String, val serverId:String, val port:Int,
     val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null, val ssh:SshSettings=SshSettings())
 data class TunnelSession(val route:List<SshEndpoint>, val socksPort:Int, val packages:Set<String>,
-    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?, val ssh:SshSettings)
+    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?, val ssh:SshSettings, val priorityUdpPackages:Set<String>)
 
 class SettingsStore(private val context:Context, private val profileId:String?=null) {
     val prefs = context.getSharedPreferences("tunnel", Context.MODE_PRIVATE)
@@ -123,6 +132,9 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     var user:String get()=value("user");set(v){put("user",v)}
     var fingerprint:String get()=value("fingerprint");set(v){put("fingerprint",v)}
     var packages:Set<String> get()=prefs.getStringSet("packages",emptySet())!!.toSet();set(v){prefs.edit().putStringSet("packages",v.toSet()).apply()}
+    var priorityUdpPackages: Set<String>
+        get() = prefs.getStringSet("priority_udp_packages", emptySet())!!.toSet()
+        set(value) { prefs.edit().putStringSet("priority_udp_packages", value.toSet()).apply() }
     var activeProxyId:String get()=prefs.getString("active_proxy","")!!;set(v){require(proxies().any{it.id==v});prefs.edit().putString("active_proxy",v).apply()}
     val activeProxy:ProxyProfile? get()=proxies().firstOrNull{it.id==prefs.getString("active_proxy","")}
     fun servers():List<ServerProfile> = ids().map { id ->
@@ -223,9 +235,11 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
             require(server.host.isNotBlank() && server.user.isNotBlank()) { "Настройте сервер «${server.name}»" }
             require(SettingsStore(context, server.id).hasKey()) { "Добавьте SSH-ключ для сервера «${server.name}»" }
         }
+        val packages = packages
         require(packages.isNotEmpty()) {"Выберите приложения"}
         val tuning=tuning
-        return TunnelSession(route,proxy.port,packages,tuning.udpReceive,tuning.udpAgentReceive,tuning.ssh)
+        return TunnelSession(route, proxy.port, packages, tuning.udpReceive, tuning.udpAgentReceive,
+            tuning.ssh, priorityUdpPackages.intersect(packages))
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {

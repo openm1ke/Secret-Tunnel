@@ -256,7 +256,13 @@ class MainActivity:Activity() {
             else -> "Отключён"
         }
         val interception=if(TunnelVpnService.interceptionActive) "Включён" else "Выключен"
-        update(connectionLayers,"SSH · $ssh\nПерехват VPN · $interception")
+        val priority = lastStatus.optJSONObject("priority_udp_ssh")?.takeIf { TunnelVpnService.interceptionActive }
+        val priorityRoute = when (priority?.optBoolean("separate")) {
+            true -> "\nUDP отмеченных приложений · Отдельный SSH"
+            false -> "\nUDP отмеченных приложений · Основной SSH"
+            null -> ""
+        }
+        update(connectionLayers, "SSH · $ssh\nПерехват VPN · $interception$priorityRoute")
         val checks=lastStatus.optJSONObject("checks")
         val usable=connected && phase=="Работает"
         val running=usable && checks?.optBoolean("running")==true
@@ -472,8 +478,19 @@ class MainActivity:Activity() {
         val queues=listOf("Стандартная · 4 МиБ","Уменьшенная · 1 МиБ · для тестов")
         choice({"Очередь SSH · ${queues[if(tuning.ssh.smallQueue)1 else 0]}"},"Очередь SSH",queues,{if(tuning.ssh.smallQueue)1 else 0}){save(tuning.copy(ssh=tuning.ssh.copy(smallQueue=it==1)))}
         val qos=listOf("balanced","voice","throughput");val qosNames=listOf("Сбалансированный (рекомендуется)","Голос","Максимальная скорость")
-        choice({"Приоритет звонков · ${qosNames[qos.indexOf(tuning.ssh.qos)]}"},"Приоритет звонков",qosNames,{qos.indexOf(tuning.ssh.qos)}){save(tuning.copy(ssh=tuning.ssh.copy(qos=qos[it])))}
+        val prioritySettings = column()
+        choice({"Приоритет звонков · ${qosNames[qos.indexOf(tuning.ssh.qos)]}"},"Приоритет звонков",qosNames,{qos.indexOf(tuning.ssh.qos)}){
+            save(tuning.copy(ssh=tuning.ssh.copy(qos=qos[it])))
+            prioritySettings.visibility = if (tuning.ssh.qos == "voice") View.VISIBLE else View.GONE
+        }
         addView(label("Во время звонков туннель придерживает загрузки, чтобы голос не прерывался. «Голос» придерживает сильнее, «Максимальная скорость» не придерживает. Уменьшенная очередь нужна для сравнения задержек и может ограничить скорость.",12,false,Palette.muted),spaced(8))
+        if (Build.VERSION.SDK_INT >= 29) {
+            settingsToggle(prioritySettings, "Отдельный SSH для UDP",
+                "Отметьте приложения во вкладке «Приложения», затем переподключите туннель.",
+                tuning.ssh.priorityUdpSsh) { save(tuning.copy(ssh = tuning.ssh.copy(priorityUdpSsh = it))) }
+            prioritySettings.visibility = if (tuning.ssh.qos == "voice") View.VISIBLE else View.GONE
+            addView(prioritySettings)
+        }
         fun window(title:String,current:()->UdpWindow?,saveWindow:(UdpWindow?)->Unit){
             lateinit var view:Button
             view=button("$title · ${udpWindowLabel(current())}"){chooseUdpWindow(title,current()){saveWindow(it);view.text="$title · ${udpWindowLabel(it)}"}}
@@ -548,10 +565,7 @@ class MainActivity:Activity() {
         item("logs","Журнал","Диагностика подключения и ошибок")
     }
 
-    private fun settingsPage(){
-        heading("Настройки","Общие для всех подключений, как в приложении для компьютера")
-        val connection=card();connection.addView(label("Подключение",16,true))
-        fun toggle(parent:LinearLayout,title:String,hint:String,value:Boolean,change:(Boolean)->Unit){
+    private fun settingsToggle(parent:LinearLayout,title:String,hint:String,value:Boolean,change:(Boolean)->Unit){
             val line=row().apply{gravity=Gravity.CENTER_VERTICAL}
             val texts=column();texts.addView(label(title,15,true));texts.addView(label(hint,12,false,Palette.muted),spaced(4))
             line.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
@@ -561,12 +575,16 @@ class MainActivity:Activity() {
                 setOnCheckedChangeListener{_,on->change(on)}}
             line.addView(switch);line.setOnClickListener{switch.isChecked=!switch.isChecked}
             parent.addView(line,spaced(14))
-        }
-        toggle(connection,"Проверять прокси после подключения","Проверяет TCP, UDP, DNS и IPv6 через локальный SOCKS и запрашивает внешний IP и страну.",store.verifyProxy){store.verifyProxy=it}
+    }
+
+    private fun settingsPage(){
+        heading("Настройки","Общие для всех подключений, как в приложении для компьютера")
+        val connection=card();connection.addView(label("Подключение",16,true))
+        settingsToggle(connection,"Проверять прокси после подключения","Проверяет TCP, UDP, DNS и IPv6 через локальный SOCKS и запрашивает внешний IP и страну.",store.verifyProxy){store.verifyProxy=it}
         connection.addView(label("Переподключение после обрыва и смены сети работает всегда. Чтобы туннель поднимался сам, включите «Постоянная VPN» для Secret Tunnel в настройках Android.",12,false,Palette.muted),spaced(14))
         body.addView(connection,spaced(16))
         val privacy=card();privacy.addView(label("Конфиденциальность",16,true))
-        toggle(privacy,"Скрывать IP-адреса","Адреса закрыты точками, пока не нажать на них. Удобно для скриншотов.",store.hideSensitive){store.hideSensitive=it;revealIp=false}
+        settingsToggle(privacy,"Скрывать IP-адреса","Адреса закрыты точками, пока не нажать на них. Удобно для скриншотов.",store.hideSensitive){store.hideSensitive=it;revealIp=false}
         body.addView(privacy,spaced(12))
         body.addView(tuningCard(),spaced(12))
     }
@@ -795,8 +813,11 @@ class MainActivity:Activity() {
         val actions=row();actions.addView(button("Выбранные"){searchQuery="";search.setText("");appAdapter?.showSelected=true;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginEnd=dp(5)})
         actions.addView(button("Все приложения"){appAdapter?.showSelected=false;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginStart=dp(5)});layout.addView(actions,spaced(8))
         if(TunnelVpnService.active)layout.addView(label("Изменения применятся после переподключения",11,false,Palette.warning),spaced(8))
+        val priorityAvailable = Build.VERSION.SDK_INT >= 29 &&
+            store.tuning.ssh.let { it.qos == "voice" && it.priorityUdpSsh }
+        if (priorityAvailable) layout.addView(label("Для приложений со звонками отметьте «UDP через второй SSH».", 12, false, Palette.muted), spaced(8))
         val list=ListView(this).apply{divider=null;cacheColorHint=Palette.background;setPadding(0,dp(6),0,dp(12));clipToPadding=false}
-        appAdapter=ApplicationAdapter();list.adapter=appAdapter
+        appAdapter=ApplicationAdapter(priorityAvailable);list.adapter=appAdapter
         val listArea=FrameLayout(this);listArea.addView(list,FrameLayout.LayoutParams(-1,-1))
         appEmpty=label("Ищем приложения…",14,false,Palette.muted).apply{gravity=Gravity.CENTER;setPadding(dp(12),dp(24),dp(12),dp(24))}.also{listArea.addView(it,FrameLayout.LayoutParams(-1,-1));list.emptyView=it}
         layout.addView(listArea,LinearLayout.LayoutParams(-1,0,1f));refreshApps()
@@ -813,8 +834,9 @@ class MainActivity:Activity() {
             .filter{it.pkg!=packageName&&packageManager.checkPermission("android.permission.INTERNET",it.pkg)==PackageManager.PERMISSION_GRANTED}
             .distinctBy{it.pkg}.sortedBy{it.label.lowercase()};catalogLoaded=true;runOnUiThread{refreshApps()}
     }.start()}
-    private class AppHolder(val icon:ImageView,val name:TextView,val pkg:TextView,val toggle:Switch)
-    private inner class ApplicationAdapter:BaseAdapter(){
+    private class AppHolder(val icon:ImageView,val name:TextView,val pkg:TextView,val toggle:Switch,val priority:CheckBox)
+    private inner class ApplicationAdapter(private val priorityAvailable: Boolean):BaseAdapter(){
+        private val priorityPackages = store.priorityUdpPackages.toMutableSet()
         private var visible=listOf<AppEntry>();var showSelected=false
         fun refresh(){visible=catalog.filter{(!showSelected||it.pkg in selected)&&(it.label.contains(searchQuery,true)||it.pkg.contains(searchQuery,true))};notifyDataSetChanged()}
         override fun getCount()=visible.size
@@ -824,13 +846,37 @@ class MainActivity:Activity() {
             val container=convertView as? LinearLayout ?: row().apply{
                 gravity=Gravity.CENTER_VERTICAL;minimumHeight=dp(80);setPadding(0,dp(12),0,dp(12))
                 val icon=ImageView(this@MainActivity);addView(icon,LinearLayout.LayoutParams(dp(40),dp(40)).apply{marginEnd=dp(12)})
-                val texts=column();val name=label("",14,true);val pkg=label("",10,false,Palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));addView(texts,LinearLayout.LayoutParams(0,-2,1f))
-                val toggle=Switch(this@MainActivity).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.accent,Palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.raised,Palette.border))};addView(toggle);tag=AppHolder(icon,name,pkg,toggle)
+                val texts=column();val name=label("",14,true);val pkg=label("",10,false,Palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4))
+                val priority = CheckBox(this@MainActivity).apply {
+                    text = "UDP через второй SSH"; textSize = 12f; setTextColor(Palette.text)
+                    buttonTintList = ColorStateList.valueOf(Palette.accent)
+                    minHeight = dp(48)
+                }
+                texts.addView(priority)
+                addView(texts,LinearLayout.LayoutParams(0,-2,1f))
+                val toggle=Switch(this@MainActivity).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.accent,Palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.raised,Palette.border))};addView(toggle);tag=AppHolder(icon,name,pkg,toggle,priority)
             }
             val item=visible[position];val holder=container.tag as AppHolder;holder.name.text=item.label;holder.pkg.text=item.pkg
             holder.icon.setImageDrawable(iconCache.get(item.pkg)?:try{packageManager.getApplicationIcon(item.pkg).also{iconCache.put(item.pkg,it)}}catch(_:Exception){null})
             holder.toggle.setOnCheckedChangeListener(null);holder.toggle.isChecked=item.pkg in selected;holder.toggle.contentDescription="Через туннель: ${item.label}"
-            holder.toggle.setOnCheckedChangeListener{_,enabled->if(enabled)selected.add(item.pkg)else selected.remove(item.pkg);store.packages=selected;update(appCount,"Найдено: ${catalog.size}  ·  Через туннель: ${selected.size}");if(showSelected)refresh()}
+            holder.priority.setOnCheckedChangeListener(null)
+            holder.priority.visibility = if (priorityAvailable && item.pkg in selected) View.VISIBLE else View.GONE
+            holder.priority.contentDescription = "UDP через второй SSH: ${item.label}"
+            holder.priority.isChecked = item.pkg in priorityPackages
+            holder.priority.setOnCheckedChangeListener { _, enabled ->
+                if (enabled) priorityPackages.add(item.pkg) else priorityPackages.remove(item.pkg)
+                store.priorityUdpPackages = priorityPackages
+            }
+            holder.toggle.setOnCheckedChangeListener { _, enabled ->
+                if (enabled) selected.add(item.pkg) else {
+                    selected.remove(item.pkg)
+                    holder.priority.isChecked = false
+                }
+                store.packages = selected
+                holder.priority.visibility = if (priorityAvailable && enabled) View.VISIBLE else View.GONE
+                update(appCount, "Найдено: ${catalog.size}  ·  Через туннель: ${selected.size}")
+                if (showSelected) refresh()
+            }
             container.setOnClickListener{holder.toggle.isChecked=!holder.toggle.isChecked};return container
         }
     }

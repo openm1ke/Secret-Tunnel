@@ -22,12 +22,21 @@ class NavigationTest {
         val activity=instrumentation.startActivitySync(Intent(context,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) as MainActivity
         fun views(root:View):List<View> = listOf(root)+if(root is ViewGroup)(0 until root.childCount).flatMap{views(root.getChildAt(it))}else emptyList()
         fun all()=views(activity.window.decorView)
-        fun tab(name:String){instrumentation.runOnMainSync{val text=all().filterIsInstance<TextView>().last{it.text.toString()==name};assertTrue((text.parent as View).performClick())};instrumentation.waitForIdleSync()}
+        fun tab(name:String){
+            instrumentation.runOnMainSync {
+                val destination = all().last { it.isClickable && it.contentDescription?.toString() == name }
+                assertTrue(destination.performClick())
+            }
+            instrumentation.waitForIdleSync()
+        }
         try{
+            tab("Ещё")
             tab("Серверы")
             instrumentation.runOnMainSync{assertTrue(all().filterIsInstance<Button>().any{it.text.toString().contains("Добавить сервер")})}
+            tab("Ещё")
             tab("Прокси")
             instrumentation.runOnMainSync{assertTrue(all().filterIsInstance<Button>().any{it.text.toString().contains("Добавить прокси")})}
+            tab("Ещё")
             tab("Журнал")
             instrumentation.runOnMainSync{assertTrue(all().filterIsInstance<Button>().any{it.text.toString()=="Копировать журнал"})}
             tab("Приложения")
@@ -50,4 +59,54 @@ class NavigationTest {
         }
     }
     private fun filterOfProbe()=setOf("dev.secrettunnel.probe")
+
+    @Test fun priorityUdpCheckboxPersistsOnlyForSelectedApps() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val probe = "dev.secrettunnel.probe"
+        assumeTrue(android.os.Build.VERSION.SDK_INT >= 29)
+        assumeTrue(runCatching { context.packageManager.getApplicationInfo(probe, 0) }.isSuccess)
+        val store = SettingsStore(context)
+        val packages = store.packages
+        val priority = store.priorityUdpPackages
+        val tuning = store.tuning
+        store.packages = packages + probe
+        store.priorityUdpPackages = priority - probe
+        store.tuning = tuning.copy(ssh = tuning.ssh.copy(qos = "voice", priorityUdpSsh = true))
+        val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)) as MainActivity
+        fun views(root: View): List<View> =
+            listOf(root) + if (root is ViewGroup) (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()
+        fun all() = views(activity.window.decorView)
+        try {
+            instrumentation.runOnMainSync {
+                all().last { it.isClickable && it.contentDescription?.toString() == "Приложения" }.performClick()
+                all().filterIsInstance<EditText>().first().setText(probe)
+            }
+            var loaded = false
+            repeat(50) {
+                if (!loaded) {
+                    instrumentation.runOnMainSync { loaded = all().any { it is CheckBox && it.isShown } }
+                    if (!loaded) Thread.sleep(100)
+                }
+            }
+            assertTrue(loaded)
+            instrumentation.runOnMainSync {
+                val checkbox = all().filterIsInstance<CheckBox>().first { it.isShown }
+                assertFalse(checkbox.isChecked)
+                checkbox.performClick()
+            }
+            assertTrue(probe in store.priorityUdpPackages)
+            instrumentation.runOnMainSync {
+                all().filterIsInstance<Switch>().first().performClick()
+                assertFalse(all().any { it is CheckBox && it.isShown })
+            }
+            assertFalse(probe in store.priorityUdpPackages)
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+            store.packages = packages
+            store.priorityUdpPackages = priority
+            store.tuning = tuning
+        }
+    }
 }

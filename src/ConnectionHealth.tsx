@@ -17,11 +17,13 @@ type Props = {
   interceptionError: string;
   directWarning: string;
   checks: ConnectionChecks;
+  priorityUdp?: { separate: boolean; error: string | null } | null;
+  interceptionRunning: boolean;
   onCheck: () => void;
 };
 
 export default function ConnectionHealth({
-  ssh, connected, interception, interceptionError, directWarning, checks, onCheck,
+  ssh, connected, interception, interceptionError, directWarning, checks, priorityUdp, interceptionRunning, onCheck,
 }: Props) {
   const report = connected ? checks.report : null;
   const running = connected && checks.running;
@@ -34,7 +36,10 @@ export default function ConnectionHealth({
       <div className="connectionLayers" role="status">
         <span>SSH <strong>{ssh}</strong></span>
         <span>Перехват <strong>{interception}</strong></span>
+        {priorityUdp && <span>UDP отмеченных приложений <strong>{!interceptionRunning ? "Включите перехват"
+          : priorityUdp.separate ? "Отдельный SSH" : "Основной SSH"}</strong></span>}
       </div>
+      {priorityUdp?.error && <p className="fieldNote" title={priorityUdp.error}>Второй SSH недоступен. При включённом перехвате новые UDP-соединения отмеченных приложений используют основной туннель.</p>}
       {interceptionError && <p className="connectionError">{interceptionError}</p>}
       {directWarning && <p className="fieldNote">{directWarning}</p>}
       <div className="connectionProbes">

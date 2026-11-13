@@ -38,3 +38,4 @@ Copy-Item -LiteralPath (Join-Path $driverRoot 'LICENSE') -Destination (Join-Path
 Write-Output 'Component prepared. Driver has not been loaded by this build script.'
 
 Add-Content -LiteralPath (Join-Path $outputRoot 'source-revision.txt') -Value 'domain-regex-v1'
+Add-Content -LiteralPath (Join-Path $outputRoot 'source-revision.txt') -Value 'webview-owner-v1'

@@ -231,6 +231,7 @@ fn start(raw: String) -> Result<(), String> {
             } else {
                 cfg.max_connections.clamp(32, 1024)
             },
+            ..Default::default()
         },
         &|| GENERATION.load(Ordering::SeqCst) != generation,
     );

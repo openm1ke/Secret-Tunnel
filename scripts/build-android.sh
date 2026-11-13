@@ -59,6 +59,7 @@ hev_obj="$work/ndk-accounting-obj"
 mkdir -p "$hev_build"
 tar --exclude=.git -cf - -C "$hev" . | tar -xf - -C "$hev_build"
 patch --fuzz=0 -d "$hev_build" -p1 < "$repo/android/ndk/hev-traffic.patch"
+patch --fuzz=0 -d "$hev_build" -p1 < "$repo/android/ndk/hev-priority-udp.patch"
 cp "$repo/android/ndk/"st-traffic.[ch] "$hev_build/src/"
 "$ndk/ndk-build" NDK_PROJECT_PATH=null APP_BUILD_SCRIPT="$hev_build/Android.mk" REV_ID="$revision" \
     NDK_APPLICATION_MK="$repo/android/ndk/Application.mk" NDK_OUT="$hev_obj" \

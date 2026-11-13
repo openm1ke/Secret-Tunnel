@@ -7,6 +7,8 @@ import android.net.VpnService
 import android.os.*
 import org.json.JSONObject
 import java.io.File
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -30,7 +32,7 @@ class TunnelVpnService : VpnService() {
         private const val CHANNEL = "ssh-tunnel"
         private const val NOTICE = 1080
     }
-    external fun TProxyStartService(configPath: String, fd: Int): Boolean
+    external fun TProxyStartService(configPath: String, fd: Int, priorityUdpPort: Int): Boolean
     external fun TProxyStopService(): Boolean
     external fun TProxyIsRunning(): Boolean
     external fun TProxyGetStats(): LongArray
@@ -76,6 +78,21 @@ class TunnelVpnService : VpnService() {
     private var engineIpv6:Boolean?=null
     private var engineCapacity=0
     private var session:TunnelSession?=null
+    @Volatile private var priorityUids: Set<Int> = emptySet()
+
+    // Called once per UDP association while the packet engine still has the original endpoints.
+    @Suppress("unused")
+    fun isPriorityUdp(addresses: ByteArray, localPort: Int, remotePort: Int): Boolean {
+        if (Build.VERSION.SDK_INT < 29) return false
+        val uids = priorityUids
+        if (uids.isEmpty()) return false
+        val size = addresses.size / 2
+        return runCatching {
+            val local = InetSocketAddress(InetAddress.getByAddress(addresses.copyOfRange(0, size)), localPort)
+            val remote = InetSocketAddress(InetAddress.getByAddress(addresses.copyOfRange(size, addresses.size)), remotePort)
+            connectivity.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_UDP, local, remote) in uids
+        }.getOrDefault(false)
+    }
     // Flows refused by either multiplexer end in the current SSH session.
     private var reportedRejections=0L
     private var sessionStarted=0L
@@ -178,10 +195,17 @@ class TunnelVpnService : VpnService() {
         worker.execute {
             try {
                 val settings = SettingsStore(this)
-                session = settings.snapshot()
-                val packages = session!!.packages
+                val snapshot = settings.snapshot()
+                session = snapshot
+                val packages = snapshot.packages
                 require(packages.isNotEmpty()) { "Выберите хотя бы одно приложение" }
                 require(packageName !in packages) { "Нельзя перехватывать собственный SSH-транспорт" }
+                priorityUids = if (Build.VERSION.SDK_INT >= 29 &&
+                    snapshot.ssh.qos == "voice" && snapshot.ssh.priorityUdpSsh) {
+                    snapshot.priorityUdpPackages.mapNotNull { pkg ->
+                        runCatching { packageManager.getApplicationInfo(pkg, 0).uid }.getOrNull()
+                    }.toSet()
+                } else emptySet()
                 // SSH authenticates before claiming routes. Socket protection also
                 // applies on reconnection while the VPN interface already exists.
                 connectSsh()
@@ -286,7 +310,8 @@ class TunnelVpnService : VpnService() {
         """.trimIndent())
         File(filesDir, "tun.log").writeText("")
         if(stopping.get())return
-        check(TProxyStartService(config.absolutePath, tun!!.fd)) { "Не удалось запустить обработчик TCP/UDP" }
+        val priorityPort = status.optJSONObject("priority_udp_ssh")?.optInt("port") ?: 0
+        check(TProxyStartService(config.absolutePath, tun!!.fd, priorityPort)) { "Не удалось запустить обработчик TCP/UDP" }
         check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
         interceptionActive = true
     }
@@ -303,6 +328,7 @@ class TunnelVpnService : VpnService() {
                 .put("udp_receive_window", current.udpReceive?.toJson())
                 .put("agent_udp_receive_window", current.udpAgentReceive?.toJson())
                 .put("ssh_tuning",current.ssh.toNativeJson())
+                .put("priority_udp_ssh", priorityUids.isNotEmpty())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
             underlying.connectedOn(networkWhenConnecting)

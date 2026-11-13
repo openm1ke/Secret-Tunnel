@@ -228,11 +228,52 @@ pub fn domain_profile(
     port: u16,
     own: &str,
 ) -> Result<Value, String> {
+    domain_profile_with_priority_udp(processes, domains, host, port, own, None)
+}
+
+pub fn domain_profile_with_priority_udp(
+    processes: &[String],
+    domains: &[DomainRule],
+    host: &str,
+    port: u16,
+    own: &str,
+    priority_udp: Option<(u16, &[String])>,
+) -> Result<Value, String> {
     secret_tunnel_routing::validate(domains)?;
     let mut value = profile(processes, host, port, own)?;
     let rules = value["ProxyRules"].as_array_mut().unwrap();
     for (i, d) in domains.iter().enumerate() {
         rules.insert(i+1,json!({"Name":format!("Domain {}",d.id),"ProcessName":"*","TargetHosts":"*","TargetPorts":"*","TargetDomains":secret_tunnel_routing::encoded(&d.pattern),"Protocol":"BOTH","Action":if d.action==DomainAction::Tunnel {"PROXY"} else {"DIRECT"},"IsEnabled":d.enabled,"ProxyConfigId":1,"LocalhostViaProxy":false}));
+    }
+    if let Some((secondary, marked)) = priority_udp {
+        if secondary == 0 || secondary == port {
+            return Err("Для второго SSH нужен отдельный локальный SOCKS".into());
+        }
+        let normalize = |name: &str| name.trim().replace('/', "\\").to_lowercase();
+        let marked: std::collections::HashSet<_> = marked.iter().map(|name| normalize(name)).collect();
+        // Generate UDP rules only from validated application rules. Explicit
+        // domain exceptions retain their earlier position in the profile.
+        let mut priority_rules = Vec::new();
+        for rule in rules.iter().skip(domains.len() + 1).filter(|r| r["Action"] == "PROXY") {
+            let names = rule["ProcessName"].as_str().unwrap_or_default().split(';')
+                .filter(|name| marked.contains(*name)).collect::<Vec<_>>().join(";");
+            if names.is_empty() { continue; }
+            let mut udp_rule = rule.clone();
+            udp_rule["Name"] = json!("UDP via second SSH");
+            udp_rule["ProcessName"] = json!(names);
+            udp_rule["Protocol"] = json!("UDP");
+            udp_rule["ProxyConfigId"] = json!(2);
+            priority_rules.push(udp_rule);
+        }
+        if !priority_rules.is_empty() {
+            rules.splice(domains.len() + 1..domains.len() + 1, priority_rules);
+            let proxies = value["ProxyConfigs"].as_array_mut().unwrap();
+            let mut second = proxies[0].clone();
+            second["Id"] = json!(2);
+            second["Name"] = json!("UDP");
+            second["Port"] = json!(secondary.to_string());
+            proxies.push(second);
+        }
     }
     value["SecretTunnelDomains"] = serde_json::to_value(domains).map_err(|e| e.to_string())?;
     Ok(value)
@@ -335,6 +376,11 @@ impl RedirectState {
             && !revision.contains("domain-regex-v1")
         {
             return Err("Для доменов нужен комплект domain-regex-v1. Выберите новый компонент в разделе Приложения → Дополнительно".into());
+        }
+        if value["ProxyConfigs"].as_array().is_some_and(|proxies| proxies.len() > 1)
+            && !revision.contains("webview-owner-v1")
+        {
+            return Err("Для второго SSH обновите компонент перехвата в разделе «Приложения» → «Дополнительно».".into());
         }
         self.stats = Arc::new(Mutex::new(DomainStats::from_profile(value)));
         std::fs::write(
@@ -496,6 +542,25 @@ mod tests {
         assert_eq!(stats.unknown, 1);
         assert!(domain_profile(&[], &rules, "127.0.0.1", 1080, "client.exe").is_ok());
     }
+    #[test]
+    fn marked_windows_app_gets_only_a_udp_override_after_domain_rules() {
+        let apps = ["Dorion.exe", "Firefox.exe"].map(str::to_owned);
+        let marked = ["dorion.EXE", "unselected.exe"].map(str::to_owned);
+        let domains = [DomainRule {
+            id: "exception".into(), pattern: "example.com".into(),
+            enabled: true, action: DomainAction::Direct,
+        }];
+        let p = domain_profile_with_priority_udp(&apps, &domains, "127.0.0.1", 1080, "client.exe", Some((1081, &marked))).unwrap();
+        assert_eq!(p["ProxyRules"][1]["Action"], "DIRECT");
+        assert_eq!(p["ProxyRules"][2]["ProcessName"], "dorion.exe");
+        assert_eq!(p["ProxyRules"][2]["Protocol"], "UDP");
+        assert_eq!(p["ProxyRules"][2]["ProxyConfigId"], 2);
+        assert_eq!(p["ProxyRules"][3]["ProcessName"], "dorion.exe;firefox.exe");
+        assert_eq!(p["ProxyRules"][3]["Protocol"], "BOTH");
+        assert_eq!(p["ProxyRules"][3]["ProxyConfigId"], 1);
+        assert_eq!(p["ProxyConfigs"][1]["Port"], "1081");
+    }
+
     #[test]
     fn long_lists_are_chunked() {
         let names: Vec<_> = (0..100)

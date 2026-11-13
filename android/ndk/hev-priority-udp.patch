@@ -1,0 +1,308 @@
+--- a/src/hev-jni.c
++++ b/src/hev-jni.c
+@@ -21,6 +21,8 @@
+ #include "hev-main.h"
+
+ #include "hev-jni.h"
++
++#include <lwip/ip_addr.h>
+ #include "st-traffic.h"
+
+ /* clang-format off */
+@@ -42,23 +44,45 @@
+ {
+     char *path;
+     int fd;
++    jobject service;
++    jmethodID priority_owner;
++    jint priority_port;
+ };
+
+ static atomic_int is_running;
+ static int thread_joinable;
++static jobject udp_service;
+ static JavaVM *java_vm;
+ static pthread_t work_thread;
+ static pthread_mutex_t mutex;
+ static pthread_key_t current_jni_env;
++/* The packet engine uses cooperative stacks. Run Java and Binder calls on
++ * a regular pthread so ART sees a valid native transition frame. */
++typedef struct {
++    ThreadData *data;
++    pthread_mutex_t mutex;
++    pthread_cond_t changed;
++    int ready;
++    int pending;
++    int stopping;
++    int matched;
++    jbyte addresses[32];
++    int size;
++    jint local_port;
++    jint remote_port;
++} UdpRoute;
++
++static _Thread_local UdpRoute *udp_route;
+
+ static jboolean native_start_service (JNIEnv *env, jobject thiz,
+-                                      jstring conig_path, jint fd);
++                                      jstring config_path, jint fd,
++                                      jint priority_port);
+ static jboolean native_stop_service (JNIEnv *env, jobject thiz);
+ static jboolean native_is_running (JNIEnv *env, jobject thiz);
+ static jlongArray native_get_stats (JNIEnv *env, jobject thiz);
+
+ static JNINativeMethod native_methods[] = {
+-    { "TProxyStartService", "(Ljava/lang/String;I)Z",
++    { "TProxyStartService", "(Ljava/lang/String;II)Z",
+       (void *)native_start_service },
+     { "TProxyStopService", "()Z", (void *)native_stop_service },
+     { "TProxyIsRunning", "()Z", (void *)native_is_running },
+@@ -101,11 +125,100 @@
+ }
+
+ static void *
++udp_route_worker (void *data)
++{
++    UdpRoute *route = data;
++    JNIEnv *env = NULL;
++    int attached = (*java_vm)->AttachCurrentThread (java_vm, &env, NULL) == JNI_OK;
++
++    pthread_mutex_lock (&route->mutex);
++    route->ready = attached ? 1 : -1;
++    pthread_cond_signal (&route->changed);
++    while (attached && !route->stopping) {
++        while (!route->pending && !route->stopping)
++            pthread_cond_wait (&route->changed, &route->mutex);
++        if (route->stopping)
++            break;
++
++        jboolean matches = JNI_FALSE;
++        jbyteArray addresses = (*env)->NewByteArray (env, route->size * 2);
++        if (addresses) {
++            (*env)->SetByteArrayRegion (env, addresses, 0, route->size * 2, route->addresses);
++            if (!(*env)->ExceptionCheck (env))
++                matches = (*env)->CallBooleanMethod (env, route->data->service,
++                    route->data->priority_owner, addresses, route->local_port, route->remote_port);
++            (*env)->DeleteLocalRef (env, addresses);
++        }
++        if ((*env)->ExceptionCheck (env)) {
++            (*env)->ExceptionClear (env);
++            matches = JNI_FALSE;
++        }
++        route->matched = matches;
++        route->pending = 0;
++        pthread_cond_signal (&route->changed);
++    }
++    pthread_mutex_unlock (&route->mutex);
++    if (attached)
++        (*java_vm)->DetachCurrentThread (java_vm);
++    return NULL;
++}
++
++int
++st_priority_udp_port (const struct ip_addr *local, unsigned short local_port,
++                     const struct ip_addr *remote, unsigned short remote_port)
++{
++    UdpRoute *route = udp_route;
++    if (!route || IP_GET_TYPE (local) != IP_GET_TYPE (remote))
++        return 0;
++
++    pthread_mutex_lock (&route->mutex);
++    if (IP_IS_V4 (local)) {
++        route->size = 4;
++        memcpy (route->addresses, &ip_2_ip4 (local)->addr, 4);
++        memcpy (route->addresses + 4, &ip_2_ip4 (remote)->addr, 4);
++    } else {
++        route->size = 16;
++        memcpy (route->addresses, ip_2_ip6 (local)->addr, 16);
++        memcpy (route->addresses + 16, ip_2_ip6 (remote)->addr, 16);
++    }
++    route->local_port = local_port;
++    route->remote_port = remote_port;
++    route->pending = 1;
++    pthread_cond_signal (&route->changed);
++    while (route->pending)
++        pthread_cond_wait (&route->changed, &route->mutex);
++    int port = route->matched ? route->data->priority_port : 0;
++    pthread_mutex_unlock (&route->mutex);
++    return port;
++}
++
++static void *
+ thread_handler (void *data)
+ {
+     ThreadData *tdata = data;
+-
++    UdpRoute route = { .data = tdata, .mutex = PTHREAD_MUTEX_INITIALIZER,
++                       .changed = PTHREAD_COND_INITIALIZER };
++    pthread_t resolver;
++    int started = tdata->service &&
++        pthread_create (&resolver, NULL, udp_route_worker, &route) == 0;
++    if (started) {
++        pthread_mutex_lock (&route.mutex);
++        while (!route.ready)
++            pthread_cond_wait (&route.changed, &route.mutex);
++        if (route.ready > 0)
++            udp_route = &route;
++        pthread_mutex_unlock (&route.mutex);
++    }
+     hev_socks5_tunnel_main (tdata->path, tdata->fd);
++    if (started) {
++        pthread_mutex_lock (&route.mutex);
++        route.stopping = 1;
++        pthread_cond_signal (&route.changed);
++        pthread_mutex_unlock (&route.mutex);
++        pthread_join (resolver, NULL);
++    }
++    pthread_cond_destroy (&route.changed);
++    pthread_mutex_destroy (&route.mutex);
+
+     atomic_store_explicit (&is_running, 0, memory_order_release);
+
+@@ -116,7 +229,8 @@
+ }
+
+ static jboolean
+-native_start_service (JNIEnv *env, jobject thiz, jstring config_path, jint fd)
++native_start_service (JNIEnv *env, jobject thiz, jstring config_path, jint fd,
++                      jint priority_port)
+ {
+     const jbyte *bytes;
+     ThreadData *tdata;
+@@ -131,9 +245,11 @@
+     if (thread_joinable) {
+         pthread_join (work_thread, NULL);
+         thread_joinable = 0;
+-    }
+-
+-    tdata = malloc (sizeof (ThreadData));
++        (*env)->DeleteGlobalRef (env, udp_service);
++        udp_service = NULL;
++    }
++
++    tdata = calloc (1, sizeof (ThreadData));
+     if (!tdata)
+         goto exit;
+     tdata->fd = fd;
+@@ -150,10 +266,29 @@
+         goto exit;
+     }
+
++    if (priority_port > 0) {
++        jclass klass = (*env)->GetObjectClass (env, thiz);
++        if (klass) {
++            tdata->priority_owner = (*env)->GetMethodID (env, klass, "isPriorityUdp", "([BII)Z");
++            (*env)->DeleteLocalRef (env, klass);
++        }
++        if (tdata->priority_owner)
++            tdata->service = (*env)->NewGlobalRef (env, thiz);
++        if (!tdata->service) {
++            free (tdata->path);
++            free (tdata);
++            goto exit;
++        }
++        tdata->priority_port = priority_port;
++    }
++
+     atomic_store_explicit (&is_running, 1, memory_order_release);
++    udp_service = tdata->service;
+     res = pthread_create (&work_thread, NULL, thread_handler, tdata);
+     if (res != 0) {
+         atomic_store_explicit (&is_running, 0, memory_order_release);
++        (*env)->DeleteGlobalRef (env, udp_service);
++        udp_service = NULL;
+         free (tdata->path);
+         free (tdata);
+         goto exit;
+@@ -179,6 +314,8 @@
+     if (atomic_load_explicit (&is_running, memory_order_acquire))
+         hev_socks5_tunnel_quit ();
+     res = pthread_join (work_thread, NULL);
++    (*env)->DeleteGlobalRef (env, udp_service);
++    udp_service = NULL;
+
+     thread_joinable = 0;
+     atomic_store_explicit (&is_running, 0, memory_order_release);
+--- a/src/hev-jni.h
++++ b/src/hev-jni.h
+@@ -10,4 +10,11 @@
+ #ifndef __HEV_JNI_H__
+ #define __HEV_JNI_H__
+
++#ifdef ANDROID
++struct ip_addr;
++
++int st_priority_udp_port (const struct ip_addr *local, unsigned short local_port,
++                         const struct ip_addr *remote, unsigned short remote_port);
++#endif
++
+ #endif /* __HEV_JNI_H__ */
+--- a/src/hev-socks5-tunnel.c
++++ b/src/hev-socks5-tunnel.c
+@@ -44,6 +44,7 @@
+ #include "hev-config-const.h"
+ #include "hev-socks5-session-tcp.h"
+ #include "hev-socks5-session-udp.h"
++#include "hev-jni.h"
+
+ #include "hev-socks5-tunnel.h"
+ #include "st-traffic.h"
+@@ -365,6 +366,11 @@
+         return;
+     }
+
++#ifdef ANDROID
++    /* The pretend PCB is keyed by the application's source address and port.
++     * Its first datagram supplies the destination for the Android UID lookup. */
++    udp->proxy_port = st_priority_udp_port (&pcb->remote_ip, pcb->remote_port, addr, port);
++#endif
+     hev_socks5_session_set_task (HEV_SOCKS5_SESSION (udp), task);
+     node = hev_socks5_session_get_node (HEV_SOCKS5_SESSION (udp));
+     hev_socks5_tunnel_insert_session (node);
+--- a/src/hev-socks5-session-udp.h
++++ b/src/hev-socks5-session-udp.h
+@@ -30,6 +30,9 @@
+     HevList frame_list;
+     struct udp_pcb *pcb;
+     HevTaskMutex *mutex;
++#ifdef ANDROID
++    int proxy_port;
++#endif
+     int frames;
+     int addr;
+     int port;
+--- a/src/hev-socks5-session.c
++++ b/src/hev-socks5-session.c
+@@ -17,20 +17,30 @@
+ #include "hev-socks5-tunnel.h"
+
+ #include "hev-socks5-session.h"
++#ifdef ANDROID
++#include "hev-task-mutex.h"
++#include "hev-socks5-session-udp.h"
++#endif
+
+ void
+ hev_socks5_session_run (HevSocks5Session *self)
+ {
+     HevSocks5SessionIface *iface;
+     HevConfigServer *srv;
++    int port;
+     int res;
+
+     LOG_D ("%p socks5 session run", self);
+
+     srv = hev_config_get_socks5_server ();
+
+-    res = hev_socks5_client_connect (HEV_SOCKS5_CLIENT (self), srv->addr,
+-                                     srv->port);
++    port = srv->port;
++#ifdef ANDROID
++    if (HEV_SOCKS5 (self)->type == HEV_SOCKS5_TYPE_UDP_IN_UDP &&
++        HEV_SOCKS5_SESSION_UDP (self)->proxy_port)
++        port = HEV_SOCKS5_SESSION_UDP (self)->proxy_port;
++#endif
++    res = hev_socks5_client_connect (HEV_SOCKS5_CLIENT (self), srv->addr, port);
+     if (res < 0) {
+         LOG_I ("%p socks5 session connect", self);
+         return;

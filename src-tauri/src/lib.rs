@@ -104,6 +104,10 @@ struct AppSettings {
     ssh_engine: String,
     #[serde(default)]
     ssh_tuning: Option<Value>,
+    #[serde(default)]
+    priority_udp_ssh: bool,
+    #[serde(default)]
+    priority_udp_processes: Vec<String>,
     #[serde(default = "default_true")]
     hide_sensitive: bool,
     #[serde(default = "default_true")]
@@ -170,6 +174,8 @@ impl Default for AppSettings {
             ipinfo_token: String::new(),
             ssh_engine: default_ssh_engine(),
             ssh_tuning: None,
+            priority_udp_ssh: false,
+            priority_udp_processes: Vec::new(),
             hide_sensitive: true,
             verify_proxy_on_start: true,
             auto_reconnect: false,
@@ -221,6 +227,15 @@ struct TunnelStatus {
     tx_total: u64,
     last_error: String,
     checks: connection_checks::Snapshot,
+    #[cfg(any(target_os = "macos", windows))]
+    priority_udp_ssh: Option<PriorityUdpStatus>,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[derive(Clone, Debug, Serialize)]
+struct PriorityUdpStatus {
+    separate: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -262,8 +277,10 @@ struct TunnelRuntime {
     last_error: String,
     last_traffic: Option<TrafficSample>,
     checks: Arc<connection_checks::Checks>,
-    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-    discord_udp: Option<(u16, embedded_ssh::EmbeddedTunnelHandle)>,
+    #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+    priority_udp: Option<embedded_ssh::EmbeddedTunnelHandle>,
+    #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+    priority_udp_error: Option<String>,
 }
 
 impl TunnelRuntime {
@@ -291,12 +308,6 @@ impl TunnelRuntime {
     }
 
     fn try_wait(&mut self) -> Result<Option<String>, String> {
-        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-        if let Some((_, handle)) = &self.discord_udp {
-            if let Some(error) = handle.try_wait() {
-                return Ok(Some(format!("Discord UDP SSH: {error}")));
-            }
-        }
         match &mut self.handle {
             TunnelHandle::System(child, _) => child
                 .try_wait()
@@ -307,20 +318,32 @@ impl TunnelRuntime {
         }
     }
 
+    #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+    fn check_priority_udp(&mut self, logs: &Arc<Mutex<Vec<String>>>) {
+        if self.priority_udp_error.is_none() {
+            if let Some(error) = self.priority_udp.as_ref().and_then(|handle| handle.try_wait()) {
+                // Keep the handle for shutdown. Its endpoint is already closed
+                // and new UDP associations use the main SSH via the same SOCKS.
+                log_line(logs, format!("Второй SSH завершился. Новые UDP-соединения отмеченных приложений через основной SSH: {error}"));
+                self.priority_udp_error = Some(error);
+            }
+        }
+    }
+
     fn traffic_totals(&self) -> Result<Option<(u64, u64)>, String> {
         match &self.handle {
             TunnelHandle::System(_, relay) => Ok(Some(relay.totals())),
             #[cfg(feature = "embedded-ssh")]
             TunnelHandle::Embedded(handle) => {
                 #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-                if self.discord_udp.is_some() || macos_redirect::discord_trace_enabled() {
+                if self.priority_udp.is_some() || macos_redirect::discord_trace_enabled() {
                     self.log_discord_sample("main", self.proxy.port, handle);
-                    if let Some((port, udp)) = &self.discord_udp {
-                        self.log_discord_sample("discord-udp", *port, udp);
+                    if let Some((port, udp)) = handle.priority_udp_port().zip(self.priority_udp.as_ref()) {
+                        self.log_discord_sample("discord-udp", port, udp);
                     }
                 }
-                #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-                if let Some((_, udp)) = &self.discord_udp {
+                #[cfg(any(target_os = "macos", windows))]
+                if let Some(udp) = &self.priority_udp {
                     let (rx, tx) = handle.traffic_totals();
                     let (udp_rx, udp_tx) = udp.traffic_totals();
                     return Ok(Some((rx.saturating_add(udp_rx), tx.saturating_add(udp_tx))));
@@ -348,8 +371,8 @@ impl TunnelRuntime {
     }
 
     fn stop(self, logs: &Arc<Mutex<Vec<String>>>) {
-        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-        if let Some((_, handle)) = self.discord_udp {
+        #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+        if let Some(handle) = self.priority_udp {
             handle.stop();
         }
         match self.handle {
@@ -372,6 +395,18 @@ impl TunnelRuntime {
             }
         }
         log_line(logs, "Tunnel stopped");
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    fn priority_udp_status(&self) -> Option<PriorityUdpStatus> {
+        #[cfg(feature = "embedded-ssh")]
+        if self.priority_udp.is_some() || self.priority_udp_error.is_some() {
+            return Some(PriorityUdpStatus {
+                separate: self.priority_udp.is_some() && self.priority_udp_error.is_none(),
+                error: self.priority_udp_error.clone(),
+            });
+        }
+        None
     }
 }
 
@@ -746,6 +781,15 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
         route_note: Some(Default::default()),
         ..Default::default()
     })
+}
+
+#[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+fn priority_udp_requested(settings: &AppSettings, tuning: &embedded_ssh::SshTuning) -> bool {
+    settings.priority_udp_ssh
+        && tuning.tcp_interactive_bytes == Some(64 * 1024)
+        && settings.priority_udp_processes.iter().any(|priority| {
+            settings.redirect_processes.iter().any(|id| id.eq_ignore_ascii_case(priority))
+        })
 }
 
 fn validate_proxy(proxy: &ProxyProfile) -> Result<(), String> {
@@ -1165,6 +1209,8 @@ fn build_status(
             .map(|runtime| runtime.last_error.clone())
             .unwrap_or_default(),
         checks: Default::default(),
+        #[cfg(any(target_os = "macos", windows))]
+        priority_udp_ssh: runtime.and_then(TunnelRuntime::priority_udp_status),
     }
 }
 
@@ -1508,6 +1554,8 @@ fn start_session_workers(app: tauri::AppHandle) {
                     } else {
                         match runtime.try_wait() {
                             Ok(None) => {
+                                #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+                                runtime.check_priority_udp(&state.logs);
                                 if last_sample.elapsed() >= Duration::from_secs(1) {
                                     update_traffic(&state, runtime);
                                     last_sample = Instant::now();
@@ -1655,12 +1703,23 @@ fn start_embedded_ssh_tunnel(
 
     // Per-application traffic counts from zero for each tunnel session.
     embedded_ssh::app_usage::reset();
-    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-    let discord_udp_port = std::env::var("ST_MACOS_DISCORD_UDP_PORT").ok()
-        .map(|port| port.parse::<u16>().ok().filter(|port| *port >= 1024 && *port != proxy.port)
-             .ok_or("Укажите отдельный тестовый порт UDP Discord от 1024 до 65535"))
-        .transpose()?;
-    let options = embedded_route(&config, &server)?;
+    #[allow(unused_mut)]
+    let mut options = embedded_route(&config, &server)?;
+    #[cfg(any(target_os = "macos", windows))]
+    let priority_router = {
+        let enabled = priority_udp_requested(&config.settings, &options.ssh_tuning);
+        #[allow(unused_mut)]
+        let mut test_port = None;
+        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+        if let Ok(value) = std::env::var("ST_MACOS_DISCORD_UDP_PORT") {
+            test_port = Some(value.parse::<u16>().ok().filter(|port| *port >= 1024 && *port != proxy.port)
+                .ok_or("Укажите отдельный тестовый порт UDP Discord от 1024 до 65535")?);
+        }
+        let router = (enabled || test_port.is_some())
+            .then(|| embedded_ssh::PriorityUdpRouter::with_port(test_port.unwrap_or_default()));
+        options.priority_udp = router.clone();
+        router
+    };
     let cancelled = || !state.control.current(generation) || state.closing.load(Ordering::SeqCst);
     let handle = embedded_ssh::start_with_options_cancellable(
         embedded_server(&server),
@@ -1672,21 +1731,25 @@ fn start_embedded_ssh_tunnel(
         options.clone(),
         &cancelled,
     )?;
-    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-    let discord_udp = if let Some(port) = discord_udp_port {
-        let udp_proxy = embedded_ssh::EmbeddedProxy { host: proxy.host.clone(), port };
-        let udp_options = embedded_ssh::EmbeddedOptions { udp_only: true, max_connections: 64, ..options };
-        match embedded_ssh::start_with_options_cancellable(
-            embedded_server(&server), udp_proxy, Arc::clone(&state.logs), udp_options, &cancelled,
-        ) {
-            Ok(udp) => Some((port, udp)),
-            Err(error) => {
-                handle.stop();
-                return Err(format!("Discord UDP SSH: {error}"));
+    #[cfg(any(target_os = "macos", windows))]
+    let (priority_udp, priority_udp_error) = match priority_router {
+        Some(router) if handle.priority_udp_port().is_some() => {
+            match embedded_ssh::start_priority_udp_transport(
+                embedded_server(&server), Arc::clone(&state.logs), options, &cancelled,
+            ) {
+                Ok(udp) => {
+                    router.attach(&udp);
+                    log_line(&state.logs, "Отдельный SSH для UDP подключён");
+                    (Some(udp), None)
+                }
+                Err(error) => {
+                    log_line(&state.logs, format!("Второй SSH недоступен. UDP отмеченных приложений через основной SSH: {error}"));
+                    (None, Some(error))
+                }
             }
         }
-    } else {
-        None
+        Some(_) => (None, Some("Локальный SOCKS для второго SSH недоступен".into())),
+        None => (None, None),
     };
 
     Ok(TunnelRuntime {
@@ -1698,8 +1761,10 @@ fn start_embedded_ssh_tunnel(
         last_error: String::new(),
         last_traffic: None,
         checks: Default::default(),
-        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-        discord_udp,
+        #[cfg(any(target_os = "macos", windows))]
+        priority_udp,
+        #[cfg(any(target_os = "macos", windows))]
+        priority_udp_error,
     })
 }
 
@@ -1823,8 +1888,10 @@ fn start_system_ssh_tunnel(
                 last_error: String::new(),
                 last_traffic: None,
                 checks: Default::default(),
-                #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-                discord_udp: None,
+                #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+                priority_udp: None,
+                #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+                priority_udp_error: None,
             });
         }
     }
@@ -2247,13 +2314,16 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
         if !cfg!(target_os = "macos") && runtime.ssh_engine() != "embedded" {
             return Err("Для TCP и UDP выберите Embedded Rust SSH и перезапустите туннель".into());
         }
-        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
-        let discord_udp_port = runtime.discord_udp.as_ref().map(|(port, _)| *port);
-        #[cfg(not(all(target_os = "macos", feature = "macos-discord-udp-test")))]
-        let discord_udp_port = None::<u16>;
-        (runtime.proxy.clone(), runtime.ssh_engine() == "embedded", discord_udp_port)
+        #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+        let priority_udp_port = match &runtime.handle {
+            TunnelHandle::Embedded(handle) => handle.priority_udp_port(),
+            _ => None,
+        };
+        #[cfg(not(all(any(target_os = "macos", windows), feature = "embedded-ssh")))]
+        let priority_udp_port = None::<u16>;
+        (runtime.proxy.clone(), runtime.ssh_engine() == "embedded", priority_udp_port)
     };
-    let (proxy, udp, _discord_udp_port) = proxy;
+    let (proxy, udp, _priority_udp_port) = proxy;
     #[cfg(target_os = "macos")]
     {
         // Rules come from the applications as installed now, so programs
@@ -2267,13 +2337,22 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
                 ids.push(pattern.clone());
             }
         }
+        let mut priority = config.settings.priority_udp_processes.clone();
+        #[cfg(feature = "macos-discord-udp-test")]
+        if std::env::var_os("ST_MACOS_DISCORD_UDP_PORT").is_some() {
+            priority.extend(ids.iter().filter(|id| macos_redirect::is_discord_process(id)).cloned());
+        }
+        // Rescan the contents of marked bundles too, so an updated helper keeps its route.
+        priority.extend(macos_apps::selected(&config.settings.priority_udp_processes)
+            .into_iter().flat_map(|app| app.patterns));
         let selection = macos_redirect::Selection {
             bundles: apps.iter().map(|app| (app.name.clone(), PathBuf::from(&app.executable))).collect(),
             covered: seen,
         };
         // Checks the rules and refuses domain rules, which macOS lacks.
-        macos_redirect::profile_with_discord_udp(
-            &ids, &config.settings.domain_rules, &proxy.host, proxy.port, udp, _discord_udp_port,
+        macos_redirect::profile_with_priority_udp(
+            &ids, &config.settings.domain_rules, &proxy.host, proxy.port, udp,
+            _priority_udp_port.map(|port| (port, priority.as_slice())),
         )?;
         let executable = if config.settings.redirect_cli_path.trim().is_empty() {
             default_redirect_cli()
@@ -2286,7 +2365,8 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
             host: proxy.host.clone(),
             port: proxy.port,
             udp,
-            discord_udp_port: _discord_udp_port,
+            priority_udp_port: _priority_udp_port,
+            priority_udp_processes: priority,
             follow: config.settings.follow_child_processes,
         };
         let generation = state.redirect.lock().map_err(|e| e.to_string())?.start(
@@ -2329,12 +2409,13 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or("Не удалось определить имя клиента")?;
-        let value = app_redirect::domain_profile(
+        let value = app_redirect::domain_profile_with_priority_udp(
             &config.settings.redirect_processes,
             &config.settings.domain_rules,
             &proxy.host,
             proxy.port,
             own_exe,
+            _priority_udp_port.map(|port| (port, config.settings.priority_udp_processes.as_slice())),
         )?;
         let profile_path = app_config_dir("secret-tunnel")?.join("applications.pbprofile");
         let executable = if config.settings.redirect_cli_path.trim().is_empty() {
@@ -2509,6 +2590,27 @@ fn shutdown(state: &AppState) {
 #[cfg(test)]
 mod recovery_storage_tests {
     use super::*;
+
+    #[cfg(all(any(target_os = "macos", windows), feature = "embedded-ssh"))]
+    #[test]
+    fn second_ssh_requires_opt_in_voice_and_a_selected_priority_rule() {
+        let mut settings = AppSettings::default();
+        settings.redirect_processes = vec!["Dorion.exe".into()];
+        settings.priority_udp_processes = vec!["dorion.exe".into()];
+        let mut tuning = embedded_ssh::SshTuning::default();
+        tuning.tcp_interactive_bytes = Some(64 * 1024);
+        assert!(!priority_udp_requested(&settings, &tuning));
+        settings.priority_udp_ssh = true;
+        assert!(priority_udp_requested(&settings, &tuning));
+        tuning.tcp_interactive_bytes = Some(96 * 1024);
+        assert!(!priority_udp_requested(&settings, &tuning));
+        tuning.tcp_interactive_bytes = None;
+        assert!(!priority_udp_requested(&settings, &tuning));
+        tuning.tcp_interactive_bytes = Some(64 * 1024);
+        settings.redirect_processes = vec!["org.example.other".into()];
+        assert!(!priority_udp_requested(&settings, &tuning));
+    }
+
     #[test]
     fn openssh_startup_preserves_terminal_auth_errors_for_retry_policy() {
         let logs = Arc::new(Mutex::new(Vec::new()));

@@ -41,6 +41,10 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: choco install nasm -y --no-progress
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Test native interception rules
+        shell: pwsh
+        run: ./scripts/prepare-windows-component.ps1 -WorkDirectory "$env:RUNNER_TEMP/secret-tunnel-components"
       - shell: pwsh
         run: |
           $env:PATH = "C:\Program Files\NASM;$env:PATH"

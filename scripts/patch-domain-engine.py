@@ -23,6 +23,86 @@ assert s.count(needle) == 1
 s = s.replace(needle, '''        if (rule->target_domains && strncmp(rule->target_domains, "stregex:", 8) == 0)
             has_domain = TRUE;
 ''' + needle)
+needle = '__declspec(thread) UINT32 g_tl_rule_id = 0;'
+assert s.count(needle) == 1
+s = s.replace(needle, needle + '''
+__declspec(thread) char st_webview_owner[MAX_PROCESS_NAME];
+BOOL st_find_webview_owner(DWORD pid, const char *image, char *owner, DWORD capacity);
+
+static BOOL st_match_process(const char *list, const char *image) {
+    return match_process_list(list, image)
+        || (st_webview_owner[0] && match_process_list(list, st_webview_owner));
+}
+''')
+needle = 'if (match_process_list(rule->process_name, process_name))'
+assert s.count(needle) == 2
+s = s.replace(needle, 'if (st_match_process(rule->process_name, process_name))')
+for suffix in ('v6', ''):
+    needle = f'    RuleAction action = match_rule{"_" + suffix if suffix else ""}(process_name,'
+    assert s.count(needle) == 1
+    before = '''    st_webview_owner[0] = '\\0';
+    if (g_proxy_config_count > 1)
+        st_find_webview_owner(pid, process_name, st_webview_owner, sizeof(st_webview_owner));
+'''
+    pos = s.index(needle)
+    end = s.index('\n', pos)
+    s = s[:pos] + before + s[pos:end] + "\n    st_webview_owner[0] = '\\0';" + s[end:]
+p.write_text(s, encoding='utf-8')
+
+p = root / 'pb_process.c'
+s = p.read_text(encoding='utf-8-sig')
+s += r'''
+
+static BOOL st_is_webview_image(const char *image) {
+    const char *name = strrchr(image, '\\');
+    return _stricmp(name ? name + 1 : image, "msedgewebview2.exe") == 0;
+}
+
+static BOOL st_creation_time(DWORD pid, FILETIME *created) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return FALSE;
+    FILETIME exited, kernel, user;
+    BOOL ok = GetProcessTimes(process, created, &exited, &kernel, &user);
+    CloseHandle(process);
+    return ok;
+}
+
+BOOL st_find_webview_owner(DWORD pid, const char *image, char *owner, DWORD capacity) {
+    if (!st_is_webview_image(image)) return FALSE;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return FALSE;
+
+    BOOL found = FALSE;
+    FILETIME child_created;
+    if (st_creation_time(pid, &child_created)) {
+        for (unsigned int depth = 0; depth < 8; ++depth) {
+            PROCESSENTRY32W entry = {0};
+            entry.dwSize = sizeof(entry);
+            BOOL valid = Process32FirstW(snapshot, &entry);
+            while (valid && entry.th32ProcessID != pid)
+                valid = Process32NextW(snapshot, &entry);
+            if (!valid || !entry.th32ParentProcessID || entry.th32ParentProcessID == pid)
+                break;
+
+            pid = entry.th32ParentProcessID;
+            FILETIME parent_created;
+            char parent[MAX_PROCESS_NAME];
+            // A reused PID can otherwise bind a WebView to an unrelated app.
+            if (!st_creation_time(pid, &parent_created)
+                || CompareFileTime(&parent_created, &child_created) > 0
+                || !get_process_name_from_pid(pid, parent, sizeof(parent)))
+                break;
+            child_created = parent_created;
+            if (!st_is_webview_image(parent)) {
+                found = strcpy_s(owner, capacity, parent) == 0;
+                break;
+            }
+        }
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+'''
 p.write_text(s, encoding='utf-8')
 
 p = root / 'ProxyBridge.c'

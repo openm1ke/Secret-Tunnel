@@ -95,8 +95,12 @@ fn main() {
         println!(
             "SAMPLE {}",
             json!({"ssh":tunnel.ssh_stats(),"client":stats.diagnostics,
-            "server":stats.peer.and_then(|p|p.diagnostics),"send_queue_bytes":stats.send_queue_bytes,
-            "receive_queue_bytes":stats.receive_queue_bytes,"udp_drops":stats.udp_drops})
+            "server":stats.peer.as_ref().and_then(|p|p.diagnostics.clone()),"send_queue_bytes":stats.send_queue_bytes,
+            "receive_queue_bytes":stats.receive_queue_bytes,"udp_drops":stats.udp_drops,
+            "send_queue_peak":stats.send_queue_peak,"receive_queue_peak":stats.receive_queue_peak,
+            "server_send_queue_peak":stats.peer.as_ref().map(|p|p.send_queue_peak),
+            "server_receive_queue_peak":stats.peer.as_ref().map(|p|p.receive_queue_peak),
+            "server_udp_drops":stats.peer.as_ref().map(|p|p.udp_drops)})
         );
     }
     tunnel.stop();

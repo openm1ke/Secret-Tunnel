@@ -155,7 +155,7 @@ def tcp_load(port, host, remote_port, expected_bytes):
     return {"bytes": received, "seconds": finished - started, "finished_monotonic": finished}
 
 
-def voice(port, host, remote_port, duration, load_start):
+def voice(port, host, remote_port, duration, load_start, *, size=160, packets_per_second=50, start_at=None):
     control, relay = socks(port, 3, bytes([1]) + bytes(6))
     header = bytes(3) + target(host, remote_port)
     sent, received = {}, {}
@@ -163,7 +163,10 @@ def voice(port, host, remote_port, duration, load_start):
     with control, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
         udp.connect(relay)
         udp.settimeout(.1)
-        deadline = time.monotonic() + duration + 3
+        start = start_at if start_at is not None else time.monotonic()
+        if start_at is not None and start <= time.monotonic():
+            raise RuntimeError("UDP association was not ready before the workload")
+        deadline = start + duration + 3
 
         def receive():
             try:
@@ -172,9 +175,9 @@ def voice(port, host, remote_port, duration, load_start):
                         packet = udp.recv(65535)
                     except socket.timeout:
                         continue
-                    assert packet[:len(header)] == header and len(packet) == len(header) + 160
+                    assert packet[:len(header)] == header and len(packet) == len(header) + size
                     sequence = struct.unpack("!I", packet[len(header):len(header) + 4])[0]
-                    assert packet[len(header) + 4:] == bytes(156)
+                    assert packet[len(header) + 4:] == bytes(size - 4)
                     now = time.monotonic()
                     if sequence in sent and sequence not in received:
                         received[sequence] = 1000 * (now - sent[sequence])
@@ -183,11 +186,10 @@ def voice(port, host, remote_port, duration, load_start):
 
         receiver = threading.Thread(target=receive)
         receiver.start()
-        start = time.monotonic()
-        for sequence in range(duration * 50):
-            time.sleep(max(0, start + sequence * .020 - time.monotonic()))
+        for sequence in range(duration * packets_per_second):
+            time.sleep(max(0, start + sequence / packets_per_second - time.monotonic()))
             sent[sequence] = time.monotonic()
-            udp.send(header + struct.pack("!I", sequence) + bytes(156))
+            udp.send(header + struct.pack("!I", sequence) + bytes(size - 4))
         receiver.join()
     assert not errors, errors
     values = sorted(received.values())

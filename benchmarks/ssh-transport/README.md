@@ -87,6 +87,49 @@ shutdown fails the run rather than silently leaving it successful.
 The shared example uses ring. The production Windows GUI uses aws-lc, so a
 separate GUI smoke test and Android per-app VPN test are still required.
 
+## One versus two SSH connections on Linux
+
+`session-load.py` starts the real embedded client and server agent on two
+private network namespaces joined by a veth pair. Both SSH connections share
+one `netem` qdisc per direction. The direct topology uses one SSH hop. The
+chain adds an SSH forwarding hop on server loopback, with the impairment
+applied to the outer client-to-entry TCP link. A disposable sshd and temporary
+keys are created for each invocation. All payload endpoints bind to loopback.
+
+Run in a disposable Linux VM with Python 3.9+, OpenSSH server and client,
+`iproute2`, `ethtool`, `unshare`, and `nsenter`. Use Linux builds of the
+client example and agent. OpenSSH needs its usual runtime directory
+(`/run/sshd` on Ubuntu). The benchmark needs root for namespace and qdisc
+setup. The output directory must be new.
+
+```sh
+cargo build --manifest-path tunnel-core/Cargo.toml --release --example check_route --locked
+cargo build --manifest-path udp-agent/Cargo.toml --release --locked
+sudo unshare --net -- python3 benchmarks/ssh-transport/session-load.py \
+  --probe tunnel-core/target/release/examples/check_route \
+  --agent udp-agent/target/release/secret-tunnel-agent \
+  --output /tmp/secret-tunnel-ssh-load \
+  --scenarios lossy --routes chain --loads idle download upload udp udp-shared \
+  --bulk-udp-pps 600 --repeats 2
+```
+
+The `lossy` profile adds 50 ms one way, 10 ms of jitter, 0.3% random packet
+loss and a 5 Mbit/s limit per direction. `clean` removes jitter and loss.
+`narrow` uses 100 ms one way, 20 ms of jitter, 0.3% loss and 2 Mbit/s.
+The voice model is 160-byte UDP echoes at 50 packets/s. The benchmark counts
+missing echoes and echoes above the deadline (200 ms RTT, 350 ms for
+`narrow`) in addition to quantiles over received packets. For TCP it includes
+only packets sent before the last transfer completes. Four downloads or
+uploads verify their payloads by SHA-256. `udp` offers a separate 1200-byte
+echo workload at the specified packet rate. `udp-shared` deliberately puts both
+UDP streams on the second SSH connection. At 600 packets/s, the offered UDP
+payload alone is 5.76 Mbit/s in each direction if all packets are echoed.
+
+The output records mux queue peaks, Linux TCP counters, and sampled qdisc
+backlog. Netem's backlog includes packets waiting for the configured
+propagation delay. The test measures transport under controlled load. Actual
+voice codec behavior, mobile radio and Android VPN routing require device tests.
+
 ## Agent DNS isolation
 
 On Linux or WSL, run the production agent locally without SSH:

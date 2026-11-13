@@ -8,6 +8,7 @@ edition = "2021"
 [features]
 default = []
 embedded-ssh = ["dep:russh", "dep:tokio", "dep:secret-tunnel-mux"]
+macos-discord-udp-test = ["embedded-ssh"]
 
 [lib]
 name = "secret_tunnel_lib"

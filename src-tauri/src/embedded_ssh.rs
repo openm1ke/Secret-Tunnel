@@ -59,6 +59,9 @@ pub struct EmbeddedOptions {
     pub jumps: Vec<EmbeddedJump>,
     pub probe_ipv6: bool,
     pub max_connections: usize,
+    /// On the dedicated test SOCKS listener, accept UDP associations only.
+    #[cfg(target_os = "macos")]
+    pub udp_only: bool,
     /// Override the local UDP receive window without changing the peer's window.
     pub udp_receive_window: Option<FlowWindow>,
     /// Allow the automatic local window to use a lower slot limit advertised by the agent.
@@ -891,6 +894,10 @@ async fn run_embedded_tunnel(
     let listener =
         tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     let probe_ipv6 = options.probe_ipv6;
+    #[cfg(target_os = "macos")]
+    let udp_only = options.udp_only;
+    #[cfg(not(target_os = "macos"))]
+    let udp_only = false;
     let log_tcp = options.protect_socket.is_none();
     let ssh_tuning = options.ssh_tuning.clone();
     let udp_receive_window = options.udp_receive_window;
@@ -1000,7 +1007,7 @@ async fn run_embedded_tunnel(
                 let capacity = capacity.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers).await {
+                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers, udp_only).await {
                         if CapacityRejections::is_capacity(&error) {
                             capacity.note(&logs, &error);
                         } else if !secret_tunnel_mux::is_flow_cancellation(&error) {
@@ -1659,6 +1666,7 @@ async fn handle_socks_client(
     counters: Arc<TrafficCounters>,
     logs: &Arc<std::sync::Mutex<Vec<String>>>,
     buffers: DatagramBuffers,
+    udp_only: bool,
 ) -> Result<(), String> {
     let mut request =
         match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
@@ -1683,6 +1691,10 @@ async fn handle_socks_client(
             DNS_IDLE,
         )
         .await;
+    }
+    if udp_only {
+        write_socks5_reply(&mut stream, 0x07).await?;
+        return Ok(());
     }
 
     // DNS over TCP goes to the same reachable resolver as DNS over UDP.

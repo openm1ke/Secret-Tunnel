@@ -262,6 +262,8 @@ struct TunnelRuntime {
     last_error: String,
     last_traffic: Option<TrafficSample>,
     checks: Arc<connection_checks::Checks>,
+    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+    discord_udp: Option<(u16, embedded_ssh::EmbeddedTunnelHandle)>,
 }
 
 impl TunnelRuntime {
@@ -289,6 +291,12 @@ impl TunnelRuntime {
     }
 
     fn try_wait(&mut self) -> Result<Option<String>, String> {
+        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+        if let Some((_, handle)) = &self.discord_udp {
+            if let Some(error) = handle.try_wait() {
+                return Ok(Some(format!("Discord UDP SSH: {error}")));
+            }
+        }
         match &mut self.handle {
             TunnelHandle::System(child, _) => child
                 .try_wait()
@@ -303,11 +311,30 @@ impl TunnelRuntime {
         match &self.handle {
             TunnelHandle::System(_, relay) => Ok(Some(relay.totals())),
             #[cfg(feature = "embedded-ssh")]
-            TunnelHandle::Embedded(handle) => Ok(Some(handle.traffic_totals())),
+            TunnelHandle::Embedded(handle) => {
+                #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+                if let Some((port, udp)) = &self.discord_udp {
+                    let (rx, tx) = handle.traffic_totals();
+                    let (udp_rx, udp_tx) = udp.traffic_totals();
+                    let main_stats = handle.transport_stats();
+                    let voice_stats = udp.transport_stats();
+                    eprintln!("DISCORD_UDP_TEST port={port} main_rx={rx} main_tx={tx} main_udp_rx={} main_udp_tx={} main_agent={:?} voice_rx={udp_rx} voice_tx={udp_tx} voice_udp_rx={} voice_udp_tx={} voice_agent={:?}",
+                        main_stats.diagnostics.udp_received, main_stats.diagnostics.udp_tx_attempts,
+                        main_stats.peer.and_then(|p| p.diagnostics).map(|d| d.process_id),
+                        voice_stats.diagnostics.udp_received, voice_stats.diagnostics.udp_tx_attempts,
+                        voice_stats.peer.and_then(|p| p.diagnostics).map(|d| d.process_id));
+                    return Ok(Some((rx.saturating_add(udp_rx), tx.saturating_add(udp_tx))));
+                }
+                Ok(Some(handle.traffic_totals()))
+            }
         }
     }
 
     fn stop(self, logs: &Arc<Mutex<Vec<String>>>) {
+        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+        if let Some((_, handle)) = self.discord_udp {
+            handle.stop();
+        }
         match self.handle {
             TunnelHandle::System(mut child, relay) => {
                 drop(relay);
@@ -1611,6 +1638,13 @@ fn start_embedded_ssh_tunnel(
 
     // Per-application traffic counts from zero for each tunnel session.
     embedded_ssh::app_usage::reset();
+    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+    let discord_udp_port = std::env::var("ST_MACOS_DISCORD_UDP_PORT").ok()
+        .map(|port| port.parse::<u16>().ok().filter(|port| *port >= 1024 && *port != proxy.port)
+             .ok_or("Укажите отдельный тестовый порт UDP Discord от 1024 до 65535"))
+        .transpose()?;
+    let options = embedded_route(&config, &server)?;
+    let cancelled = || !state.control.current(generation) || state.closing.load(Ordering::SeqCst);
     let handle = embedded_ssh::start_with_options_cancellable(
         embedded_server(&server),
         embedded_ssh::EmbeddedProxy {
@@ -1618,9 +1652,25 @@ fn start_embedded_ssh_tunnel(
             port: proxy.port,
         },
         Arc::clone(&state.logs),
-        embedded_route(&config, &server)?,
-        &|| !state.control.current(generation) || state.closing.load(Ordering::SeqCst),
+        options.clone(),
+        &cancelled,
     )?;
+    #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+    let discord_udp = if let Some(port) = discord_udp_port {
+        let udp_proxy = embedded_ssh::EmbeddedProxy { host: proxy.host.clone(), port };
+        let udp_options = embedded_ssh::EmbeddedOptions { udp_only: true, max_connections: 64, ..options };
+        match embedded_ssh::start_with_options_cancellable(
+            embedded_server(&server), udp_proxy, Arc::clone(&state.logs), udp_options, &cancelled,
+        ) {
+            Ok(udp) => Some((port, udp)),
+            Err(error) => {
+                handle.stop();
+                return Err(format!("Discord UDP SSH: {error}"));
+            }
+        }
+    } else {
+        None
+    };
 
     Ok(TunnelRuntime {
         generation,
@@ -1631,6 +1681,8 @@ fn start_embedded_ssh_tunnel(
         last_error: String::new(),
         last_traffic: None,
         checks: Default::default(),
+        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+        discord_udp,
     })
 }
 
@@ -1754,6 +1806,8 @@ fn start_system_ssh_tunnel(
                 last_error: String::new(),
                 last_traffic: None,
                 checks: Default::default(),
+                #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+                discord_udp: None,
             });
         }
     }
@@ -2176,9 +2230,13 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
         if !cfg!(target_os = "macos") && runtime.ssh_engine() != "embedded" {
             return Err("Для TCP и UDP выберите Embedded Rust SSH и перезапустите туннель".into());
         }
-        (runtime.proxy.clone(), runtime.ssh_engine() == "embedded")
+        #[cfg(all(target_os = "macos", feature = "macos-discord-udp-test"))]
+        let discord_udp_port = runtime.discord_udp.as_ref().map(|(port, _)| *port);
+        #[cfg(not(all(target_os = "macos", feature = "macos-discord-udp-test")))]
+        let discord_udp_port = None::<u16>;
+        (runtime.proxy.clone(), runtime.ssh_engine() == "embedded", discord_udp_port)
     };
-    let (proxy, udp) = proxy;
+    let (proxy, udp, _discord_udp_port) = proxy;
     #[cfg(target_os = "macos")]
     {
         // Rules come from the applications as installed now, so programs
@@ -2197,7 +2255,9 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
             covered: seen,
         };
         // Checks the rules and refuses domain rules, which macOS lacks.
-        macos_redirect::profile(&ids, &config.settings.domain_rules, &proxy.host, proxy.port, udp)?;
+        macos_redirect::profile_with_discord_udp(
+            &ids, &config.settings.domain_rules, &proxy.host, proxy.port, udp, _discord_udp_port,
+        )?;
         let executable = if config.settings.redirect_cli_path.trim().is_empty() {
             default_redirect_cli()
         } else {
@@ -2209,6 +2269,7 @@ fn start_redirect(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<S
             host: proxy.host.clone(),
             port: proxy.port,
             udp,
+            discord_udp_port: _discord_udp_port,
             follow: config.settings.follow_child_processes,
         };
         let generation = state.redirect.lock().map_err(|e| e.to_string())?.start(

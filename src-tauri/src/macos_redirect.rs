@@ -17,6 +17,7 @@ const GUARDIAN_ARG: &str = "--macos-redirect-guardian";
 /// Guardian command: hand the running rules over to the next CLI.
 const HANDOFF: &str = "handoff";
 const PROXY_ID: &str = "secret-tunnel-socks";
+const DISCORD_UDP_PROXY_ID: &str = "secret-tunnel-discord-udp";
 const BYPASS: &[&str] = &[
     "dev.secrettunnel.desktop",
     "com.apple.ssh",
@@ -99,6 +100,17 @@ pub fn profile(
     port: u16,
     udp: bool,
 ) -> Result<Value, String> {
+    profile_with_discord_udp(ids, domains, host, port, udp, None)
+}
+
+pub(crate) fn profile_with_discord_udp(
+    ids: &[String],
+    domains: &[secret_tunnel_routing::DomainRule],
+    host: &str,
+    port: u16,
+    udp: bool,
+    discord_udp_port: Option<u16>,
+) -> Result<Value, String> {
     validate_ids(ids)?;
     if ids.is_empty() {
         return Err("Выберите хотя бы одно приложение".into());
@@ -113,6 +125,9 @@ pub fn profile(
     {
         return Err("Перехват требует локальный SOCKS на loopback-адресе".into());
     }
+    if discord_udp_port.is_some_and(|secondary| !udp || secondary == 0 || secondary == port) {
+        return Err("Для UDP Discord нужен отдельный локальный SOCKS".into());
+    }
     let rule = |process: &str, protocol: &str, action: &str| {
         json!({
             "processNames": process, "targetHosts": "*", "targetPorts": "*",
@@ -122,16 +137,34 @@ pub fn profile(
     let mut rules = vec![rule(&BYPASS.join(";"), "BOTH", "DIRECT")];
     let mut seen = std::collections::HashSet::new();
     for id in ids.iter().filter(|id| seen.insert(id.to_ascii_lowercase())) {
-        rules.push(rule(id, if udp { "BOTH" } else { "TCP" }, PROXY_ID));
+        if discord_udp_port.is_some() && is_discord_process(id) {
+            rules.push(rule(id, "UDP", DISCORD_UDP_PROXY_ID));
+            rules.push(rule(id, "TCP", PROXY_ID));
+        } else {
+            rules.push(rule(id, if udp { "BOTH" } else { "TCP" }, PROXY_ID));
+        }
         // OpenSSH -D has no UDP support. Do not silently let selected UDP go direct.
         if !udp {
             rules.push(rule(id, "UDP", "BLOCK"));
         }
     }
     rules.push(rule("*", "BOTH", "DIRECT"));
+    let proxy = |id, name, port| json!({"id": id, "name": name, "type": "socks5",
+        "host": host, "port": port, "sendDomain": false});
+    let mut proxies = vec![proxy(PROXY_ID, "SSH SOCKS", port)];
+    if let Some(port) = discord_udp_port {
+        proxies.push(proxy(DISCORD_UDP_PROXY_ID, "Discord UDP test", port));
+    }
     Ok(json!({"name": "Secret Tunnel", "dnsEnabled": false,
-        "proxyConfigs": [{"id": PROXY_ID, "name": "SSH SOCKS", "type": "socks5",
-            "host": host, "port": port, "sendDomain": false}], "proxyRules": rules}))
+        "proxyConfigs": proxies, "proxyRules": rules}))
+}
+
+fn is_discord_process(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    matches!(id.as_str(), "discord" | "com.hnc.discord" | "com.hnc.discord.helper")
+        || id.starts_with("com.hnc.discord.helper.")
+        || id == "discord helper"
+        || id.starts_with("discord helper (")
 }
 
 #[derive(Default)]
@@ -157,6 +190,7 @@ pub struct Plan {
     pub host: String,
     pub port: u16,
     pub udp: bool,
+    pub discord_udp_port: Option<u16>,
     /// Add programs the selected applications start, while running.
     pub follow: bool,
 }
@@ -554,7 +588,7 @@ impl RedirectState {
         let plan = self.plan.as_ref().ok_or("Перехват не настроен")?;
         let mut ids = plan.ids.clone();
         ids.extend(self.followed.iter().map(|f| f.rule.clone()));
-        profile(&ids, &[], &plan.host, plan.port, plan.udp)
+        profile_with_discord_udp(&ids, &[], &plan.host, plan.port, plan.udp, plan.discord_udp_port)
     }
 
     /// Start a guardian with a profile and read what it reports.
@@ -589,6 +623,8 @@ impl RedirectState {
         }
         let logs = self.logs.clone().unwrap_or_default();
         if let Some(stdout) = child.stdout.take() {
+            #[cfg(feature = "macos-discord-udp-test")]
+            let trace_discord = self.plan.as_ref().is_some_and(|p| p.discord_udp_port.is_some());
             let progress = self.progress.clone();
             let logs = logs.clone();
             let direct = self.direct.clone();
@@ -599,6 +635,10 @@ impl RedirectState {
                     #[cfg(feature = "embedded-ssh")]
                     crate::embedded_ssh::app_usage::note_route(&line);
                     if let Some(flow) = flow_line(&line) {
+                        #[cfg(feature = "macos-discord-udp-test")]
+                        if trace_discord && is_discord_process(flow.process) {
+                            eprintln!("DISCORD_ROUTE {line}");
+                        }
                         let app = related.lock().ok().and_then(|r| r.get(flow.process).cloned());
                         if flow.route == Route::Direct {
                             let (flag, signal) = &*wake;
@@ -1013,6 +1053,24 @@ mod tests {
         let embedded = profile(&["org.example.App".into()], &[], "::1", 1080, true).unwrap();
         assert_eq!(embedded["proxyRules"][1]["protocol"], "BOTH");
         assert_eq!(embedded["proxyRules"].as_array().unwrap().len(), 3);
+    }
+    #[test]
+    fn only_discord_udp_uses_the_test_proxy() {
+        let ids = ["com.hnc.Discord", "com.hnc.Discord.helper.Renderer", "org.example.App"].map(str::to_owned);
+        let p = profile_with_discord_udp(&ids, &[], "127.0.0.1", 1080, true, Some(1081)).unwrap();
+        let rules = p["proxyRules"].as_array().unwrap();
+        for pair in rules[1..5].chunks_exact(2) {
+            assert_eq!(pair[0]["processNames"], pair[1]["processNames"]);
+            assert_eq!(pair[0]["protocol"], "UDP");
+            assert_eq!(pair[0]["action"], DISCORD_UDP_PROXY_ID);
+            assert_eq!(pair[1]["protocol"], "TCP");
+            assert_eq!(pair[1]["action"], PROXY_ID);
+        }
+        assert_eq!(rules[5]["protocol"], "BOTH");
+        assert_eq!(rules[5]["action"], PROXY_ID);
+        assert_eq!(p["proxyConfigs"][1]["port"], 1081);
+        assert!(profile_with_discord_udp(&ids, &[], "127.0.0.1", 1080, false, Some(1081)).is_err());
+        assert!(profile_with_discord_udp(&ids, &[], "127.0.0.1", 1080, true, Some(1080)).is_err());
     }
     #[test]
     fn rejects_broad_rules_transport_and_public_socks() {

@@ -7,7 +7,8 @@
   <meta name="description" content="Пошаговая установка Secret Tunnel для macOS, Windows и Linux: от сервера с паролем root до первого подключения. Команды, картинки и пояснения к каждой настройке.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-  <link rel="stylesheet" href="assets/site.css?v=20261114">
+  <script src="assets/appearance.js"></script>
+  <link rel="stylesheet" href="assets/site.css?v=theme-1">
 </head>
 <body data-os="mac" data-login="root">
   <a class="skip" href="#main">К содержанию</a>
@@ -22,6 +23,11 @@
         <a href="knowledge.html">База знаний</a>
         <a href="releases.html">Релизы</a>
       </nav>
+      <select class="appearance" id="appearance" aria-label="Тема сайта">
+        <option value="system">Системная</option>
+        <option value="light">Светлая</option>
+        <option value="dark">Тёмная</option>
+      </select>
       <a class="button primary" href="releases.html">Скачать</a>
     </div>
   </header>
@@ -410,11 +416,12 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
       </article>
 
       <article class="doc step" id="settings">
-        <h2><a href="#settings">13. Настройки: что значит каждая галочка</a></h2>
+        <h2><a href="#settings">13. Настройки приложения</a></h2>
         <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
         <p>Значения по умолчанию подходят большинству. Менять ничего не обязательно.</p>
-        <figure class="shot shot-tall" data-shot="settings-mac" data-pins="86.87,12.57;4.42,16.22;4.42,19.7;4.42,23.18;4.42,26.66;4.42,30.31;4.42,33.97;4.42,37.44;4.42,45.2;4.42,48.68;80.81,54.35;4.42,59.14;4.42,95.65"><img src="assets/guide/settings-mac.webp" width="792" height="1150" alt="Вкладка «Настройки» со всеми переключателями"></figure>
+        <figure class="shot shot-tall" data-shot="settings-mac" data-pins="36,9.5;95,18;2.5,21.1;2.5,24.1;2.5,27.1;2.5,30;94,33.2;2.5,36.3;2.5,39.2;2.5,45.8;2.5,54.5;2.5,57.4;95,62;2.5,66.4;2.5,97.5"><img src="assets/guide/settings-mac.webp" width="760" height="1349" alt="Вкладка «Настройки» с выбором темы и параметрами подключения"></figure>
         <ol class="legend">
+          <li><b>Тема.</b> В разделе «Оформление» выберите «Системная», «Светлая» или «Тёмная». Тема меняется сразу и сохраняется автоматически.</li>
           <li><b>Движок SSH.</b> «Встроенный SSH» передаёт TCP и UDP и умеет цепочки — оставьте его. «Системный OpenSSH» — только TCP, для особых случаев.</li>
           <li><b>SSH мимо других VPN</b> (только macOS). При включённой настройке SSH использует физическое подключение Wi-Fi или Ethernet. Если ваш сервер доступен через корпоративный VPN, отключите эту настройку.</li>
           <li><b>Сворачивать <span data-os="mac linux">в строку меню</span><span data-os="win">в трей</span> при закрытии окна.</b> Крестик прячет окно, а туннель продолжает работать. Подключиться, отключиться и выйти можно из значка <span data-os="mac linux">вверху экрана</span><span data-os="win">возле часов</span>.</li>
@@ -423,6 +430,7 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
           <li><b>Пауза перед переподключением</b> — сколько секунд ждать перед новой попыткой.</li>
           <li><b>Подключаться при запуске приложения.</b> Включайте, когда всё уже проверено: туннель поднимется сразу при открытии.</li>
           <li><b>Проверять прокси после подключения.</b> Показывает результаты TCP, UDP, DNS и IPv6 через локальный SOCKS. Состояние перехвата приложений отображается отдельно.</li>
+          <li><b>Проверять обновления при запуске.</b> Приложение проверяет, вышла ли новая версия, когда вы его открываете.</li>
           <li><b>Скрывать IP-адреса и токены.</b> Адреса закрыты точками, пока не нажать на глаз. Удобно для скриншотов.</li>
           <li><b>Очищать журнал при подключении</b> — начинать журнал заново при каждом подключении.</li>
           <li><b>Токен IPinfo</b> — необязательный. С ним приложение показывает внешний IP и страну выхода; бесплатный токен IPinfo Lite выдают на ipinfo.io. Можно оставить пустым.</li>
@@ -492,7 +500,7 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
       <span><a href="https://github.com/openm1ke/Secret-Tunnel">Исходники на GitHub</a> · <a href="knowledge.html">База знаний</a> · <a href="releases.html">Релизы</a></span>
     </div>
   </footer>
-  <script src="assets/site.js?v=20261114"></script>
+  <script src="assets/site.js?v=theme-1"></script>
   <script src="assets/guide.js"></script>
 </body>
 </html>

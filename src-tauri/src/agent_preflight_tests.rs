@@ -5,6 +5,9 @@ use russh::{Channel, ChannelId};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+const UPLOAD_TEST_WINDOW: u32 = 64 * 1024;
+const UPLOAD_TEST_STDOUT: usize = 2 * UPLOAD_TEST_WINDOW as usize;
+
 #[derive(Clone, Copy)]
 enum Mode {
     Current,
@@ -96,8 +99,8 @@ impl server::Handler for Handler {
             let mut stream = self.channels.remove(&id).unwrap().into_stream();
             let handle = session.handle();
             tokio::spawn(async move {
-                // Force the client to drain output while the server waits to read stdin.
-                stream.write_all(&vec![b'x'; 4 * 1024 * 1024]).await.unwrap();
+                // Exceed the client's SSH window before consuming stdin.
+                stream.write_all(&vec![b'x'; UPLOAD_TEST_STDOUT]).await.unwrap();
                 let mut input = Vec::new();
                 stream.read_to_end(&mut input).await.unwrap();
                 assert_eq!(input, vec![0xa5; 1024 * 1024]);
@@ -282,6 +285,11 @@ async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) ->
         auth_rejection_time_initial: Some(Duration::ZERO),
         ..Default::default()
     };
+    if matches!(mode, Mode::Upload) {
+        // Bound the writes queued before the server reads stdin. The upload
+        // still exceeds this window and must progress alongside stdout.
+        config.window_size = UPLOAD_TEST_WINDOW;
+    }
     if let Some(cipher) = cipher {
         config.preferred.cipher = std::borrow::Cow::Owned(vec![cipher]);
     }
@@ -290,6 +298,9 @@ async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) ->
     let captured = commands.clone();
     let task = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
+        if matches!(mode, Mode::Upload) {
+            socket.set_nodelay(true).unwrap();
+        }
         // Only one SSH connection is accepted for query + the real v3 channel.
         drop(listener);
         if let Ok(session) = server::run_stream(
@@ -326,9 +337,11 @@ async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) ->
 #[tokio::test]
 async fn remote_command_drains_output_during_upload_and_returns_exit_status() {
     let fixture = fixture(Mode::Upload).await;
+    let mut options = fixture.options.clone();
+    options.ssh_tuning.channel_receive_window_bytes = UPLOAD_TEST_WINDOW;
     let (status, stdout, stderr) = run_on_server(
         fixture.server.clone(),
-        fixture.options.clone(),
+        options,
         "fixture upload",
         vec![0xa5; 1024 * 1024],
         Duration::from_secs(5),

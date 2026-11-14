@@ -232,6 +232,10 @@ mod tests {
             client.read_exact(&mut byte).unwrap();
             assert_eq!(byte, [value]);
         }
+        // The last byte can reach the client before the relay counts it.
+        // The downstream half-close occurs after all counter updates.
+        client.shutdown(Shutdown::Write).unwrap();
+        assert_eq!(client.read(&mut [0; 1]).unwrap(), 0);
         echo.join().unwrap();
         assert_eq!(relay.totals(), (3, 3));
     }

@@ -1,0 +1,15 @@
+<resources>
+    <style name="Theme.SecretTunnel" parent="Theme.SecretTunnel.Light" />
+
+    <style name="Theme.SecretTunnel.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#08706c</item>
+        <item name="android:windowBackground">#edf3f2</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+
+    <style name="Theme.SecretTunnel.Dark" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#79e4d4</item>
+        <item name="android:windowBackground">#081417</item>
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

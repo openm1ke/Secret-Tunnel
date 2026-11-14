@@ -3,11 +3,12 @@ import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import AboutPanel, { Release } from "./AboutPanel";
 import ConnectionHealth, { ConnectionChecks } from "./ConnectionHealth";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ArrowDown,
   ArrowUp,
@@ -49,6 +50,17 @@ import {
   formatBytes,
 } from "./components";
 import "./styles.css";
+
+type Appearance = "system" | "light" | "dark";
+const appearanceKey = "secret-tunnel.appearance";
+
+function readAppearance(): Appearance {
+  try {
+    const saved = localStorage.getItem(appearanceKey);
+    if (saved === "light" || saved === "dark") return saved;
+  } catch { /* use the system appearance when storage is unavailable */ }
+  return "system";
+}
 
 type ServerProfile = {
   id: string;
@@ -343,6 +355,28 @@ function AppIcon({ app, icon }: { app: InstalledApp; icon?: string }) {
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>("connect");
+  const [appearance, setAppearance] = useState<Appearance>(readAppearance);
+
+  useLayoutEffect(() => {
+    const system = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      document.documentElement.dataset.theme = appearance === "system" ? (system.matches ? "dark" : "light") : appearance;
+    };
+    apply();
+    system.addEventListener("change", apply);
+    return () => system.removeEventListener("change", apply);
+  }, [appearance]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(appearanceKey, appearance);
+    } catch { /* the appearance still applies for this session */ }
+    // Web previews don't have a native title bar.
+    try {
+      getCurrentWindow().setTheme(appearance === "system" ? null : appearance).catch(() => undefined);
+    } catch { /* Tauri window metadata is unavailable */ }
+  }, [appearance]);
+
   const [config, setConfig] = useState<AppConfig>(emptyConfig);
   const [status, setStatus] = useState<TunnelStatus>(emptyStatus);
   const [serverDraft, setServerDraft] = useState<ServerProfile>(emptyServer);
@@ -1466,6 +1500,18 @@ function App() {
           {activeTab === "settings" && (
             <section className="panel settingsPanel">
               <header className="panelHead"><h2>Настройки</h2></header>
+
+              <fieldset>
+                <legend>Оформление</legend>
+                <label className="appearanceSetting">
+                  <span>Тема</span>
+                  <select value={appearance} onChange={(event) => setAppearance(event.target.value as Appearance)}>
+                    <option value="system">Системная</option>
+                    <option value="light">Светлая</option>
+                    <option value="dark">Тёмная</option>
+                  </select>
+                </label>
+              </fieldset>
 
               <fieldset>
                 <legend>Подключение</legend>

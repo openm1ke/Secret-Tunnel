@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.27 — 2026-11-14
+
+- Desktop and Android: choose system, light or dark appearance under «Настройки» → «Оформление». The choice applies immediately and is remembered after restart.
+- The iOS development build offers the same three choices under «Настройки» → «Тема».
+- Website: choose an appearance in the header. The preference follows across the home, setup, knowledge base and downloads pages.
+
 ## 0.3.26 — 2026-11-14
 
 - Android: the VPN restores SSH after switching between Wi-Fi and mobile data. The per-app «Блокировать при обрыве туннеля» checkbox keeps selected traffic from going direct while Android holds the VPN interface.

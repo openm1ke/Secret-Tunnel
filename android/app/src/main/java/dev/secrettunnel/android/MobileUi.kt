@@ -1,26 +1,71 @@
 package dev.secrettunnel.android
 
 import android.content.Context
+import android.content.res.Configuration
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.view.View
 import kotlin.math.max
 import java.util.Locale
 
-object Palette {
-    val background=Color.rgb(8,20,23)
-    val surface=Color.rgb(16,35,39)
-    val raised=Color.rgb(25,49,53)
-    val border=Color.rgb(42,68,73)
-    val text=Color.rgb(234,246,242)
-    val muted=Color.rgb(157,181,182)
-    val accent=Color.rgb(121,228,212)
-    val upload=Color.rgb(173,183,255)
-    val warning=Color.rgb(255,205,126)
-    val error=Color.rgb(255,157,157)
+internal enum class Appearance(val label: String) {
+    SYSTEM("Системная"),
+    LIGHT("Светлая"),
+    DARK("Тёмная");
+
+    fun isDark(configuration: Configuration): Boolean = when (this) {
+        SYSTEM -> configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+            Configuration.UI_MODE_NIGHT_YES
+        LIGHT -> false
+        DARK -> true
+    }
+}
+
+internal class Palette private constructor(
+    val background: Int,
+    val surface: Int,
+    val raised: Int,
+    val border: Int,
+    val text: Int,
+    val muted: Int,
+    val accent: Int,
+    val onAccent: Int,
+    val upload: Int,
+    val warning: Int,
+    val error: Int,
+) {
     fun panel(color:Int=surface,radius:Float=20f,stroke:Int=0)=GradientDrawable().apply {
         setColor(color);cornerRadius=radius
         if(stroke!=0) setStroke(1,stroke)
+    }
+
+    companion object {
+        val light = Palette(
+            background = 0xffedf3f2.toInt(),
+            surface = 0xffffffff.toInt(),
+            raised = 0xffdfedeb.toInt(),
+            border = 0xffc5d7d5.toInt(),
+            text = 0xff142e32.toInt(),
+            muted = 0xff4c6569.toInt(),
+            accent = 0xff08706c.toInt(),
+            onAccent = 0xffffffff.toInt(),
+            upload = 0xff543bb7.toInt(),
+            warning = 0xff8a5300.toInt(),
+            error = 0xffa42324.toInt(),
+        )
+        val dark = Palette(
+            background = Color.rgb(8,20,23),
+            surface = Color.rgb(16,35,39),
+            raised = Color.rgb(25,49,53),
+            border = Color.rgb(42,68,73),
+            text = Color.rgb(234,246,242),
+            muted = Color.rgb(157,181,182),
+            accent = Color.rgb(121,228,212),
+            onAccent = Color.rgb(8,20,23),
+            upload = Color.rgb(173,183,255),
+            warning = Color.rgb(255,205,126),
+            error = Color.rgb(255,157,157),
+        )
     }
 }
 
@@ -45,7 +90,7 @@ class TrafficMeter {
     }
 }
 
-class NetworkChart(context:Context):View(context) {
+internal class NetworkChart(context: Context, private val palette: Palette) : View(context) {
     private var window=TrafficWindow(0,0,emptyList())
     private val paint=Paint(Paint.ANTI_ALIAS_FLAG)
     fun show(history:TrafficWindow) {
@@ -59,9 +104,9 @@ class NetworkChart(context:Context):View(context) {
         val density=resources.displayMetrics.density
         val left=4*density;val right=width-4*density;val top=24*density;val bottom=height-22*density
         val peak=points.maxOfOrNull{max(it.rate.down,it.rate.up)}?.coerceAtLeast(1024.0)?:1024.0
-        paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=Palette.muted
+        paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=palette.muted
         canvas.drawText(TrafficMeter.bytes(peak)+"/с",left,13*density,paint)
-        paint.color=Palette.border;paint.strokeWidth=density
+        paint.color=palette.border;paint.strokeWidth=density
         for(i in 0..2){val y=top+(bottom-top)*i/2;canvas.drawLine(left,y,right,y,paint)}
         fun line(down:Boolean,color:Int) {
             if(points.size<2)return
@@ -75,8 +120,8 @@ class NetworkChart(context:Context):View(context) {
             paint.color=color;paint.style=Paint.Style.STROKE;paint.strokeWidth=2*density
             paint.strokeJoin=Paint.Join.ROUND;canvas.drawPath(path,paint)
         }
-        line(true,Palette.accent);line(false,Palette.upload)
-        paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=Palette.muted
+        line(true,palette.accent);line(false,palette.upload)
+        paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=palette.muted
         if(points.isNotEmpty()) {
             val elapsed=(window.end-window.start)/1000
             val label=if(elapsed>=60) "−${elapsed/60} мин ${elapsed%60} с" else "−$elapsed с"

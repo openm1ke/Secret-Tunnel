@@ -126,6 +126,10 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     var hideSensitive:Boolean get()=prefs.getBoolean("hide_sensitive",true);set(v){prefs.edit().putBoolean("hide_sensitive",v).apply()}
     /** After connecting, ask through the tunnel where it comes out: exit IP and country. */
     var verifyProxy:Boolean get()=prefs.getBoolean("verify_proxy",true);set(v){prefs.edit().putBoolean("verify_proxy",v).apply()}
+    internal var appearance: Appearance
+        get() = Appearance.entries.firstOrNull { it.name == prefs.getString("appearance", null) } ?: Appearance.SYSTEM
+        set(value) { prefs.edit().putString("appearance", value.name).apply() }
+
     var checkUpdates: Boolean
         get() = prefs.getBoolean("check_updates", true)
         set(value) { prefs.edit().putBoolean("check_updates", value).apply() }

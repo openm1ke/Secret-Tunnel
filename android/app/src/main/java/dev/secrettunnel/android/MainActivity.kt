@@ -4,6 +4,7 @@ import android.app.*
 import android.content.*
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.net.VpnService
@@ -11,12 +12,15 @@ import android.os.*
 import android.text.*
 import android.view.*
 import android.widget.*
+import androidx.core.view.WindowCompat
 import org.json.JSONObject
 import java.util.UUID
 
 class MainActivity:Activity() {
     private companion object { const val UPDATE_INSTALL_REQUEST = 104 }
     private lateinit var store:SettingsStore
+    private lateinit var palette: Palette
+    private lateinit var uiContext: Context
     private lateinit var content:FrameLayout
     private lateinit var body:LinearLayout
     private lateinit var badge:TextView
@@ -106,7 +110,7 @@ class MainActivity:Activity() {
                 val rate=meter.sample(SystemClock.elapsedRealtime(),rx,tx)
                 val phase=TunnelVpnService.phase
                 val state=when{checking->"Проверка";pendingTrust->"Подтверждение";phase=="Работает"->"Подключено";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Ошибка";else->"Остановлен"}
-                update(badge,state);badge.setTextColor(when{state=="Подключено"->Palette.accent;state=="Ошибка"->Palette.error;TunnelVpnService.active||checking->Palette.warning;else->Palette.muted})
+                update(badge,state);badge.setTextColor(when{state=="Подключено"->palette.accent;state=="Ошибка"->palette.error;TunnelVpnService.active||checking->palette.warning;else->palette.muted})
                 update(heroTitle,when{checking->"Проверяем сервер";pendingTrust->"Подтвердите ключ сервера";phase=="Работает"->"Туннель работает";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Не удалось подключиться";store.activeProxy==null->"Добавьте подключение";else->if(readinessAction()=="Подключить")"Готов к подключению" else "Настройте подключение"})
                 update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->activeTunnelDetails();TunnelVpnService.active->TunnelVpnService.detail;phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
                 listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=!checking&&!pendingTrust&&!TunnelVpnService.active}
@@ -128,8 +132,9 @@ class MainActivity:Activity() {
         }
     }
     override fun onCreate(savedInstanceState:Bundle?){
-        super.onCreate(savedInstanceState);window.statusBarColor=Palette.background;window.navigationBarColor=Palette.background
+        super.onCreate(savedInstanceState)
         store=SettingsStore(this);selected.addAll(store.packages);protectedApps.addAll(store.protectedPackages)
+        applyAppearance(store.appearance.isDark(resources.configuration))
         page=savedInstanceState?.getString("page")?:"home";editingId=savedInstanceState?.getString("editingId").orEmpty()
         helpSection=savedInstanceState?.getString("helpSection")?:"setup"
         helpQuery=savedInstanceState?.getString("helpQuery").orEmpty()
@@ -153,16 +158,39 @@ class MainActivity:Activity() {
         out.putString("helpSection",helpSection);out.putString("helpQuery",helpQuery)
         out.putString("agentServerId",agentServerId)
         out.putString("statsPeriod",statsPeriod);out.putString("speedKind",speedKind);out.putBoolean("speedDirect",speedDirect);out.putString("speedProvider",speedProvider)
-        if(page.endsWith("Editor"))out.putBundle("draft",Bundle().apply{
-            putString("name",nameField?.text.toString());putString("host",hostField?.text.toString())
-            putString("port",portField?.text.toString());putString("user",userField?.text.toString())
-            putInt("serverPosition",serverSpinner?.selectedItemPosition?:0)
-            putString("udpReceive", proxyUdpReceive?.toJson()?.toString())
-            putString("udpAgentReceive", proxyUdpAgentReceive?.toJson()?.toString())
-            putString("ssh",proxySsh.toJson().toString())
-        })
+        if(page.endsWith("Editor")) out.putBundle("draft", captureEditorDraft())
         super.onSaveInstanceState(out)
     }
+
+    private fun captureEditorDraft() = Bundle().apply {
+        putString("name",nameField?.text.toString());putString("host",hostField?.text.toString())
+        putString("port",portField?.text.toString());putString("user",userField?.text.toString())
+        putInt("serverPosition",serverSpinner?.selectedItemPosition?:0)
+        putString("udpReceive", proxyUdpReceive?.toJson()?.toString())
+        putString("udpAgentReceive", proxyUdpAgentReceive?.toJson()?.toString())
+        putString("ssh",proxySsh.toJson().toString())
+    }
+
+    private fun applyAppearance(dark: Boolean) {
+        palette = if (dark) Palette.dark else Palette.light
+        uiContext = ContextThemeWrapper(this, if (dark) R.style.Theme_SecretTunnel_Dark else R.style.Theme_SecretTunnel_Light)
+        window.statusBarColor = palette.background
+        window.navigationBarColor = palette.background
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val dark = store.appearance.isDark(newConfig)
+        if ((palette === Palette.dark) == dark) return
+        if (page.endsWith("Editor")) formDraft = captureEditorDraft()
+        applyAppearance(dark)
+        render()
+    }
+
     @Deprecated("Platform back callback")
     override fun onBackPressed(){handleBack()}
     private fun handleBack(){when{
@@ -175,7 +203,7 @@ class MainActivity:Activity() {
     private val moreSections=setOf("servers","proxies","settings","logs","about","help")
     private fun go(destination:String){
         if(checking||pendingTrust){toast("Дождитесь завершения проверки");return}
-        if(page.endsWith("Editor")&&formSignature()!=formSnapshot)AlertDialog.Builder(this).setTitle("Сохранить изменения?").setMessage("В форме есть несохранённые данные.")
+        if(page.endsWith("Editor")&&formSignature()!=formSnapshot)AlertDialog.Builder(uiContext).setTitle("Сохранить изменения?").setMessage("В форме есть несохранённые данные.")
             .setNegativeButton("Остаться",null).setNeutralButton("Не сохранять"){_,_->navigate(destination)}.setPositiveButton("Сохранить"){_,_->attempt{saveEditor();navigate(destination)}}.show()
         else navigate(destination)
     }
@@ -188,18 +216,18 @@ class MainActivity:Activity() {
         aboutUpdate=null;shownUpdate=null;updateNotice=null
         main.removeCallbacks(speedTick)
         proxyUdpReceive=null;proxyUdpAgentReceive=null
-        val root=column().apply{setBackgroundColor(Palette.background);isFocusableInTouchMode=true}
+        val root=column().apply{setBackgroundColor(palette.background);isFocusableInTouchMode=true}
         val header=row().apply{setPadding(dp(20),dp(15),dp(20),dp(12));gravity=Gravity.CENTER_VERTICAL}
         header.addView(label("Secret Tunnel",21,true),LinearLayout.LayoutParams(0,-2,1f))
-        badge=label("Остановлен",11).apply{setPadding(dp(12),dp(7),dp(12),dp(7));background=Palette.panel(Palette.raised,dp(20).toFloat())};header.addView(badge);root.addView(header)
+        badge=label("Остановлен",11).apply{setPadding(dp(12),dp(7),dp(12),dp(7));background=palette.panel(palette.raised,dp(20).toFloat())};header.addView(badge);root.addView(header)
         content=FrameLayout(this);root.addView(content,LinearLayout.LayoutParams(-1,0,1f))
-        val nav=row().apply{setPadding(dp(8),dp(8),dp(8),dp(9));setBackgroundColor(Palette.surface)}
+        val nav=row().apply{setPadding(dp(8),dp(8),dp(8),dp(9));setBackgroundColor(palette.surface)}
         for((id,title) in listOf("home" to "Главная","apps" to "Приложения","speed" to "Скорость","stats" to "Статистика","more" to "Ещё")){
             val active=page==id||(id=="more"&&(page in moreSections||page.endsWith("Editor")))
             nav.addView(column().apply{gravity=Gravity.CENTER;minimumHeight=dp(56);contentDescription=title
-                if(active)background=Palette.panel(Palette.raised,dp(15).toFloat())
-                addView(NavigationIcon(this@MainActivity,id,if(active)Palette.accent else Palette.muted),LinearLayout.LayoutParams(dp(23),dp(23)))
-                addView(label(title,11,active,if(active)Palette.accent else Palette.muted).apply{
+                if(active)background=palette.panel(palette.raised,dp(15).toFloat())
+                addView(NavigationIcon(this@MainActivity,id,if(active)palette.accent else palette.muted),LinearLayout.LayoutParams(dp(23),dp(23)))
+                addView(label(title,11,active,if(active)palette.accent else palette.muted).apply{
                     gravity=Gravity.CENTER;maxLines=1;setPadding(dp(2),dp(5),dp(2),0)
                     setAutoSizeTextTypeUniformWithConfiguration(9,11,1,android.util.TypedValue.COMPLEX_UNIT_SP)
                 },LinearLayout.LayoutParams(-1,dp(24)))
@@ -214,9 +242,9 @@ class MainActivity:Activity() {
         };root.requestFocus()
     }
     private fun homePage(){
-        val hero=card(Palette.raised)
+        val hero=card(palette.raised)
         heroTitle=label("Готов к подключению",23,true).also{hero.addView(it)}
-        heroDetail=label("Выберите профиль и приложения",14,false,Palette.muted).also{hero.addView(it,spaced(8))}
+        heroDetail=label("Выберите профиль и приложения",14,false,palette.muted).also{hero.addView(it,spaced(8))}
         connectButton=button("Подключить",true){connectOrStop()};hero.addView(connectButton,spaced(18));body.addView(hero,spaced(12))
         updateNotice = button("Обновления") { go("about") }.apply {
             visibility = View.GONE
@@ -224,38 +252,38 @@ class MainActivity:Activity() {
         }
         val health=card()
         connectionLayers=label("",14,true).also{health.addView(it)}
-        connectionProbes=label("",13,false,Palette.muted).also{health.addView(it,spaced(6))}
+        connectionProbes=label("",13,false,palette.muted).also{health.addView(it,spaced(6))}
         checkConnectionButton=button("Проверить соединение"){
             val error=NativeBridge.checkConnection()
             if(error.isNotBlank())toast(error)
             else { lastStatus=JSONObject(NativeBridge.status());refreshConnectionHealth() }
         }.also{health.addView(it,spaced(8))}
-        health.addView(label("TCP и IPv6 проверяют открытие соединения. UDP и DNS используют запрос к 1.1.1.1. Проверки через SOCKS не проверяют захват приложений.",12,false,Palette.muted),spaced(6))
+        health.addView(label("TCP и IPv6 проверяют открытие соединения. UDP и DNS используют запрос к 1.1.1.1. Проверки через SOCKS не проверяют захват приложений.",12,false,palette.muted),spaced(6))
         body.addView(health,spaced(12))
         refreshConnectionHealth()
         val proxy=store.activeProxy;val server=proxy?.let{store.server(it.serverId)};val profile=card()
-        profile.addView(label((proxy?.name?:"Профиль не выбран")+"  ›",16,true,Palette.accent))
-        profile.addView(label(server?.let{"${it.name} · ${it.host.ifBlank{"адрес не указан"}}"}?:"Добавьте сервер и прокси",13,false,Palette.muted),spaced(4))
-        if (server?.jumpServerId != null) profile.addView(label(routeLabel(server.id),13,false,Palette.muted),spaced(5))
+        profile.addView(label((proxy?.name?:"Профиль не выбран")+"  ›",16,true,palette.accent))
+        profile.addView(label(server?.let{"${it.name} · ${it.host.ifBlank{"адрес не указан"}}"}?:"Добавьте сервер и прокси",13,false,palette.muted),spaced(4))
+        if (server?.jumpServerId != null) profile.addView(label(routeLabel(server.id),13,false,palette.muted),spaced(5))
         profile.setOnClickListener{go("proxies")};profile.contentDescription="Выбрать профиль подключения";body.addView(profile,spaced(12))
-        val exit=card();exit.addView(label("Выход в интернет",12,true,Palette.muted))
+        val exit=card();exit.addView(label("Выход в интернет",12,true,palette.muted))
         exitView=label(exitLine(),15,true).also{exit.addView(it,spaced(6))}
-        if(TunnelVpnService.active&&store.hideSensitive)exit.addView(label("Нажмите, чтобы показать или скрыть IP",11,false,Palette.muted),spaced(6))
+        if(TunnelVpnService.active&&store.hideSensitive)exit.addView(label("Нажмите, чтобы показать или скрыть IP",11,false,palette.muted),spaced(6))
         exit.setOnClickListener{revealIp=!revealIp;update(exitView,exitLine())};exit.contentDescription="Внешний IP и страна выхода"
         body.addView(exit,spaced(12))
         val metrics=row()
         fun metric(title:String,color:Int,down:Boolean):LinearLayout{
-            val card=card();card.addView(label(title,12,true,color));val speed=label("0 B/с",21,true).apply{setSingleLine(true);setAutoSizeTextTypeUniformWithConfiguration(14,21,1,android.util.TypedValue.COMPLEX_UNIT_SP)};card.addView(speed,spaced(10));val total=label("Всего: 0 B",11,false,Palette.muted);card.addView(total,spaced(5))
+            val card=card();card.addView(label(title,12,true,color));val speed=label("0 B/с",21,true).apply{setSingleLine(true);setAutoSizeTextTypeUniformWithConfiguration(14,21,1,android.util.TypedValue.COMPLEX_UNIT_SP)};card.addView(speed,spaced(10));val total=label("Всего: 0 B",11,false,palette.muted);card.addView(total,spaced(5))
             if(down){downSpeed=speed;downTotal=total}else{upSpeed=speed;upTotal=total};return card
         }
-        metrics.addView(metric("↓  Загрузка",Palette.accent,true),LinearLayout.LayoutParams(0,-1,1f).apply{marginEnd=dp(6)})
-        metrics.addView(metric("↑  Отправка",Palette.upload,false),LinearLayout.LayoutParams(0,-1,1f).apply{marginStart=dp(6)});body.addView(metrics,spaced(12))
+        metrics.addView(metric("↓  Загрузка",palette.accent,true),LinearLayout.LayoutParams(0,-1,1f).apply{marginEnd=dp(6)})
+        metrics.addView(metric("↑  Отправка",palette.upload,false),LinearLayout.LayoutParams(0,-1,1f).apply{marginStart=dp(6)});body.addView(metrics,spaced(12))
         val graph=card()
         graph.addView(label("График скорости",14,true))
-        val period=Spinner(this).apply {
+        val period=Spinner(uiContext).apply {
             contentDescription="Период графика скорости"
             minimumHeight=dp(48)
-            adapter=ArrayAdapter(this@MainActivity,android.R.layout.simple_spinner_dropdown_item,ChartRange.entries.map{it.label})
+            adapter=ArrayAdapter(uiContext,android.R.layout.simple_spinner_dropdown_item,ChartRange.entries.map{it.label})
             setSelection(chartRange.ordinal)
             onItemSelectedListener=object:AdapterView.OnItemSelectedListener{
                 override fun onNothingSelected(parent:AdapterView<*>?){}
@@ -266,13 +294,13 @@ class MainActivity:Activity() {
             }
         }
         graph.addView(period,LinearLayout.LayoutParams(-1,dp(48)))
-        chart=NetworkChart(this).also{graph.addView(it,LinearLayout.LayoutParams(-1,dp(126)))}
-        chartPeaks=label("",12,false,Palette.muted).also{graph.addView(it,spaced(8))}
+        chart=NetworkChart(uiContext, palette).also{graph.addView(it,LinearLayout.LayoutParams(-1,dp(126)))}
+        chartPeaks=label("",12,false,palette.muted).also{graph.addView(it,spaced(8))}
         body.addView(graph,spaced(12))
         val apps=card()
         appTrafficTitle=label("Трафик приложений",14,true).also{apps.addView(it)}
-        apps.addView(label("Скорость сейчас и объём за сеанс VPN",12,false,Palette.muted),spaced(5))
-        appTrafficEmpty=label("",12,false,Palette.muted).also{apps.addView(it,spaced(8))}
+        apps.addView(label("Скорость сейчас и объём за сеанс VPN",12,false,palette.muted),spaced(5))
+        appTrafficEmpty=label("",12,false,palette.muted).also{apps.addView(it,spaced(8))}
         appTrafficList=column().also{apps.addView(it)}
         body.addView(apps,spaced(12))
         refreshTraffic()
@@ -343,7 +371,7 @@ class MainActivity:Activity() {
             list.removeAllViews()
             appTrafficRows.clear()
             for(entry in entries) {
-                val details=label("",12,false,Palette.muted)
+                val details=label("",12,false,palette.muted)
                 list.addView(column().apply{
                     addView(label(entry.name,14,true))
                     addView(details,spaced(4))
@@ -354,7 +382,7 @@ class MainActivity:Activity() {
         for(entry in entries) {
             val rate=if(TunnelVpnService.active)entry.rate else TrafficMeter.Rate(0.0,0.0)
             update(appTrafficRows[entry.uid],"↓ ${TrafficMeter.bytes(rate.down)}/с · ↑ ${TrafficMeter.bytes(rate.up)}/с\nЗа сеанс ↓ ${TrafficMeter.bytes(entry.down.toDouble())} · ↑ ${TrafficMeter.bytes(entry.up.toDouble())}")
-            appTrafficRows[entry.uid]?.setTextColor(if(rate.down>0||rate.up>0)Palette.text else Palette.muted)
+            appTrafficRows[entry.uid]?.setTextColor(if(rate.down>0||rate.up>0)palette.text else palette.muted)
         }
     }
 
@@ -363,10 +391,10 @@ class MainActivity:Activity() {
         body.addView(button("+  Добавить сервер",true){unlocked();editingId=UUID.randomUUID().toString();navigate("serverEditor")},spaced(16))
         for(server in store.servers()){
             val scoped=SettingsStore(this,server.id);val card=card();card.addView(label(server.name,18,true))
-            card.addView(label(if(server.host.isBlank())"Укажите адрес и пользователя" else "${server.user}@${server.host}:${server.port}",13,false,Palette.muted),spaced(6))
-            if (server.jumpServerId != null) card.addView(label(routeLabel(server.id),13,false,Palette.muted),spaced(6))
-            card.addView(label(if(scoped.hasKey())"✓  Ключ доступа добавлен" else "○  Добавьте SSH-ключ",12,false,if(scoped.hasKey())Palette.accent else Palette.warning),spaced(12))
-            card.addView(label(if(isTrustedSshPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,Palette.muted),spaced(6))
+            card.addView(label(if(server.host.isBlank())"Укажите адрес и пользователя" else "${server.user}@${server.host}:${server.port}",13,false,palette.muted),spaced(6))
+            if (server.jumpServerId != null) card.addView(label(routeLabel(server.id),13,false,palette.muted),spaced(6))
+            card.addView(label(if(scoped.hasKey())"✓  Ключ доступа добавлен" else "○  Добавьте SSH-ключ",12,false,if(scoped.hasKey())palette.accent else palette.warning),spaced(12))
+            card.addView(label(if(isTrustedSshPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,palette.muted),spaced(6))
             card.addView(button("Настроить"){unlocked();editingId=server.id;navigate("serverEditor")},spaced(14));body.addView(card,spaced(12))
         }
         if(store.servers().isEmpty())emptyState("Пока нет серверов","Добавьте SSH-сервер, чтобы создать подключение.")
@@ -374,13 +402,13 @@ class MainActivity:Activity() {
     private fun proxiesPage(){
         heading("Прокси","Именованные SOCKS5-подключения через SSH")
         body.addView(button("+  Добавить прокси",true){unlocked();require(store.servers().isNotEmpty()){"Сначала добавьте сервер"};editingId=UUID.randomUUID().toString();navigate("proxyEditor")},spaced(16))
-        body.addView(label("Одновременно используется один профиль. Локальный прокси доступен только на этом устройстве.",12,false,Palette.muted),spaced(12))
+        body.addView(label("Одновременно используется один профиль. Локальный прокси доступен только на этом устройстве.",12,false,palette.muted),spaced(12))
         for(proxy in store.proxies()){
             val card=card();val title=row().apply{gravity=Gravity.CENTER_VERTICAL}
-            title.addView(RadioButton(this).apply{isChecked=proxy.id==store.activeProxyId;isClickable=false;buttonTintList=ColorStateList.valueOf(Palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
+            title.addView(RadioButton(uiContext).apply{isChecked=proxy.id==store.activeProxyId;isClickable=false;buttonTintList=ColorStateList.valueOf(palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
             title.addView(label(proxy.name,17,true),LinearLayout.LayoutParams(0,-2,1f));card.addView(title)
-            card.addView(label("127.0.0.1:${proxy.port}  →  ${store.server(proxy.serverId)?.name?:"Сервер удалён"}",12,false,Palette.muted),spaced(6))
-            card.addView(label(if(proxy.id==store.activeProxyId)"Выбран для подключения" else "Нажмите, чтобы выбрать",11,false,if(proxy.id==store.activeProxyId)Palette.accent else Palette.muted),spaced(10))
+            card.addView(label("127.0.0.1:${proxy.port}  →  ${store.server(proxy.serverId)?.name?:"Сервер удалён"}",12,false,palette.muted),spaced(6))
+            card.addView(label(if(proxy.id==store.activeProxyId)"Выбран для подключения" else "Нажмите, чтобы выбрать",11,false,if(proxy.id==store.activeProxyId)palette.accent else palette.muted),spaced(10))
             card.setOnClickListener{attempt{unlocked();store.activeProxyId=proxy.id;render()}}
             card.addView(button("Изменить"){unlocked();editingId=proxy.id;navigate("proxyEditor")},spaced(12));body.addView(card,spaced(12))
         }
@@ -394,10 +422,10 @@ class MainActivity:Activity() {
         portField=field("Порт SSH",(server?.port?:22).toString(),"22",1003,true)
         userField=field("Пользователь",server?.user.orEmpty(),"Имя пользователя",1004)
         val servers = store.servers().filter { it.id != editingId }
-        body.addView(label("Подключаться через",12,true,Palette.muted),spaced(16))
+        body.addView(label("Подключаться через",12,true,palette.muted),spaced(16))
         serverSpinner = serverPicker(listOf(null to "Напрямую") + servers.map { it.id to it.name }, server?.jumpServerId)
             .apply { contentDescription = "Подключаться через" }
-        val preview = label("",13,false,Palette.muted)
+        val preview = label("",13,false,palette.muted)
         body.addView(preview,spaced(6))
         serverSpinner?.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
@@ -412,7 +440,7 @@ class MainActivity:Activity() {
         }
         val originalSignature=formSignature();restoreDraft()
         val scoped=SettingsStore(this,editingId);val keyCard=card();keyCard.addView(label("Доступ к серверу",17,true))
-        keyCard.addView(label(if(scoped.hasKey())"SSH-ключ добавлен и зашифрован" else "Импортируйте разрешённый на сервере ключ без пароля",13,false,Palette.muted),spaced(10))
+        keyCard.addView(label(if(scoped.hasKey())"SSH-ключ добавлен и зашифрован" else "Импортируйте разрешённый на сервере ключ без пароля",13,false,palette.muted),spaced(10))
         keyCard.addView(button(if(scoped.hasKey())"Заменить SSH-ключ" else "Импортировать SSH-ключ"){
             unlocked();saveServerForm();importId=editingId;startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),102)
         },spaced(14))
@@ -420,7 +448,7 @@ class MainActivity:Activity() {
             unlocked();saveServerForm();require(scoped.hasKey()){"Сначала импортируйте уже разрешённый SSH-ключ"};verifyServer(editingId){enrollDevice(editingId)}
         },spaced(8));body.addView(keyCard,spaced(20))
         val trust=card();trust.addView(label("Подлинность сервера",17,true))
-        trust.addView(label(if(isTrustedSshPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,Palette.muted).apply{setTextIsSelectable(true)},spaced(10))
+        trust.addView(label(if(isTrustedSshPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,palette.muted).apply{setTextIsSelectable(true)},spaced(10))
         trust.addView(button("Проверить отпечаток"){unlocked();saveServerForm();verifyServer(editingId){toast("Сервер доступен, ключ сохранён");render()}},spaced(14))
         val isRelay = store.servers().any { it.jumpServerId == editingId }
         trust.addView(button(if(isRelay) "Проверить SSH" else "Проверить SSH и агент"){
@@ -436,7 +464,7 @@ class MainActivity:Activity() {
         val proxy=store.proxies().firstOrNull{it.id==editingId};val servers=store.servers()
         heading(if(proxy==null)"Новый прокси" else "Настройки прокси","SOCKS5 · TCP и UDP через выбранный SSH-сервер")
         nameField=field("Название",proxy?.name.orEmpty(),"Например, Рабочий",1001)
-        body.addView(label("SSH-сервер",12,true,Palette.muted),spaced(16))
+        body.addView(label("SSH-сервер",12,true,palette.muted),spaced(16))
         serverSpinner = serverPicker(servers.map { it.id to "${it.name} · ${it.host.ifBlank{"не настроен"}}" }, proxy?.serverId)
         portField=field("Локальный порт",(proxy?.port?:1080).toString(),"1024–65535",1003,true)
         proxyUdpReceive = proxy?.udpReceive
@@ -444,20 +472,20 @@ class MainActivity:Activity() {
         proxySsh=proxy?.ssh?:SshSettings()
         val originalSignature=formSignature()
         restoreDraft()
-        body.addView(label("Адрес: 127.0.0.1. Порт используется локальным SOCKS5-прокси и VPN выбранных приложений.",13,false,Palette.muted),spaced(14))
-        body.addView(label("Шифрование, очередь, приоритет звонков и окна UDP — в «Ещё» → «Настройки», они общие для всех подключений.",12,false,Palette.muted),spaced(10))
+        body.addView(label("Адрес: 127.0.0.1. Порт используется локальным SOCKS5-прокси и VPN выбранных приложений.",13,false,palette.muted),spaced(14))
+        body.addView(label("Шифрование, очередь, приоритет звонков и окна UDP — в «Ещё» → «Настройки», они общие для всех подключений.",12,false,palette.muted),spaced(10))
         body.addView(button("Сохранить прокси",true){unlocked();saveProxyForm();navigate("proxies")},spaced(20))
         if(proxy!=null)body.addView(button("Удалить прокси",danger=true){unlocked();confirmDelete("Удалить прокси ${proxy.name}?"){store.deleteProxy(proxy.id);navigate("proxies")}},spaced(8))
         formSnapshot=originalSignature
     }
-    private fun serverPicker(choices: List<Pair<String?, String>>, selected: String?): Spinner = Spinner(this).apply {
-        adapter = object : ArrayAdapter<String>(this@MainActivity, android.R.layout.simple_spinner_item, choices.map { it.second }) {
+    private fun serverPicker(choices: List<Pair<String?, String>>, selected: String?): Spinner = Spinner(uiContext).apply {
+        adapter = object : ArrayAdapter<String>(uiContext, android.R.layout.simple_spinner_item, choices.map { it.second }) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View =
-                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(Palette.text); textSize = 15f }
+                super.getView(position, convertView, parent).apply { (this as TextView).setTextColor(palette.text); textSize = 15f }
         }.apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
         tag = choices.map { it.first }
         setSelection(choices.indexOfFirst { it.first == selected }.coerceAtLeast(0))
-        backgroundTintList = ColorStateList.valueOf(Palette.accent)
+        backgroundTintList = ColorStateList.valueOf(palette.accent)
     }.also { body.addView(it, LinearLayout.LayoutParams(-1, dp(56))) }
 
     private fun selectedServerInEditor(): String? = (serverSpinner?.tag as? List<*>)
@@ -497,11 +525,11 @@ class MainActivity:Activity() {
         var tuning=store.tuning
         fun save(next:Tuning){tuning=next;store.tuning=next}
         addView(label("Для опытных: встроенный SSH",16,true))
-        addView(label("Применяется при следующем подключении ко всем серверам цепочки.",12,false,Palette.muted),spaced(8))
+        addView(label("Применяется при следующем подключении ко всем серверам цепочки.",12,false,palette.muted),spaced(8))
         fun choice(caption:()->String,title:String,names:List<String>,selected:()->Int,pick:(Int)->Unit){
             lateinit var view:Button
             view=button(caption()){
-                AlertDialog.Builder(this@MainActivity).setTitle(title)
+                AlertDialog.Builder(uiContext).setTitle(title)
                     .setSingleChoiceItems(names.toTypedArray(),selected()){dialog,index->pick(index);view.text=caption();dialog.dismiss()}
                     .setNegativeButton("Отмена",null).show()
             }
@@ -517,7 +545,7 @@ class MainActivity:Activity() {
             save(tuning.copy(ssh=tuning.ssh.copy(qos=qos[it])))
             prioritySettings.visibility = if (tuning.ssh.qos == "voice") View.VISIBLE else View.GONE
         }
-        addView(label("Во время звонков туннель придерживает загрузки, чтобы голос не прерывался. «Голос» придерживает сильнее, «Максимальная скорость» не придерживает. Уменьшенная очередь нужна для сравнения задержек и может ограничить скорость.",12,false,Palette.muted),spaced(8))
+        addView(label("Во время звонков туннель придерживает загрузки, чтобы голос не прерывался. «Голос» придерживает сильнее, «Максимальная скорость» не придерживает. Уменьшенная очередь нужна для сравнения задержек и может ограничить скорость.",12,false,palette.muted),spaced(8))
         if (Build.VERSION.SDK_INT >= 29) {
             settingsToggle(prioritySettings, "Отдельный SSH для UDP",
                 "Отметьте приложения во вкладке «Приложения», затем переподключите туннель.",
@@ -532,7 +560,7 @@ class MainActivity:Activity() {
         }
         window("UDP · загрузка",{tuning.udpReceive}){save(tuning.copy(udpReceive=it))}
         window("UDP · отправка",{tuning.udpAgentReceive}){save(tuning.copy(udpAgentReceive=it))}
-        addView(label("Окно UDP — сколько данных одного UDP-соединения туннель принимает без подтверждения. Больше окно — быстрее видео, звонки и QUIC на дальних маршрутах. «По умолчанию» для загрузки — 1 МиБ, для отправки — значение агента.",12,false,Palette.muted),spaced(8))
+        addView(label("Окно UDP — сколько данных одного UDP-соединения туннель принимает без подтверждения. Больше окно — быстрее видео, звонки и QUIC на дальних маршрутах. «По умолчанию» для загрузки — 1 МиБ, для отправки — значение агента.",12,false,palette.muted),spaced(8))
     }
 
     private fun plural(n:Int,one:String,few:String,many:String)=when{n%10==1&&n%100!=11->one;n%10 in 2..4&&n%100 !in 12..14->few;else->many}
@@ -544,7 +572,7 @@ class MainActivity:Activity() {
         val presets = listOf(null, UdpWindow(256, 192), UdpWindow(1024, 512))
         val options = (presets.map(::udpWindowLabel) + "Вручную").toTypedArray()
         val selected = presets.indexOf(current).let { if (it < 0) presets.size else it }
-        AlertDialog.Builder(this).setTitle(title)
+        AlertDialog.Builder(uiContext).setTitle(title)
             .setSingleChoiceItems(options, selected) { dialog, index ->
                 dialog.dismiss()
                 if (index == presets.size) editUdpWindow(title, current, save)
@@ -557,7 +585,7 @@ class MainActivity:Activity() {
         val form = column().apply { setPadding(dp(24), dp(8), dp(24), dp(8)) }
         fun number(caption: String, value: Int): EditText {
             form.addView(label(caption, 14, true), spaced(10))
-            return EditText(this).apply {
+            return EditText(uiContext).apply {
                 setSingleLine(true)
                 inputType = InputType.TYPE_CLASS_NUMBER
                 contentDescription = caption
@@ -567,7 +595,7 @@ class MainActivity:Activity() {
         }
         val kib = number("Окно, КиБ (64–1024)", current?.kib ?: 512)
         val slots = number("Слоты (4–512)", current?.slots ?: 256)
-        val dialog = AlertDialog.Builder(this).setTitle(title)
+        val dialog = AlertDialog.Builder(uiContext).setTitle(title)
             .setView(form).setNegativeButton("Отмена", null)
             .setPositiveButton("Применить", null).create()
         dialog.setOnShowListener {
@@ -590,23 +618,23 @@ class MainActivity:Activity() {
     private fun morePage(){
         heading("Ещё","Подключения, настройки и журнал")
         fun item(id:String,title:String,detail:String){
-            val card=card();card.addView(label("$title  ›",17,true,Palette.accent));card.addView(label(detail,13,false,Palette.muted),spaced(6))
+            val card=card();card.addView(label("$title  ›",17,true,palette.accent));card.addView(label(detail,13,false,palette.muted),spaced(6))
             card.setOnClickListener{go(id)};card.contentDescription=title;body.addView(card,spaced(12))
         }
         item("servers","Серверы","SSH-серверы, ключи доступа, цепочки и проверка агента · ${store.servers().size}")
         item("proxies","Прокси","Профили подключения и локальный порт SOCKS5 · ${store.proxies().size}")
-        item("settings","Настройки","Шифрование, приоритет звонков, окна UDP, показ IP-адресов")
+        item("settings","Настройки","Тема, подключение и параметры SSH")
         item("logs","Журнал","Диагностика подключения и ошибок")
         item("about","О программе","Версия ${MobileUpdates.versionName(this)} · обновления, агент и справка")
     }
 
     private fun settingsToggle(parent:LinearLayout,title:String,hint:String,value:Boolean,change:(Boolean)->Unit){
             val line=row().apply{gravity=Gravity.CENTER_VERTICAL}
-            val texts=column();texts.addView(label(title,15,true));texts.addView(label(hint,12,false,Palette.muted),spaced(4))
+            val texts=column();texts.addView(label(title,15,true));texts.addView(label(hint,12,false,palette.muted),spaced(4))
             line.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
-            val switch=Switch(this).apply{isChecked=value;contentDescription=title
-                thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.accent,Palette.muted))
-                trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.raised,Palette.border))
+            val switch=Switch(uiContext).apply{isChecked=value;contentDescription=title
+                thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.accent,palette.muted))
+                trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.raised,palette.border))
                 setOnCheckedChangeListener{_,on->change(on)}}
             line.addView(switch);line.setOnClickListener{switch.isChecked=!switch.isChecked}
             parent.addView(line,spaced(14))
@@ -614,9 +642,26 @@ class MainActivity:Activity() {
 
     private fun settingsPage(){
         heading("Настройки","Общие для всех подключений, как в приложении для компьютера")
+        val appearance = card()
+        appearance.addView(label("Оформление", 16, true))
+        val themes = Appearance.entries
+        val current = store.appearance
+        appearance.addView(button("Тема · ${current.label}") {
+            AlertDialog.Builder(uiContext).setTitle("Тема")
+                .setSingleChoiceItems(themes.map { it.label }.toTypedArray(), themes.indexOf(current)) { dialog, index ->
+                    dialog.dismiss()
+                    val chosen = themes[index]
+                    if (chosen == current) return@setSingleChoiceItems
+                    store.appearance = chosen
+                    applyAppearance(chosen.isDark(resources.configuration))
+                    render()
+                }.setNegativeButton("Отмена", null).show()
+        }, spaced(8))
+        body.addView(appearance, spaced(16))
+
         val connection=card();connection.addView(label("Подключение",16,true))
         settingsToggle(connection,"Проверять прокси после подключения","Проверяет TCP, UDP, DNS и IPv6 через локальный SOCKS и запрашивает внешний IP и страну.",store.verifyProxy){store.verifyProxy=it}
-        connection.addView(label("При смене сети или обрыве SSH приложение переподключается автоматически, пока VPN включён.",12,false,Palette.muted),spaced(14))
+        connection.addView(label("При смене сети или обрыве SSH приложение переподключается автоматически, пока VPN включён.",12,false,palette.muted),spaced(14))
         body.addView(connection,spaced(16))
         val privacy=card();privacy.addView(label("Конфиденциальность",16,true))
         settingsToggle(privacy,"Скрывать IP-адреса","Адреса закрыты точками, пока не нажать на них. Удобно для скриншотов.",store.hideSensitive){store.hideSensitive=it;revealIp=false}
@@ -641,7 +686,7 @@ class MainActivity:Activity() {
         heading("О программе", "Secret Tunnel · версия ${MobileUpdates.versionName(this)}")
         val updates = card()
         updates.addView(label("Обновления", 18, true))
-        val updateStatus = label("", 14, false, Palette.muted).apply {
+        val updateStatus = label("", 14, false, palette.muted).apply {
             accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         }
         updates.addView(updateStatus, spaced(8))
@@ -659,7 +704,7 @@ class MainActivity:Activity() {
 
         val agent = card()
         agent.addView(label("Агент на сервере", 18, true))
-        agent.addView(label("Приложение скачивает агент своей версии и передаёт его на сервер по SSH.", 13, false, Palette.muted), spaced(8))
+        agent.addView(label("Приложение скачивает агент своей версии и передаёт его на сервер по SSH.", 13, false, palette.muted), spaced(8))
         val servers = store.servers().filter { it.host.isNotBlank() && it.user.isNotBlank() }
         val server = servers.firstOrNull { it.id == agentServerId }
             ?: servers.firstOrNull { it.id == store.activeProxy?.serverId } ?: servers.firstOrNull()
@@ -669,7 +714,7 @@ class MainActivity:Activity() {
         } else {
             agent.addView(button("Сервер · ${server.name}") {
                 val selectedIndex = servers.indexOf(server)
-                AlertDialog.Builder(this).setTitle("Сервер")
+                AlertDialog.Builder(uiContext).setTitle("Сервер")
                     .setSingleChoiceItems(servers.map { it.name }.toTypedArray(), selectedIndex) { dialog, index ->
                         dialog.dismiss()
                         agentServerId = servers[index].id
@@ -680,13 +725,13 @@ class MainActivity:Activity() {
             agent.addView(button("Проверить версию") { manageServerAgent(server, false) }
                 .apply { isEnabled = !agentBusy }, spaced(8))
             agent.addView(button("Установить агент $installedVersion") {
-                AlertDialog.Builder(this).setTitle("Установить агент $installedVersion?")
+                AlertDialog.Builder(uiContext).setTitle("Установить агент $installedVersion?")
                     .setMessage("Сервер «${server.name}». Новые подключения будут использовать установленную версию.")
                     .setNegativeButton("Отмена", null)
                     .setPositiveButton("Установить") { _, _ -> attempt { manageServerAgent(server, true) } }.show()
             }.apply { isEnabled = !agentBusy }, spaced(8))
             if (agentResult.isNotEmpty()) agent.addView(label(agentResult, 13, false,
-                if (agentError) Palette.error else Palette.text).apply {
+                if (agentError) palette.error else palette.text).apply {
                 accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             }, spaced(12))
         }
@@ -731,7 +776,7 @@ class MainActivity:Activity() {
             else -> "Проверьте, есть ли новая версия."
         }
         update(views.status, message)
-        views.status.setTextColor(if (status.error.isNotEmpty()) Palette.error else Palette.muted)
+        views.status.setTextColor(if (status.error.isNotEmpty()) palette.error else palette.muted)
         views.check.isEnabled = !status.checking && !status.downloading
         if (status.downloading && previous?.downloading == true) {
             (views.actions.getChildAt(0) as? ProgressBar)?.progress = updatePercent(status.received, total)
@@ -739,15 +784,15 @@ class MainActivity:Activity() {
         }
         views.actions.removeAllViews()
         if (status.downloading) {
-            views.actions.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            views.actions.addView(ProgressBar(uiContext, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 100
                 progress = updatePercent(status.received, total)
-                progressTintList = ColorStateList.valueOf(Palette.accent)
+                progressTintList = ColorStateList.valueOf(palette.accent)
                 contentDescription = "Загрузка обновления"
             }, spaced(8))
         } else if (newer && release != null) {
             if (release.notes.isNotBlank()) views.actions.addView(button("Что нового") {
-                AlertDialog.Builder(this).setTitle("Версия ${release.version}").setMessage(release.notes)
+                AlertDialog.Builder(uiContext).setTitle("Версия ${release.version}").setMessage(release.notes)
                     .setPositiveButton("Закрыть", null).show()
             }, spaced(8))
             val action = when {
@@ -836,12 +881,12 @@ class MainActivity:Activity() {
                 }
             }.start()
         }
-        val search = EditText(this).apply {
+        val search = EditText(uiContext).apply {
             isSingleLine = true
             hint = "Поиск по справке"
             contentDescription = hint
-            setTextColor(Palette.text)
-            setHintTextColor(Palette.muted)
+            setTextColor(palette.text)
+            setHintTextColor(palette.muted)
             setText(helpQuery)
         }
         body.addView(search, spaced(12))
@@ -863,14 +908,14 @@ class MainActivity:Activity() {
                         "Обновления на телефоне", "Цепочка на телефоне", "Частые проблемы")) &&
                     words.all { article.contains(it, ignoreCase = true) }
             }
-            if (filtered.isEmpty()) articles.addView(label("По этому запросу ничего не найдено.", 14, false, Palette.muted), spaced(16))
+            if (filtered.isEmpty()) articles.addView(label("По этому запросу ничего не найдено.", 14, false, palette.muted), spaced(16))
             for (article in filtered) {
                 val name = article.substringBefore('\n').removePrefix("## ")
                 articles.addView(button(name) {
                     val content = article.substringAfter('\n').lineSequence()
                         .filterNot { it.startsWith("<") || it.startsWith("![") || it.startsWith("```") }.joinToString("\n")
                         .replace(Regex("""\[([^\]]+)]\([^)]+\)"""), "$1").replace("**", "").replace("`", "").trim()
-                    AlertDialog.Builder(this).setTitle(name).setMessage(content)
+                    AlertDialog.Builder(uiContext).setTitle(name).setMessage(content)
                         .setPositiveButton("Закрыть", null).show()
                 }, spaced(8))
             }
@@ -931,9 +976,9 @@ class MainActivity:Activity() {
         val shown=SessionHistory.load(this,TunnelVpnService.sessionId).filter{it.endedAt>=from||it.active}.sortedByDescending{it.startedAt}
         val totals=card()
         val grid=row()
-        fun cell(title:String,value:String,color:Int=Palette.text)=column().apply{addView(label(title,12,true,Palette.muted));addView(label(value,18,true,color).apply{setSingleLine(true);setAutoSizeTextTypeUniformWithConfiguration(12,18,1,android.util.TypedValue.COMPLEX_UNIT_SP)},spaced(6))}
-        grid.addView(cell("Скачано",TrafficMeter.bytes(shown.sumOf{it.rx}.toDouble()),Palette.accent),LinearLayout.LayoutParams(0,-2,1f))
-        grid.addView(cell("Отправлено",TrafficMeter.bytes(shown.sumOf{it.tx}.toDouble()),Palette.upload),LinearLayout.LayoutParams(0,-2,1f))
+        fun cell(title:String,value:String,color:Int=palette.text)=column().apply{addView(label(title,12,true,palette.muted));addView(label(value,18,true,color).apply{setSingleLine(true);setAutoSizeTextTypeUniformWithConfiguration(12,18,1,android.util.TypedValue.COMPLEX_UNIT_SP)},spaced(6))}
+        grid.addView(cell("Скачано",TrafficMeter.bytes(shown.sumOf{it.rx}.toDouble()),palette.accent),LinearLayout.LayoutParams(0,-2,1f))
+        grid.addView(cell("Отправлено",TrafficMeter.bytes(shown.sumOf{it.tx}.toDouble()),palette.upload),LinearLayout.LayoutParams(0,-2,1f))
         totals.addView(grid)
         val grid2=row()
         grid2.addView(cell("Сеансов",shown.size.toString()),LinearLayout.LayoutParams(0,-2,1f))
@@ -952,40 +997,40 @@ class MainActivity:Activity() {
         }
         val appCard=card();appCard.addView(label("Приложения",16,true))
         val sorted=apps.values.sortedByDescending{it.rx+it.tx}
-        sorted.firstOrNull{it.name!=UNATTRIBUTED&&it.name!=VIA_PROXY}?.let{appCard.addView(label("Больше всего: ${it.name}",12,false,Palette.accent),spaced(6))}
-        if(sorted.isEmpty())appCard.addView(label("За этот период трафика приложений не было.",13,false,Palette.muted),spaced(10))
+        sorted.firstOrNull{it.name!=UNATTRIBUTED&&it.name!=VIA_PROXY}?.let{appCard.addView(label("Больше всего: ${it.name}",12,false,palette.accent),spaced(6))}
+        if(sorted.isEmpty())appCard.addView(label("За этот период трафика приложений не было.",13,false,palette.muted),spaced(10))
         val peak=(sorted.maxOfOrNull{it.rx+it.tx}?:1L).coerceAtLeast(1L)
         for(app in sorted){
             val line=row().apply{gravity=Gravity.CENTER_VERTICAL}
             val icon=ImageView(this);catalog.firstOrNull{it.label==app.name}?.let{entry->icon.setImageDrawable(iconCache.get(entry.pkg)?:runCatching{packageManager.getApplicationIcon(entry.pkg)}.getOrNull())}
             line.addView(icon,LinearLayout.LayoutParams(dp(32),dp(32)).apply{marginEnd=dp(12)})
             val texts=column();texts.addView(label(app.name,14,true))
-            if(app.name==VIA_PROXY)texts.addView(label("тесты скорости, проверки и приложения с прокси 127.0.0.1 в своих настройках",11,false,Palette.muted),spaced(2))
-            texts.addView(label("↓ ${TrafficMeter.bytes(app.rx.toDouble())}  ·  ↑ ${TrafficMeter.bytes(app.tx.toDouble())}  ·  сеансов: ${app.sessions}",12,false,Palette.muted),spaced(4))
-            texts.addView(View(this).apply{background=Palette.panel(Palette.accent,dp(2).toFloat())},LinearLayout.LayoutParams((dp(220)*(app.rx+app.tx)/peak).toInt().coerceAtLeast(dp(4)),dp(4)).apply{topMargin=dp(6)})
+            if(app.name==VIA_PROXY)texts.addView(label("тесты скорости, проверки и приложения с прокси 127.0.0.1 в своих настройках",11,false,palette.muted),spaced(2))
+            texts.addView(label("↓ ${TrafficMeter.bytes(app.rx.toDouble())}  ·  ↑ ${TrafficMeter.bytes(app.tx.toDouble())}  ·  сеансов: ${app.sessions}",12,false,palette.muted),spaced(4))
+            texts.addView(View(this).apply{background=palette.panel(palette.accent,dp(2).toFloat())},LinearLayout.LayoutParams((dp(220)*(app.rx+app.tx)/peak).toInt().coerceAtLeast(dp(4)),dp(4)).apply{topMargin=dp(6)})
             line.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
             appCard.addView(line,spaced(14))
         }
         body.addView(appCard,spaced(12))
 
         val sessionsCard=card();sessionsCard.addView(label("Сеансы",16,true))
-        if(shown.isEmpty())sessionsCard.addView(label("За этот период сеансов не было.",13,false,Palette.muted),spaced(10))
+        if(shown.isEmpty())sessionsCard.addView(label("За этот период сеансов не было.",13,false,palette.muted),spaced(10))
         for(session in shown.take(50)){
             val route=if(session.route.size>1)session.route.joinToString(" → ") else session.server
             val top=session.apps.sortedByDescending{it.rx+it.tx}.take(3).joinToString(", "){if(it.name==UNATTRIBUTED)"без привязки" else it.name}
             val item=column()
-            item.addView(label(formatWhen(session.startedAt)+"  ·  "+(if(session.active)"идёт сейчас" else formatDuration((session.endedAt-session.startedAt).coerceAtLeast(0))),13,true,if(session.active)Palette.accent else Palette.text))
-            item.addView(label("$route  ${country(session.country)}".trim(),12,false,Palette.muted),spaced(4))
-            item.addView(label("↓ ${TrafficMeter.bytes(session.rx.toDouble())}  ·  ↑ ${TrafficMeter.bytes(session.tx.toDouble())}"+if(top.isNotBlank())"  ·  $top" else "",12,false,Palette.muted),spaced(4))
+            item.addView(label(formatWhen(session.startedAt)+"  ·  "+(if(session.active)"идёт сейчас" else formatDuration((session.endedAt-session.startedAt).coerceAtLeast(0))),13,true,if(session.active)palette.accent else palette.text))
+            item.addView(label("$route  ${country(session.country)}".trim(),12,false,palette.muted),spaced(4))
+            item.addView(label("↓ ${TrafficMeter.bytes(session.rx.toDouble())}  ·  ↑ ${TrafficMeter.bytes(session.tx.toDouble())}"+if(top.isNotBlank())"  ·  $top" else "",12,false,palette.muted),spaced(4))
             sessionsCard.addView(item,spaced(14))
         }
         body.addView(sessionsCard,spaced(12))
         if(shown.isNotEmpty()||SessionHistory.load(this,TunnelVpnService.sessionId).isNotEmpty())
             body.addView(button("Очистить историю",danger=true){
-                AlertDialog.Builder(this).setTitle("Удалить историю?").setMessage("Сеансы и трафик приложений за всё время удалятся с этого телефона.")
+                AlertDialog.Builder(uiContext).setTitle("Удалить историю?").setMessage("Сеансы и трафик приложений за всё время удалятся с этого телефона.")
                     .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->SessionHistory.clear(this,TunnelVpnService.sessionId);render()}.show()
             },spaced(12))
-        body.addView(label("История хранится только на этом телефоне: названия приложений, время и объём трафика, без адресов.",11,false,Palette.muted),spaced(12))
+        body.addView(label("История хранится только на этом телефоне: названия приложений, время и объём трафика, без адресов.",11,false,palette.muted),spaced(12))
     }
 
     private val UNATTRIBUTED="Без привязки к приложению"
@@ -1010,9 +1055,9 @@ class MainActivity:Activity() {
             speedKind=="mlab"->"M-Lab сам выбирает ближайший сервер на этом пути."
             speedProvider=="librespeed"->"Открытые серверы LibreSpeed: выбирается тот, что быстрее отвечает на этом пути."
             else->"speed.cloudflare.com: узел Cloudflare рядом с точкой выхода."
-        },12,false,Palette.muted),spaced(8))
+        },12,false,palette.muted),spaced(8))
 
-        val panel=card(Palette.raised)
+        val panel=card(palette.raised)
         val status=label("",14,true).also{panel.addView(it)}
         val numbers=row()
         fun number(title:String,color:Int):TextView{
@@ -1020,9 +1065,9 @@ class MainActivity:Activity() {
             val value=label("—",22,true).apply{setSingleLine(true);setAutoSizeTextTypeUniformWithConfiguration(14,22,1,android.util.TypedValue.COMPLEX_UNIT_SP)}
             cell.addView(value,spaced(6));numbers.addView(cell,LinearLayout.LayoutParams(0,-2,1f));return value
         }
-        val down=number("↓ Мбит/с",Palette.accent);val up=number("↑ Мбит/с",Palette.upload);val ping=number("Пинг",Palette.text)
+        val down=number("↓ Мбит/с",palette.accent);val up=number("↑ Мбит/с",palette.upload);val ping=number("Пинг",palette.text)
         panel.addView(numbers,spaced(14))
-        val steps=label("",12,false,Palette.muted).also{panel.addView(it,spaced(12))}
+        val steps=label("",12,false,palette.muted).also{panel.addView(it,spaced(12))}
         val start=button("Запустить",true){
             if(SpeedTest.live.running){SpeedTest.cancel();return@button}
             val target=speedTarget()?:error("Подключите туннель или выберите «Без туннеля»")
@@ -1036,12 +1081,12 @@ class MainActivity:Activity() {
         body.addView(label("Тест",16,true),spaced(18))
         for(kind in SpeedKinds.all){
             val chosen=kind.id==speedKind
-            val item=card(if(chosen)Palette.raised else Palette.surface)
+            val item=card(if(chosen)palette.raised else palette.surface)
             val title=row().apply{gravity=Gravity.CENTER_VERTICAL}
-            title.addView(RadioButton(this).apply{isChecked=chosen;isClickable=false;buttonTintList=ColorStateList.valueOf(Palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
-            title.addView(label(kind.title,15,true,if(chosen)Palette.accent else Palette.text),LinearLayout.LayoutParams(0,-2,1f))
-            title.addView(label("${kind.time} · ${kind.traffic}",11,false,Palette.muted))
-            item.addView(title);item.addView(label(kind.text,12,false,Palette.muted),spaced(6))
+            title.addView(RadioButton(uiContext).apply{isChecked=chosen;isClickable=false;buttonTintList=ColorStateList.valueOf(palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
+            title.addView(label(kind.title,15,true,if(chosen)palette.accent else palette.text),LinearLayout.LayoutParams(0,-2,1f))
+            title.addView(label("${kind.time} · ${kind.traffic}",11,false,palette.muted))
+            item.addView(title);item.addView(label(kind.text,12,false,palette.muted),spaced(6))
             item.contentDescription=kind.title
             item.setOnClickListener{if(!SpeedTest.live.running){speedKind=kind.id;render()}}
             body.addView(item,spaced(8))
@@ -1049,11 +1094,11 @@ class MainActivity:Activity() {
 
         val history=SpeedHistory.load(this).sortedByDescending{it.startedAt}
         body.addView(label("История замеров",16,true),spaced(20))
-        if(history.isEmpty())body.addView(label("Замеров пока нет. Запустите «Быстрый» через туннель и без него, чтобы сравнить.",13,false,Palette.muted),spaced(8))
+        if(history.isEmpty())body.addView(label("Замеров пока нет. Запустите «Быстрый» через туннель и без него, чтобы сравнить.",13,false,palette.muted),spaced(8))
         val tunnel=history.firstOrNull{!it.direct&&it.results.downloadMbps!=null};val direct=history.firstOrNull{it.direct&&it.results.downloadMbps!=null}
         if(tunnel!=null&&direct!=null){
             val compare=card();compare.addView(label("Туннель и прямое соединение",14,true))
-            fun line(title:String,a:String,b:String)=compare.addView(label("$title:  $a  ·  без туннеля $b",12,false,Palette.muted),spaced(6))
+            fun line(title:String,a:String,b:String)=compare.addView(label("$title:  $a  ·  без туннеля $b",12,false,palette.muted),spaced(6))
             line("Скачивание","${formatMbps(tunnel.results.downloadMbps)} Мбит/с","${formatMbps(direct.results.downloadMbps)} Мбит/с")
             line("Отдача","${formatMbps(tunnel.results.uploadMbps)} Мбит/с","${formatMbps(direct.results.uploadMbps)} Мбит/с")
             line("Пинг",formatMs(tunnel.results.pingMs),formatMs(direct.results.pingMs))
@@ -1064,18 +1109,18 @@ class MainActivity:Activity() {
             val item=card()
             item.addView(label("${formatWhen(run.startedAt)}  ·  ${SpeedKinds.title(run.kind)}",13,true))
             val path=if(run.direct)"Без туннеля" else if(run.route.size>1)run.route.joinToString(" → ") else run.server.ifBlank{"Туннель"}
-            item.addView(label("$path  ·  выход ${country(run.exitCountry).ifBlank{"—"}}"+if(run.exitIp.isNotBlank())" · ${shownIp(run.exitIp)}" else "",12,false,Palette.muted),spaced(4))
+            item.addView(label("$path  ·  выход ${country(run.exitCountry).ifBlank{"—"}}"+if(run.exitIp.isNotBlank())" · ${shownIp(run.exitIp)}" else "",12,false,palette.muted),spaced(4))
             val values=listOfNotNull(
                 (r.downloadMbps?:r.mixedDownloadMbps)?.let{"↓ ${formatMbps(it)}"},r.uploadMbps?.let{"↑ ${formatMbps(it)}"},
                 r.pingMs?.let{"пинг ${formatMs(it)}"},r.loadedPingMs?.let{"под нагрузкой ${formatMs(it)}"},
                 r.dnsMs?.let{"UDP ${formatMs(it)}"},r.requestMs?.let{"запрос ${formatMs(it)}"},r.serverRttMs?.let{"RTT сервера ${formatMs(it)}"})
-            item.addView(label(values.joinToString("  ·  ").ifBlank{"—"}+if(values.any{it.startsWith("↓")||it.startsWith("↑")})"  Мбит/с" else "",12,false,Palette.text),spaced(6))
-            item.addView(label(run.provider,11,false,Palette.muted),spaced(4))
-            listOfNotNull(run.error.ifBlank{null},if(run.cancelled)"Остановлен" else null,r.downloadSource?.let{"Загрузка: $it"}).forEach{item.addView(label(it,11,false,Palette.warning),spaced(4))}
+            item.addView(label(values.joinToString("  ·  ").ifBlank{"—"}+if(values.any{it.startsWith("↓")||it.startsWith("↑")})"  Мбит/с" else "",12,false,palette.text),spaced(6))
+            item.addView(label(run.provider,11,false,palette.muted),spaced(4))
+            listOfNotNull(run.error.ifBlank{null},if(run.cancelled)"Остановлен" else null,r.downloadSource?.let{"Загрузка: $it"}).forEach{item.addView(label(it,11,false,palette.warning),spaced(4))}
             body.addView(item,spaced(8))
         }
         if(history.isNotEmpty())body.addView(button("Очистить историю",danger=true){
-            AlertDialog.Builder(this).setTitle("Удалить историю замеров?").setNegativeButton("Отмена",null)
+            AlertDialog.Builder(uiContext).setTitle("Удалить историю замеров?").setNegativeButton("Отмена",null)
                 .setPositiveButton("Удалить"){_,_->SpeedHistory.clear(this);render()}.show()
         },spaced(12))
         refreshSpeed();main.removeCallbacks(speedTick);main.post(speedTick)
@@ -1109,20 +1154,20 @@ class MainActivity:Activity() {
     private fun appsPage(){
         val layout=column().apply{setPadding(dp(20),dp(8),dp(20),0)};content.addView(layout)
         layout.addView(label("Приложения",26,true))
-        layout.addView(label("Защита действует, пока Android держит VPN.",13,false,Palette.muted),spaced(8))
-        val search=EditText(this).apply{setSingleLine(true);hint="Поиск по названию или пакету";setTextColor(Palette.text);setHintTextColor(Palette.muted);textSize=14f;inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;background=Palette.panel(Palette.surface,dp(14).toFloat(),Palette.border);setPadding(dp(14),0,dp(14),0);setText(searchQuery)}
+        layout.addView(label("Защита действует, пока Android держит VPN.",13,false,palette.muted),spaced(8))
+        val search=EditText(uiContext).apply{setSingleLine(true);hint="Поиск по названию или пакету";setTextColor(palette.text);setHintTextColor(palette.muted);textSize=14f;inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;background=palette.panel(palette.surface,dp(14).toFloat(),palette.border);setPadding(dp(14),0,dp(14),0);setText(searchQuery)}
         layout.addView(search,LinearLayout.LayoutParams(-1,dp(50)).apply{topMargin=dp(16)})
-        appCount=label("",11,false,Palette.muted).also{layout.addView(it,spaced(12))}
+        appCount=label("",11,false,palette.muted).also{layout.addView(it,spaced(12))}
         val actions=row();actions.addView(button("Выбранные"){searchQuery="";search.setText("");appAdapter?.showSelected=true;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginEnd=dp(5)})
         actions.addView(button("Все приложения"){appAdapter?.showSelected=false;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginStart=dp(5)});layout.addView(actions,spaced(8))
-        if(TunnelVpnService.active)layout.addView(label("Изменения вступят в силу при следующем ручном запуске туннеля.",11,false,Palette.warning),spaced(8))
+        if(TunnelVpnService.active)layout.addView(label("Изменения вступят в силу при следующем ручном запуске туннеля.",11,false,palette.warning),spaced(8))
         val priorityAvailable = Build.VERSION.SDK_INT >= 29 &&
             store.tuning.ssh.let { it.qos == "voice" && it.priorityUdpSsh }
-        if (priorityAvailable) layout.addView(label("Для приложений со звонками отметьте «UDP через второй SSH».", 12, false, Palette.muted), spaced(8))
-        val list=ListView(this).apply{divider=null;cacheColorHint=Palette.background;setPadding(0,dp(6),0,dp(12));clipToPadding=false}
+        if (priorityAvailable) layout.addView(label("Для приложений со звонками отметьте «UDP через второй SSH».", 12, false, palette.muted), spaced(8))
+        val list=ListView(this).apply{divider=null;cacheColorHint=palette.background;setPadding(0,dp(6),0,dp(12));clipToPadding=false}
         appAdapter=ApplicationAdapter(priorityAvailable);list.adapter=appAdapter
         val listArea=FrameLayout(this);listArea.addView(list,FrameLayout.LayoutParams(-1,-1))
-        appEmpty=label("Ищем приложения…",14,false,Palette.muted).apply{gravity=Gravity.CENTER;setPadding(dp(12),dp(24),dp(12),dp(24))}.also{listArea.addView(it,FrameLayout.LayoutParams(-1,-1));list.emptyView=it}
+        appEmpty=label("Ищем приложения…",14,false,palette.muted).apply{gravity=Gravity.CENTER;setPadding(dp(12),dp(24),dp(12),dp(24))}.also{listArea.addView(it,FrameLayout.LayoutParams(-1,-1));list.emptyView=it}
         layout.addView(listArea,LinearLayout.LayoutParams(-1,0,1f));refreshApps()
         search.addTextChangedListener(object:TextWatcher{
             override fun beforeTextChanged(s:CharSequence?,start:Int,count:Int,after:Int){}
@@ -1155,16 +1200,16 @@ class MainActivity:Activity() {
                 val header = row().apply { gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(64) }
                 val icon = ImageView(this@MainActivity)
                 header.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
-                val texts=column();val name=label("",14,true);val pkg=label("",10,false,Palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));header.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
-                val toggle=Switch(this@MainActivity).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.accent,Palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.raised,Palette.border))}
+                val texts=column();val name=label("",14,true);val pkg=label("",10,false,palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));header.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
+                val toggle=Switch(uiContext).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.accent,palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.raised,palette.border))}
                 header.addView(toggle)
                 addView(header)
                 header.setOnClickListener { toggle.isChecked = !toggle.isChecked }
-                fun option(title: String) = CheckBox(this@MainActivity).apply {
+                fun option(title: String) = CheckBox(uiContext).apply {
                     text = title
                     textSize = 13f
                     minimumHeight = dp(48)
-                    setTextColor(Palette.text)
+                    setTextColor(palette.text)
                     buttonTintList = toggle.thumbTintList
                 }
                 val guard = option("Блокировать при обрыве туннеля")
@@ -1210,7 +1255,7 @@ class MainActivity:Activity() {
     private fun logsPage(){
         heading("Журнал","Диагностика подключения и ошибок")
         body.addView(button("Копировать журнал"){(getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(ClipData.newPlainText("Secret Tunnel",diagnostics()));toast("Журнал скопирован")},spaced(16))
-        logView=label(diagnostics(),11,false,Palette.muted).apply{typeface=Typeface.MONOSPACE;setTextIsSelectable(true)}.also{body.addView(it,spaced(16))}
+        logView=label(diagnostics(),11,false,palette.muted).apply{typeface=Typeface.MONOSPACE;setTextIsSelectable(true)}.also{body.addView(it,spaced(16))}
     }
     private fun activeTunnelDetails(): String {
         val status = TunnelVpnService.detail
@@ -1259,7 +1304,7 @@ class MainActivity:Activity() {
         if (TunnelVpnService.active) {
             fun stop() { startService(Intent(this, TunnelVpnService::class.java).setAction("STOP")) }
             if (TunnelVpnService.protectedCount == 0) stop()
-            else AlertDialog.Builder(this).setTitle("Остановить туннель?")
+            else AlertDialog.Builder(uiContext).setTitle("Остановить туннель?")
                 .setMessage("После остановки приложения смогут выходить в интернет напрямую.")
                 .setNegativeButton("Отмена", null).setPositiveButton("Остановить") { _, _ -> stop() }.show()
             return
@@ -1308,7 +1353,7 @@ class MainActivity:Activity() {
                 fun proceed(){scoped.fingerprint=pin;attempt(after)}
                 if(saved==pin)proceed()else{
                     pendingTrust=true
-                    AlertDialog.Builder(this).setTitle(if(isTrustedSshPin(saved))"Ключ сервера изменился" else "Доверять серверу?")
+                    AlertDialog.Builder(uiContext).setTitle(if(isTrustedSshPin(saved))"Ключ сервера изменился" else "Доверять серверу?")
                         .setMessage("${server.host}:${server.port}\n\n$pin\n\n"+if(isTrustedSshPin(saved))"Сохранён другой ключ. Сверьте замену у администратора перед подтверждением." else "Сверьте отпечаток у администратора. После подтверждения приложение запомнит этот сервер.")
                         .setNegativeButton("Отмена",null).setPositiveButton("Доверять"){dialog,_->
                             dialog.dismiss();pendingTrust=false;proceed()
@@ -1371,28 +1416,28 @@ class MainActivity:Activity() {
         }
     }
     private fun unlocked(){require(!TunnelVpnService.active){"Сначала остановите туннель, чтобы изменить подключение"};require(!checking){"Дождитесь завершения операции"}}
-    private fun heading(title:String,subtitle:String){body.addView(label(title,26,true));body.addView(label(subtitle,13,false,Palette.muted),spaced(8))}
-    private fun emptyState(title:String,detail:String){val card=card();card.addView(label(title,18,true));card.addView(label(detail,14,false,Palette.muted),spaced(10));body.addView(card,spaced(20))}
+    private fun heading(title:String,subtitle:String){body.addView(label(title,26,true));body.addView(label(subtitle,13,false,palette.muted),spaced(8))}
+    private fun emptyState(title:String,detail:String){val card=card();card.addView(label(title,18,true));card.addView(label(detail,14,false,palette.muted),spaced(10));body.addView(card,spaced(20))}
     private fun field(title:String,value:String,hint:String,idValue:Int,numeric:Boolean=false):EditText{
-        body.addView(label(title,12,true,Palette.muted),spaced(16))
-        return EditText(this).apply{id=idValue;setSingleLine(true);inputType=if(numeric)InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            importantForAutofill=View.IMPORTANT_FOR_AUTOFILL_NO;setText(value);this.hint=hint;textSize=16f;setTextColor(Palette.text);setHintTextColor(Palette.muted)
-            background=Palette.panel(Palette.surface,dp(13).toFloat(),Palette.border);setPadding(dp(14),0,dp(14),0);body.addView(this,LinearLayout.LayoutParams(-1,dp(54)).apply{topMargin=dp(7)})}
+        body.addView(label(title,12,true,palette.muted),spaced(16))
+        return EditText(uiContext).apply{id=idValue;setSingleLine(true);inputType=if(numeric)InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            importantForAutofill=View.IMPORTANT_FOR_AUTOFILL_NO;setText(value);this.hint=hint;textSize=16f;setTextColor(palette.text);setHintTextColor(palette.muted)
+            background=palette.panel(palette.surface,dp(13).toFloat(),palette.border);setPadding(dp(14),0,dp(14),0);body.addView(this,LinearLayout.LayoutParams(-1,dp(54)).apply{topMargin=dp(7)})}
     }
-    private fun card(color:Int=Palette.surface)=column().apply{setPadding(dp(18),dp(18),dp(18),dp(18));background=Palette.panel(color,dp(22).toFloat())}
+    private fun card(color:Int=palette.surface)=column().apply{setPadding(dp(18),dp(18),dp(18),dp(18));background=palette.panel(color,dp(22).toFloat())}
     private fun column()=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
     private fun row()=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-    private fun label(value:String,size:Int,bold:Boolean=false,color:Int=Palette.text)=TextView(this).apply{text=value;textSize=size.toFloat();setTextColor(color);if(bold)typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL);includeFontPadding=false}
-    private fun button(value:String,primary:Boolean=false,danger:Boolean=false,action:()->Unit)=Button(this).apply{
+    private fun label(value:String,size:Int,bold:Boolean=false,color:Int=palette.text)=TextView(this).apply{text=value;textSize=size.toFloat();setTextColor(color);if(bold)typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL);includeFontPadding=false}
+    private fun button(value:String,primary:Boolean=false,danger:Boolean=false,action:()->Unit)=Button(uiContext).apply{
         text=value;isAllCaps=false;textSize=14f;minimumHeight=dp(50);setPadding(dp(12),dp(9),dp(12),dp(9))
-        background=Palette.panel(if(primary)Palette.accent else Palette.raised,dp(14).toFloat(),if(primary)0 else Palette.border)
-        setTextColor(if(danger)Palette.error else if(primary)Palette.background else Palette.accent);setOnClickListener{attempt(action)}
+        background=palette.panel(if(primary)palette.accent else palette.raised,dp(14).toFloat(),if(primary)0 else palette.border)
+        setTextColor(if(danger)palette.error else if(primary)palette.onAccent else palette.accent);setOnClickListener{attempt(action)}
     }
     private fun spaced(top:Int)=LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(top)}
     private fun update(view:TextView?,value:String){if(view!=null&&view.text.toString()!=value)view.text=value}
-    private fun confirmDelete(title:String,action:()->Unit){AlertDialog.Builder(this).setTitle(title).setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->attempt(action)}.show()}
+    private fun confirmDelete(title:String,action:()->Unit){AlertDialog.Builder(uiContext).setTitle(title).setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->attempt(action)}.show()}
     private fun attempt(action:()->Unit){try{action()}catch(e:Exception){message(e.message.orEmpty())}}
     private fun toast(value:String){Toast.makeText(this,value,Toast.LENGTH_SHORT).show()}
-    private fun message(value:String){AlertDialog.Builder(this).setMessage(value).setPositiveButton("Понятно",null).show()}
+    private fun message(value:String){AlertDialog.Builder(uiContext).setMessage(value).setPositiveButton("Понятно",null).show()}
     private fun dp(value:Int)=(resources.displayMetrics.density*value).toInt()
 }

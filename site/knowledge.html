@@ -7,7 +7,8 @@
   <meta name="description" content="Как настроить сервер, ключ, агент, цепочку серверов, выбор программ, статистику и тесты скорости в Secret Tunnel.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-  <link rel="stylesheet" href="assets/site.css?v=20261114">
+  <script src="assets/appearance.js"></script>
+  <link rel="stylesheet" href="assets/site.css?v=theme-1">
 </head>
 <body>
   <a class="skip" href="#main">К содержанию</a>
@@ -22,6 +23,11 @@
         <a href="knowledge.html" aria-current="page">База знаний</a>
         <a href="releases.html">Релизы</a>
       </nav>
+      <select class="appearance" id="appearance" aria-label="Тема сайта">
+        <option value="system">Системная</option>
+        <option value="light">Светлая</option>
+        <option value="dark">Тёмная</option>
+      </select>
       <a class="button primary" href="releases.html">Скачать</a>
     </div>
   </header>
@@ -249,6 +255,7 @@ cd st-agent</code></pre></li>
       <article class="doc" id="settings" data-keywords="настройки движок ssh встроенный системный openssh мимо vpn подхватывать переподключаться автоматически запуск скрывать ip ipinfo токен шифрование очередь приоритет звонков">
         <h2><a href="#settings">Настройки</a></h2>
         <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
+        <p>В разделе «Оформление» выберите тему. «Системная» следует теме устройства. «Светлая» и «Тёмная» задают её вручную. Выбор сохраняется сразу.</p>
         <table>
           <tr><th>Движок SSH</th><td>Встроенный — TCP и UDP, рекомендуется. Системный OpenSSH — только TCP.</td></tr>
           <tr><th>SSH мимо других VPN</th><td>macOS: соединение с сервером идёт напрямую через Wi-Fi или Ethernet, даже если включён другой VPN. Выключите, если сервер доступен только через тот VPN.</td></tr>
@@ -286,6 +293,7 @@ cd st-agent</code></pre></li>
       <article class="doc" id="android-profile" data-keywords="android профиль трафика прокси очередь окно udp tcp сбалансированный голос максимальная скорость шифрование настройки">
         <h2><a href="#android-profile">Настройки на телефоне</a></h2>
         <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
+        <p>Тема меняется во вкладке «Ещё» → «Настройки» → «Оформление». По умолчанию приложение следует теме Android. Можно выбрать «Светлая» или «Тёмная».</p>
         <p>«Ещё» → «Настройки». Они те же, что в разделе «Для опытных: встроенный SSH» на компьютере, общие для всех подключений и применяются при следующем подключении ко всем звеньям цепочки. До версии 0.3.23 они хранились в каждом профиле прокси; при обновлении переносятся значения выбранного профиля.</p>
         <ul>
           <li><b>Приоритет звонков</b>: «Сбалансированный» подходит большинству, «Голос» сильнее защищает звонки, «Максимальная скорость» для загрузок.</li>
@@ -349,6 +357,6 @@ cd st-agent</code></pre></li>
       <span><a href="https://github.com/openm1ke/Secret-Tunnel">Исходники на GitHub</a> · <a href="releases.html">Релизы</a></span>
     </div>
   </footer>
-  <script src="assets/site.js?v=20261114"></script>
+  <script src="assets/site.js?v=theme-1"></script>
 </body>
 </html>

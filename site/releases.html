@@ -7,7 +7,8 @@
   <meta name="description" content="Все версии Secret Tunnel для macOS, Windows, Android и серверный агент.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-  <link rel="stylesheet" href="assets/site.css?v=20261114">
+  <script src="assets/appearance.js"></script>
+  <link rel="stylesheet" href="assets/site.css?v=theme-1">
 </head>
 <body>
   <a class="skip" href="#main">К содержанию</a>
@@ -22,6 +23,11 @@
         <a href="knowledge.html">База знаний</a>
         <a href="releases.html" aria-current="page">Релизы</a>
       </nav>
+      <select class="appearance" id="appearance" aria-label="Тема сайта">
+        <option value="system">Системная</option>
+        <option value="light">Светлая</option>
+        <option value="dark">Тёмная</option>
+      </select>
     </div>
   </header>
   <main id="main" class="wrap releases">
@@ -38,6 +44,6 @@
       <span><a href="https://github.com/openm1ke/Secret-Tunnel/releases">Релизы на GitHub</a></span>
     </div>
   </footer>
-  <script src="assets/site.js?v=20261114"></script>
+  <script src="assets/site.js?v=theme-1"></script>
 </body>
 </html>

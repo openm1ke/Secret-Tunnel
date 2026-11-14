@@ -15,6 +15,7 @@ struct SecretTunnelApp: App {
 
 struct ContentView: View {
     @EnvironmentObject private var c: TunnelController
+    @AppStorage("appearance") private var appearance: Appearance = .system
     @State private var importing = false
 
     var body: some View {
@@ -56,6 +57,14 @@ struct ContentView: View {
                     }
                 }
 
+                Section("Настройки") {
+                    Picker("Тема", selection: $appearance) {
+                        ForEach(Appearance.allCases, id: \.self) { theme in
+                            Text(theme.label).tag(theme)
+                        }
+                    }
+                }
+
                 if !c.message.isEmpty {
                     Section { Text(c.message).font(.footnote) }
                 }
@@ -75,6 +84,27 @@ struct ContentView: View {
             }
         }
         .navigationViewStyle(.stack)
+        .preferredColorScheme(appearance.colorScheme)
+    }
+}
+
+private enum Appearance: String, CaseIterable {
+    case system, light, dark
+
+    var label: String {
+        switch self {
+        case .system: return "Системная"
+        case .light: return "Светлая"
+        case .dark: return "Тёмная"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
     }
 }
 

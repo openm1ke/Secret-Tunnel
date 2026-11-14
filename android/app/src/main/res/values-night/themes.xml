@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.SecretTunnel" parent="Theme.SecretTunnel.Dark" />
+</resources>

@@ -5,6 +5,8 @@ pub mod embedded_ssh;
 pub mod udp_protocol;
 #[path = "../../src-tauri/src/agent_update.rs"]
 pub mod agent_update;
+#[path = "../../src-tauri/src/connection_checks.rs"]
+pub mod connection_checks;
 
 pub fn log_line(logs: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: impl Into<String>) {
     if let Ok(mut logs) = logs.lock() {

@@ -3,6 +3,7 @@
 Prints JSON ports, exits after --seconds. Creates no files or services.
 """
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -13,7 +14,7 @@ BLOCK = bytes(range(256)) * 64
 TCP_BYTES = 2 * 1024 * 1024
 
 
-def download(client):
+def transfer(client):
     with client:
         client.settimeout(45)
         try:
@@ -23,6 +24,19 @@ def download(client):
                 if not part:
                     return
                 request += part
+            if request.startswith(b"SINK ") and request[5:-1].isdigit():
+                remaining = int(request[5:-1])
+                if not 65536 <= remaining <= 8 * 1024 * 1024:
+                    return
+                digest = hashlib.sha256()
+                while remaining:
+                    block = client.recv(min(65536, remaining))
+                    if not block:
+                        return
+                    digest.update(block)
+                    remaining -= len(block)
+                client.sendall(digest.digest())
+                return
             if request == b"PAYLOAD\n":
                 size = TCP_BYTES
             elif request.startswith(b"PAYLOAD ") and request[8:-1].isdigit():
@@ -57,14 +71,14 @@ def main():
                     client, _ = tcp.accept()
                 except socket.timeout:
                     continue
-                threading.Thread(target=download, args=(client,), daemon=True).start()
+                threading.Thread(target=transfer, args=(client,), daemon=True).start()
 
         threading.Thread(target=accept, daemon=True).start()
         print(json.dumps({"pid": os.getpid(), "tcp_port": tcp.getsockname()[1], "udp_port": udp.getsockname()[1]}), flush=True)
         while time.monotonic() < deadline:
             try:
                 data, peer = udp.recvfrom(65507)
-                if len(data) == 160:
+                if len(data) in (160, 1200):
                     udp.sendto(data, peer)
             except socket.timeout:
                 pass

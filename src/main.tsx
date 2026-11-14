@@ -2,6 +2,7 @@ import DomainsPanel from "./DomainsPanel";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import AboutPanel, { Release } from "./AboutPanel";
+import ConnectionHealth, { ConnectionChecks } from "./ConnectionHealth";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
@@ -73,6 +74,7 @@ type SshTuning = {
   tcp_interactive_bytes?: number | null;
 };
 const balancedTcpBudget = 96 * 1024;
+const voiceTcpBudget = 64 * 1024;
 const defaultSshTuning: SshTuning = { cipher: "auto", channel_buffer_messages: 32, channel_receive_window_bytes: 4194304, tcp_interactive_bytes: balancedTcpBudget };
 
 type AppSettings = {
@@ -82,6 +84,8 @@ type AppSettings = {
   ipinfo_token: string;
   ssh_engine: string;
   ssh_tuning?: SshTuning | null;
+  priority_udp_ssh?: boolean;
+  priority_udp_processes?: string[];
   hide_sensitive: boolean;
   verify_proxy_on_start: boolean;
   auto_reconnect: boolean;
@@ -134,6 +138,8 @@ type TunnelStatus = {
   rx_total: number;
   tx_total: number;
   last_error: string;
+  checks: ConnectionChecks;
+  priority_udp_ssh?: { separate: boolean; error: string | null } | null;
 };
 
 /** A program started by a selected application that went around the tunnel. */
@@ -172,6 +178,7 @@ const emptyStatus: TunnelStatus = {
   state: "stopped", state_emoji: "", app_version: "", ssh_engine: "embedded", server_id: "", server_name: "", ssh_route: [],
   proxy_id: "", proxy_name: "", proxy_host: "127.0.0.1", proxy_port: 1080, pid: null, started_at: null, ip: "",
   country_code: "", country_name: "", country_flag: "", rx_total: 0, tx_total: 0, last_error: "",
+  checks: { running: false, report: null },
 };
 
 // Backend messages that are still in English, as people read them here.
@@ -384,11 +391,15 @@ function App() {
   const connected = status.state === "running";
   const sessionActive = ["running", "starting", "reconnecting", "stopping"].includes(status.state);
   const isMac = redirect.platform === "macos";
+  const callPriority = settingsDraft.ssh_tuning?.tcp_interactive_bytes;
+  const embeddedForProfile = settingsDraft.ssh_engine === "embedded" || Boolean(currentServer.jump_server_id);
   // Before the first status arrives the browser's guess names the device.
   const deviceLabel = isMac || (redirect.platform === "unknown" && navigator.userAgent.includes("Mac")) ? "Этот Mac"
     : redirect.platform === "windows" || navigator.userAgent.includes("Windows") ? "Этот ПК" : "Этот компьютер";
   const redirectActive = redirect.running || redirect.starting;
   const redirectSupported = isMac || redirect.platform === "windows";
+  const showPriorityChoices = redirectSupported && embeddedForProfile && settingsDraft.priority_udp_ssh
+    && callPriority === voiceTcpBudget;
   const canRedirect = redirectSupported && connected && !redirectActive && redirect.component_available &&
     (!redirect.requires_administrator || redirect.administrator) &&
     (redirect.supports_system_ssh || status.ssh_engine === "embedded");
@@ -410,6 +421,8 @@ function App() {
     .filter((app) => (!selectedAppsOnly || isAppSelected(app)) && `${app.name} ${app.executable}`.toLowerCase().includes(appSearch.toLowerCase()))
     .sort((a, b) => Number(isAppSelected(b)) - Number(isAppSelected(a)));
   const selectedApps = appChoices.filter(isAppSelected);
+  const priorityPatterns = new Set((settingsDraft.priority_udp_processes ?? []).map(normalizeAppPattern));
+  const isPriorityApp = (app: InstalledApp) => appOwnKeys(app).some((pattern) => priorityPatterns.has(pattern));
   const domainRulesOn = (settingsDraft.domain_rules || []).some((rule) => rule.enabled);
   const canStartInterception = busy === null && canRedirect && (selectedApps.length > 0 || domainRulesOn) && !(isMac && domainRulesOn);
   const emptyAppsHint = appsScanning ? "Ищем установленные программы…" : selectedAppsOnly ? "Пока ничего не выбрано. Переключитесь на «Все» и отметьте программы." : `Ничего не найдено. Измените запрос или добавьте ${isMac ? ".app" : ".exe"} вручную.`;
@@ -507,6 +520,25 @@ function App() {
     const stillNeeded = new Set(appChoices.filter((other) => other.id !== app.id && isAppSelected(other)).flatMap(appAliases));
     const remove = new Set([...appAliases(app).filter((pattern) => !stillNeeded.has(pattern)), ...appOwnKeys(app)]);
     updateSettings("redirect_processes", current.filter((pattern) => !remove.has(normalizeAppPattern(pattern))));
+    if (isPriorityApp(app)) togglePriorityApplication(app, false);
+  }
+
+  function togglePriorityApplication(app: InstalledApp, checked: boolean) {
+    const current = settingsDraft.priority_udp_processes ?? [];
+    const own = new Set(appOwnKeys(app));
+    const primaryKeys = app.patterns.filter((pattern) => own.has(normalizeAppPattern(pattern)));
+    updateSettings("priority_udp_processes", checked
+      ? dedupePatterns([...current, ...primaryKeys])
+      : current.filter((pattern) => !own.has(normalizeAppPattern(pattern))));
+  }
+
+  function priorityCheckbox(app: InstalledApp) {
+    return <label className="checkboxLine appPriority">
+      <input type="checkbox" checked={isPriorityApp(app)} disabled={busy !== null}
+        aria-label={`UDP через второй SSH: ${app.name}`}
+        onChange={(event) => togglePriorityApplication(app, event.target.checked)} />
+      <span>UDP через второй SSH</span>
+    </label>;
   }
 
   function chooseAppView(view: AppView) {
@@ -591,7 +623,12 @@ function App() {
     const known = new Set(installedApps.flatMap(appAliases));
     const manual = settingsDraft.redirect_processes.filter((pattern) => pattern.trim() && !known.has(normalizeAppPattern(pattern)));
     const selected = installedApps.filter(isAppSelected).flatMap((app) => app.patterns);
-    return { ...settingsDraft, redirect_processes: dedupePatterns([...selected, ...manual]) };
+    const marked = installedApps.filter((app) => isAppSelected(app) && isPriorityApp(app)).flatMap((app) => app.patterns);
+    return {
+      ...settingsDraft,
+      redirect_processes: dedupePatterns([...selected, ...manual]),
+      priority_udp_processes: dedupePatterns([...marked, ...manual.filter((pattern) => priorityPatterns.has(normalizeAppPattern(pattern)))]),
+    };
   }
 
   async function refreshAll() {
@@ -891,8 +928,9 @@ function App() {
                 <div className="heroMain">
                   <h2>{stateTitle(status.state)}</h2>
                   <p className="heroSub">
-                    {connected ? <>Трафик выходит в интернет через {currentServer.name}{country ? <> · <Flag code={status.country_code} label={country} /> {country}</> : null}. В сети {formatUptime(status.started_at, now)}.</>
-                      : phase === "busy" ? "Устанавливаем SSH-соединение и проверяем агент на сервере."
+                    {connected ? <>SSH до {status.server_name || currentServer.name}{country ? <> · <Flag code={status.country_code} label={country} /> {country}</> : null}. В сети {formatUptime(status.started_at, now)}.</>
+                      : status.state === "stopping" ? "Закрываем SSH и останавливаем перехват."
+                      : phase === "busy" ? "Устанавливаем SSH-соединение."
                       : phase === "error" ? (status.last_error || "Соединение прервалось. Подробности в журнале ниже.")
                       : currentServer.id ? `Нажмите «Подключить», чтобы направить трафик через ${currentServer.name}.` : "Добавьте SSH-сервер во вкладке «Серверы»."}
                   </p>
@@ -924,6 +962,21 @@ function App() {
                   ))}
                 </div>
               </div>
+
+              <ConnectionHealth
+                ssh={stateTitle(status.state)}
+                connected={connected}
+                interception={redirect.running ? (connected ? "Включён" : "Без SSH") : redirect.starting ? "Запускается"
+                  : redirect.last_error ? "Ошибка" : redirect.platform === "unknown" ? "Проверяем"
+                  : !redirectSupported || !redirect.component_available ? "Компонент недоступен" : "Выключен"}
+                interceptionError={redirect.last_error}
+                directWarning={isMac && redirect.component_available
+                  ? "При остановке или сбое перехвата новые соединения могут идти напрямую." : ""}
+                checks={status.checks}
+                priorityUdp={connected ? status.priority_udp_ssh : null}
+                interceptionRunning={redirect.running}
+                onCheck={() => invoke("check_connection").then(refreshAll).catch((error) => notify(String(error), true))}
+              />
 
               <div className="pickers">
                 <label>
@@ -1243,6 +1296,9 @@ function App() {
               </div>
               {appsError && <div className="notice bad">{appsError}</div>}
 
+              {showPriorityChoices && (
+                <p className="fieldNote">Отметьте «UDP через второй SSH» у приложений для звонков. После сохранения выбора переподключите туннель и снова включите перехват.</p>
+              )}
               {appView === "table" ? (
                 <div className="appTableWrap" aria-busy={appsScanning}>
                   <table className="appTable" aria-label="Установленные программы">
@@ -1259,7 +1315,7 @@ function App() {
                             <td className="num">{app.patterns.length}</td>
                             <td className="num">{usage ? formatBytes(usage.rx + usage.tx) : "—"}</td>
                             <td>{selected && added ? formatDay(added) : "—"}</td>
-                            <td><input type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)} aria-label={`Направлять ${app.name} через туннель`} /></td>
+                            <td><input type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)} aria-label={`Направлять ${app.name} через туннель`} />{selected && showPriorityChoices && priorityCheckbox(app)}</td>
                           </tr>
                         );
                       })}
@@ -1274,12 +1330,11 @@ function App() {
                     const usage = appTraffic.get(app.id);
                     const added = settingsDraft.app_added_at?.[app.id];
                     return (
-                      <label key={app.id} className={selected ? "appTile selected" : "appTile"} onContextMenu={(event) => openAppMenu(event, app)} onKeyDown={(event) => appMenuKey(event, app)}
+                      <div key={app.id} className={selected ? "appTile selected" : "appTile"} onContextMenu={(event) => openAppMenu(event, app)} onKeyDown={(event) => appMenuKey(event, app)}
                         onMouseEnter={(event) => showAppTip(event, app)} onMouseLeave={hideAppTip}>
-                        <AppIcon app={app} icon={appIcons[app.executable]} />
+                        <label htmlFor={`app-tunnel-${app.id}`}><AppIcon app={app} icon={appIcons[app.executable]} /></label>
                         <span className="appText">
-                          <strong>{app.name}</strong>
-                          <small>{appSubtitle(app)}</small>
+                          <label htmlFor={`app-tunnel-${app.id}`}><strong>{app.name}</strong><small>{appSubtitle(app)}</small></label>
                           {appView === "cards" && (
                             <span className="appFacts">
                               <span className="path">{app.executable}</span>
@@ -1287,10 +1342,11 @@ function App() {
                               <span>{selected ? (added ? `Через туннель с ${formatDay(added)}` : "Через туннель") : "Работает напрямую"} · {app.patterns.length} {plural(app.patterns.length, "процесс", "процесса", "процессов")}</span>
                             </span>
                           )}
+                          {selected && showPriorityChoices && priorityCheckbox(app)}
                         </span>
-                        <input type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)}
+                        <input id={`app-tunnel-${app.id}`} type="checkbox" className="switch" checked={selected} disabled={busy !== null} onChange={(event) => toggleApplication(app, event.target.checked)}
                           aria-label={`Направлять ${app.name} через туннель`} />
-                      </label>
+                      </div>
                     );
                   })}
                   {!visibleApps.length && <p className="emptyHint">{emptyAppsHint}</p>}
@@ -1435,7 +1491,7 @@ function App() {
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.start_tunnel_on_launch} onChange={(event) => updateSettings("start_tunnel_on_launch", event.target.checked)} />
                   <SettingLabel hint="При открытии приложения сразу подключает выбранный сервер. Включайте, когда туннель уже проверен.">Подключаться при запуске приложения</SettingLabel></label>
                 <label className="checkboxLine"><input type="checkbox" checked={settingsDraft.verify_proxy_on_start} onChange={(event) => updateSettings("verify_proxy_on_start", event.target.checked)} />
-                  <SettingLabel hint="После подключения делает пробный запрос через прокси, чтобы сразу увидеть, что трафик проходит.">Проверять прокси после подключения</SettingLabel></label>
+                  <SettingLabel hint="Проверяет TCP, UDP, DNS и IPv6 через локальный SOCKS. Результаты видны в разделе «Подключение».">Проверять прокси после подключения</SettingLabel></label>
               </fieldset>
 
               <fieldset>
@@ -1485,12 +1541,22 @@ function App() {
                 </label>
                 <label>
                   <SettingLabel hint="Во время звонков туннель придерживает загрузки, чтобы голос не прерывался. «Голос» придерживает сильнее, «Максимальная скорость» не придерживает и отключает контроль очереди.">Приоритет звонков</SettingLabel>
-                  <select value={settingsDraft.ssh_tuning?.tcp_interactive_bytes === undefined ? balancedTcpBudget : settingsDraft.ssh_tuning.tcp_interactive_bytes ?? 0} onChange={(event) => updateSettings("ssh_tuning", { ...defaultSshTuning, ...settingsDraft.ssh_tuning, tcp_interactive_bytes: Number(event.target.value) || null })}>
+                  <select value={callPriority === undefined ? balancedTcpBudget : callPriority ?? 0} onChange={(event) => updateSettings("ssh_tuning", { ...defaultSshTuning, ...settingsDraft.ssh_tuning, tcp_interactive_bytes: Number(event.target.value) || null })}>
                     <option value={balancedTcpBudget}>Сбалансированный (рекомендуется)</option>
-                    <option value={65536}>Голос</option>
+                    <option value={voiceTcpBudget}>Голос</option>
                     <option value={0}>Максимальная скорость</option>
                   </select>
                 </label>
+                {redirectSupported && embeddedForProfile && callPriority === voiceTcpBudget && (
+                  <>
+                    <label className="checkboxLine">
+                      <input type="checkbox" checked={settingsDraft.priority_udp_ssh ?? false}
+                        onChange={(event) => updateSettings("priority_udp_ssh", event.target.checked)} />
+                      <span>Отдельный SSH для UDP</span>
+                    </label>
+                    <p className="fieldNote">Отделяет UDP отмеченных приложений от фонового трафика. Выберите приложения во вкладке «Приложения», затем переподключите туннель.</p>
+                  </>
+                )}
                 <UdpWindowField title="UDP · загрузка" value={settingsDraft.udp_receive_window}
                   hint="Сколько UDP-данных одного соединения туннель принимает без подтверждения. Больше окно — быстрее видео, звонки и QUIC на дальних маршрутах, но больше памяти. «По умолчанию» — 1 МиБ, у старого агента меньше."
                   onChange={(value) => updateSettings("udp_receive_window", value)} />

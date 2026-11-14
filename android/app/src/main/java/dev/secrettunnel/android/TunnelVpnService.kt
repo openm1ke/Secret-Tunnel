@@ -11,6 +11,8 @@ import android.net.VpnService
 import android.os.*
 import org.json.JSONObject
 import java.io.File
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -21,6 +23,8 @@ class TunnelVpnService : VpnService() {
         @Volatile var phase = "Остановлен"
         @Volatile var detail = ""
         @Volatile var active = false
+        @Volatile internal var interceptionActive = false
+            private set
         @Volatile var protectedCount = 0
             private set
         @Volatile var connectedSocksPort: Int? = null
@@ -36,7 +40,7 @@ class TunnelVpnService : VpnService() {
         private const val CHANNEL = "ssh-tunnel"
         private const val NOTICE = 1080
     }
-    external fun TProxyStartService(configPath: String, fd: Int): Boolean
+    external fun TProxyStartService(configPath: String, fd: Int, priorityUdpPort: Int): Boolean
     external fun TProxyStopService(): Boolean
     external fun TProxyIsRunning(): Boolean
     external fun TProxyGetStats(): LongArray
@@ -93,6 +97,19 @@ class TunnelVpnService : VpnService() {
     private var session:TunnelSession?=null
     private var newSession = true
     private var verifyExit = false
+    @Volatile private var priorityUids: Set<Int> = emptySet()
+
+    // Called by the packet engine while the UDP flow still has its original endpoints.
+    @Suppress("unused")
+    fun isPriorityUdp(addresses: ByteArray, localPort: Int, remotePort: Int): Boolean {
+        if (Build.VERSION.SDK_INT < 29 || priorityUids.isEmpty()) return false
+        val size = addresses.size / 2
+        return runCatching {
+            val local = InetSocketAddress(InetAddress.getByAddress(addresses.copyOfRange(0, size)), localPort)
+            val remote = InetSocketAddress(InetAddress.getByAddress(addresses.copyOfRange(size, addresses.size)), remotePort)
+            connectivity.getConnectionOwnerUid(android.system.OsConstants.IPPROTO_UDP, local, remote) in priorityUids
+        }.getOrDefault(false)
+    }
     // Flows refused by either multiplexer end in the current SSH session.
     private var reportedRejections=0L
     private var sessionStarted=0L
@@ -215,6 +232,7 @@ class TunnelVpnService : VpnService() {
 
     private fun pauseForwarding(reason: String) {
         connectedSocksPort = null
+        interceptionActive = false
         SpeedTest.tunnelUnavailable(reason)
         TProxyStopService()
         val guarded = session?.protectedPackages.orEmpty()
@@ -267,6 +285,11 @@ class TunnelVpnService : VpnService() {
                 require(installed.isNotEmpty()) { "Выберите хотя бы одно установленное приложение" }
                 val guarded = snapshot.protectedPackages.intersect(installed)
                 session = snapshot.copy(packages = installed, protectedPackages = guarded)
+                if (Build.VERSION.SDK_INT >= 29 && snapshot.ssh.qos == "voice" && snapshot.ssh.priorityUdpSsh) {
+                    priorityUids = snapshot.priorityUdpPackages.intersect(installed).mapNotNull { pkg ->
+                        runCatching { packageManager.getApplicationInfo(pkg, 0).uid }.getOrNull()
+                    }.toSet()
+                }
                 if (stopping.get()) return@execute
                 if (guarded.isNotEmpty()) {
                     establishRoutes(Routes(guarded, false))
@@ -321,6 +344,7 @@ class TunnelVpnService : VpnService() {
         }
         reportedRejections = 0
         setState("Работает", readyDetail())
+        if (verifyExit) NativeBridge.checkConnection()
     }
     private fun establishRoutes(next: Routes) {
         if (next == routes) return
@@ -368,8 +392,10 @@ class TunnelVpnService : VpnService() {
         if (stopping.get()) return
         TProxyStopService() // join the native reader before replacing its borrowed descriptor
         establishRoutes(Routes(current.packages, ipv6))
-        check(TProxyStartService(config.absolutePath, checkNotNull(tun).fd)) { "Не удалось запустить обработчик TCP/UDP" }
+        val priorityPort = status.optJSONObject("priority_udp_ssh")?.optInt("port") ?: 0
+        check(TProxyStartService(config.absolutePath, checkNotNull(tun).fd, priorityPort)) { "Не удалось запустить обработчик TCP/UDP" }
         check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
+        interceptionActive = true
     }
     private fun connectSsh(link: UnderlyingNetworkTracker.Link<Network>) {
         val current = checkNotNull(session)
@@ -382,6 +408,7 @@ class TunnelVpnService : VpnService() {
                 .put("udp_receive_window", current.udpReceive?.toJson())
                 .put("agent_udp_receive_window", current.udpAgentReceive?.toJson())
                 .put("ssh_tuning",current.ssh.toNativeJson())
+                .put("priority_udp_ssh", priorityUids.isNotEmpty())
             transportLink = link
             if (tun != null) setUnderlyingNetworks(underlyingNetworks())
             val error = NativeBridge.start(config.toString(), this)
@@ -419,6 +446,7 @@ class TunnelVpnService : VpnService() {
     private fun notifyState() { if (active) getSystemService(NotificationManager::class.java).notify(NOTICE, notification()) }
     private fun cleanup() {
         prepared = false
+        interceptionActive = false
         connectedSocksPort = null
         SpeedTest.tunnelUnavailable("Туннель остановлен. Подключите его и запустите тест заново.")
         main.removeCallbacks(monitor)

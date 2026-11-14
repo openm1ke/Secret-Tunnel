@@ -11,5 +11,6 @@ object NativeBridge {
     external fun cancel()
     external fun stop()
     external fun status(): String
+    external fun checkConnection(): String
     external fun trafficTotals(): LongArray
 }

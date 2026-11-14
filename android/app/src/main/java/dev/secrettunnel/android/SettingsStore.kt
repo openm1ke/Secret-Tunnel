@@ -47,12 +47,18 @@ data class UdpWindow(val kib: Int, val slots: Int) {
         }
     }
 }
-data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, val qos:String="balanced") {
+data class SshSettings(
+    val cipher: String = "auto",
+    val smallQueue: Boolean = false,
+    val qos: String = "balanced",
+    val priorityUdpSsh: Boolean = false,
+) {
     init {
         require(cipher in listOf("auto","aes128_gcm","chacha20_poly1305")) { "Неизвестный шифр SSH" }
         require(qos in listOf("balanced","voice","throughput")) { "Неизвестный профиль трафика" }
     }
     fun toJson():JSONObject=JSONObject().put("cipher",cipher).put("smallQueue",smallQueue).put("qos",qos)
+        .put("priorityUdpSsh", priorityUdpSsh)
     fun toNativeJson():JSONObject=JSONObject().put("cipher",cipher)
         .put("channel_buffer_messages",if(smallQueue)8 else 32)
         .put("channel_receive_window_bytes",if(smallQueue)1024*1024 else 4*1024*1024)
@@ -62,7 +68,10 @@ data class SshSettings(val cipher:String="auto", val smallQueue:Boolean=false, v
             else -> JSONObject.NULL
         })
     companion object {
-        fun fromJson(value:JSONObject)=SshSettings(value.optString("cipher","auto"),value.optBoolean("smallQueue",false),value.optString("qos","balanced"))
+        fun fromJson(value: JSONObject) = SshSettings(
+            value.optString("cipher", "auto"), value.optBoolean("smallQueue", false),
+            value.optString("qos", "balanced"), value.optBoolean("priorityUdpSsh", false),
+        )
     }
 }
 
@@ -80,6 +89,7 @@ data class ProxyProfile(val id:String, val name:String, val serverId:String, val
     val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null, val ssh:SshSettings=SshSettings())
 data class TunnelSession(val route:List<SshEndpoint>, val socksPort:Int, val packages:Set<String>,
     val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?, val ssh:SshSettings,
+    val priorityUdpPackages:Set<String> = emptySet(),
     val protectedPackages:Set<String> = emptySet())
 
 internal fun isTrustedSshPin(value: String) = Regex("SHA256:[A-Za-z0-9+/]{43}").matches(value)
@@ -132,6 +142,9 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     var protectedPackages: Set<String>
         get() = prefs.getStringSet("protected_packages", emptySet())!!.toSet()
         set(value) { prefs.edit().putStringSet("protected_packages", value.toSet()).apply() }
+    var priorityUdpPackages: Set<String>
+        get() = prefs.getStringSet("priority_udp_packages", emptySet())!!.toSet()
+        set(value) { prefs.edit().putStringSet("priority_udp_packages", value.toSet()).apply() }
     var activeProxyId:String get()=prefs.getString("active_proxy","")!!;set(v){require(proxies().any{it.id==v});prefs.edit().putString("active_proxy",v).apply()}
     val activeProxy:ProxyProfile? get()=proxies().firstOrNull{it.id==prefs.getString("active_proxy","")}
     fun servers():List<ServerProfile> = ids().map { id ->
@@ -236,7 +249,8 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
         require(selected.isNotEmpty()) {"Выберите приложения"}
         val tuning=tuning
         return TunnelSession(route,proxy.port,selected,tuning.udpReceive,tuning.udpAgentReceive,tuning.ssh,
-            protectedPackages.intersect(selected))
+            priorityUdpPackages = priorityUdpPackages.intersect(selected),
+            protectedPackages = protectedPackages.intersect(selected))
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {

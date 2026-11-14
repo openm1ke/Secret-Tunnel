@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.26 — 2026-11-14
+
+- Android: the VPN restores SSH after switching between Wi-Fi and mobile data. The per-app «Блокировать при обрыве туннеля» checkbox keeps selected traffic from going direct while Android holds the VPN interface.
+- Android: a network change interrupts the speed test, closes its connections and leaves the app running. An interrupted run is excluded from history.
+- macOS, Windows and Android 10+: the «Голос» profile can use a separate SSH connection for UDP from marked apps. New UDP flows fall back to the primary SSH connection if the second one drops.
+- The connection screen reports SSH and interception separately and checks TCP, UDP, DNS and IPv6 through SOCKS. Windows can match verified Dorion WebView2 child processes to their host app when using ProxyBridge.
+
 ## 0.3.25 — 2026-11-14
 
 - Android: «Ещё» → «О программе» shows the installed version and checks GitHub for stable releases manually or at startup. New releases show their notes and download progress. The app verifies the APK checksum, version and signature before opening Android's installer.

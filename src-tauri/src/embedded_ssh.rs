@@ -59,6 +59,10 @@ pub struct EmbeddedOptions {
     pub jumps: Vec<EmbeddedJump>,
     pub probe_ipv6: bool,
     pub max_connections: usize,
+    /// A second SOCKS entry point owned by the main runtime. Its connections
+    /// may use the optional UDP transport once that transport is ready.
+    #[cfg(any(target_os = "macos", target_os = "android", windows))]
+    pub priority_udp: Option<PriorityUdpRouter>,
     /// Override the local UDP receive window without changing the peer's window.
     pub udp_receive_window: Option<FlowWindow>,
     /// Allow the automatic local window to use a lower slot limit advertised by the agent.
@@ -72,6 +76,28 @@ pub struct EmbeddedOptions {
     pub route_note: Option<Arc<std::sync::Mutex<Option<String>>>>,
 }
 
+#[cfg(any(target_os = "macos", target_os = "android", windows))]
+#[derive(Clone, Default)]
+pub struct PriorityUdpRouter {
+    port: u16,
+    transport: Arc<std::sync::Mutex<Option<(Endpoint, Arc<TrafficCounters>)>>>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "android", windows))]
+impl PriorityUdpRouter {
+    pub fn with_port(port: u16) -> Self {
+        Self { port, ..Self::default() }
+    }
+
+    pub fn attach(&self, handle: &EmbeddedTunnelHandle) {
+        *self.transport.lock().unwrap() = Some((handle.transport.clone(), handle.counters.clone()));
+    }
+
+    fn active(&self) -> Option<(Endpoint, Arc<TrafficCounters>)> {
+        self.transport.lock().unwrap().as_ref().filter(|(endpoint, _)| endpoint.error().is_none()).cloned()
+    }
+}
+
 #[derive(Debug)]
 pub struct EmbeddedTunnelHandle {
     stop_tx: tokio::sync::watch::Sender<bool>,
@@ -83,6 +109,8 @@ pub struct EmbeddedTunnelHandle {
     agent: AgentCapabilities,
     outer_tcp: Arc<TcpObserver>,
     ssh_tuning: SshTuning,
+    #[cfg(any(target_os = "macos", target_os = "android", windows))]
+    priority_udp_port: Option<u16>,
 }
 
 impl EmbeddedTunnelHandle {
@@ -108,6 +136,10 @@ impl EmbeddedTunnelHandle {
     }
     pub fn traffic_totals(&self) -> (u64, u64) {
         self.counters.totals()
+    }
+    #[cfg(any(target_os = "macos", target_os = "android", windows))]
+    pub fn priority_udp_port(&self) -> Option<u16> {
+        self.priority_udp_port
     }
 
     pub fn stop(self) {
@@ -807,7 +839,37 @@ pub fn start_with_options_cancellable(
     listener
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
+    start_embedded_worker(Some(listener), server, logs, options, cancelled)
+}
 
+#[cfg(any(target_os = "macos", target_os = "android", windows))]
+pub fn start_priority_udp_transport(
+    server: EmbeddedServer,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    mut options: EmbeddedOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<EmbeddedTunnelHandle, String> {
+    options.priority_udp = None;
+    options.max_connections = 64;
+    options.probe_ipv6 = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    start_embedded_worker(None, server, logs, options, &|| cancelled() || std::time::Instant::now() >= deadline)
+        .map_err(|error| {
+            if !cancelled() && std::time::Instant::now() >= deadline {
+                "Второй SSH не подключился за 15 секунд".into()
+            } else {
+                error
+            }
+        })
+}
+
+fn start_embedded_worker(
+    listener: Option<TcpListener>,
+    server: EmbeddedServer,
+    logs: Arc<std::sync::Mutex<Vec<String>>>,
+    options: EmbeddedOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<EmbeddedTunnelHandle, String> {
     let counters = Arc::new(TrafficCounters::default());
     let tunnel_counters = Arc::clone(&counters);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -815,7 +877,7 @@ pub fn start_with_options_cancellable(
     let (outcome_tx, outcome) = mpsc::channel();
     let join = thread::spawn(move || {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
-        if options.protect_socket.is_some() {
+        if options.protect_socket.is_some() || listener.is_none() {
             builder.worker_threads(2);
         }
         let runtime = match builder.enable_all().build() {
@@ -865,7 +927,7 @@ pub fn start_with_options_cancellable(
             .unwrap_or_else(|| "Embedded SSH startup failed".into()));
     }
 
-    let (ipv6_supported, transport, agent, outer_tcp, ssh_tuning) = readiness.unwrap();
+    let (ipv6_supported, transport, agent, outer_tcp, ssh_tuning, _priority_udp_port) = readiness.unwrap();
     Ok(EmbeddedTunnelHandle {
         stop_tx,
         join: Some(join),
@@ -876,20 +938,50 @@ pub fn start_with_options_cancellable(
         agent,
         outer_tcp,
         ssh_tuning,
+        #[cfg(any(target_os = "macos", target_os = "android", windows))]
+        priority_udp_port: _priority_udp_port,
     })
 }
 
+type WorkerReady = (Option<bool>, Endpoint, AgentCapabilities, Arc<TcpObserver>, SshTuning, Option<u16>);
+
+async fn accept_socks(listener: Option<&tokio::net::TcpListener>) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
+    match listener {
+        Some(listener) => listener.accept().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn run_embedded_tunnel(
-    listener: TcpListener,
+    listener: Option<TcpListener>,
     server: EmbeddedServer,
     mut stop: tokio::sync::watch::Receiver<bool>,
     counters: Arc<TrafficCounters>,
-    ready: Sender<(Option<bool>, Endpoint, AgentCapabilities, Arc<TcpObserver>, SshTuning)>,
+    ready: Sender<WorkerReady>,
     logs: Arc<std::sync::Mutex<Vec<String>>>,
     options: EmbeddedOptions,
 ) -> Result<(), String> {
-    let listener =
-        tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
+    let listener = listener.map(tokio::net::TcpListener::from_std).transpose().map_err(|error| error.to_string())?;
+    #[cfg(any(target_os = "macos", target_os = "android", windows))]
+    let priority_udp = options.priority_udp.clone();
+    #[cfg(any(target_os = "macos", target_os = "android", windows))]
+    let priority_listener = if let Some(router) = &priority_udp {
+        let addr = listener.as_ref().expect("Second SOCKS requires a main listener")
+            .local_addr().map_err(|error| error.to_string())?;
+        match tokio::net::TcpListener::bind((addr.ip(), router.port)).await {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                super::log_line(&logs, format!("Локальный SOCKS для второго SSH недоступен: {error}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(any(target_os = "macos", target_os = "android", windows))]
+    let priority_udp_port = priority_listener.as_ref().and_then(|l| l.local_addr().ok()).map(|a| a.port());
+    #[cfg(not(any(target_os = "macos", target_os = "android", windows)))]
+    let priority_udp_port = None;
     let probe_ipv6 = options.probe_ipv6;
     let log_tcp = options.protect_socket.is_none();
     let ssh_tuning = options.ssh_tuning.clone();
@@ -971,7 +1063,7 @@ async fn run_embedded_tunnel(
     let buffers = DatagramBuffers::default();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
     let capacity = Arc::new(CapacityRejections::default());
-    let _ = ready.send((ipv6_supported, transport.clone(), agent, route.outer_tcp.clone(), ssh_tuning));
+    let _ = ready.send((ipv6_supported, transport.clone(), agent, route.outer_tcp.clone(), ssh_tuning, priority_udp_port));
     let mut tcp_tick = tokio::time::interval(Duration::from_secs(5));
     tcp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -989,18 +1081,36 @@ async fn run_embedded_tunnel(
                     super::log_line(&logs, format!("SSH heartbeat {snapshot}"));
                 }
             }
-            accepted = listener.accept() => {
-                let (stream, originator_addr) = accepted.map_err(|error| error.to_string())?;
+            accepted = async {
+                #[cfg(any(target_os = "macos", target_os = "android", windows))]
+                {
+                    tokio::select! {
+                        conn = accept_socks(listener.as_ref()) => (conn, false),
+                        conn = accept_socks(priority_listener.as_ref()) => (conn, true),
+                    }
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "android", windows)))]
+                { (accept_socks(listener.as_ref()).await, false) }
+            } => {
+                let (conn, udp_only) = accepted;
+                let (stream, originator_addr) = conn.map_err(|error| error.to_string())?;
                 let permit = match Arc::clone(&connection_limit).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => { super::log_line(&logs, "SOCKS admission capacity reached"); continue; }
                 };
                 let transport = transport.clone();
-                let counters = counters.clone(); let logs = logs.clone(); let buffers = buffers.clone();
+                let counters = counters.clone();
+                #[cfg(any(target_os = "macos", target_os = "android", windows))]
+                let (transport, counters) = if udp_only {
+                    priority_udp.as_ref().and_then(PriorityUdpRouter::active).unwrap_or((transport, counters))
+                } else {
+                    (transport, counters)
+                };
+                let logs = logs.clone(); let buffers = buffers.clone();
                 let capacity = capacity.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers).await {
+                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers, udp_only).await {
                         if CapacityRejections::is_capacity(&error) {
                             capacity.note(&logs, &error);
                         } else if !secret_tunnel_mux::is_flow_cancellation(&error) {
@@ -1674,6 +1784,7 @@ async fn handle_socks_client(
     counters: Arc<TrafficCounters>,
     logs: &Arc<std::sync::Mutex<Vec<String>>>,
     buffers: DatagramBuffers,
+    udp_only: bool,
 ) -> Result<(), String> {
     let mut request =
         match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
@@ -1698,6 +1809,10 @@ async fn handle_socks_client(
             DNS_IDLE,
         )
         .await;
+    }
+    if udp_only {
+        write_socks5_reply(&mut stream, 0x07).await?;
+        return Ok(());
     }
 
     // DNS over TCP goes to the same reachable resolver as DNS over UDP.

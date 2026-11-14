@@ -52,8 +52,11 @@ class VpnFixtureTest {
         ready.delete(); finish.delete()
         val store = SettingsStore(context)
         val previousProtection = store.protectedPackages
+        val previousPriority = store.priorityUdpPackages
+        val previousTuning = store.tuning
         val protect = InstrumentationRegistry.getArguments().getString("protectProbe") == "true"
-        if (protect) store.protectedPackages = store.packages
+        val priority = InstrumentationRegistry.getArguments().getString("priorityProbe") == "true"
+        assumeTrue(!priority || android.os.Build.VERSION.SDK_INT >= 29)
         store.snapshot() // fail with an actionable fixture error
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)) as MainActivity
         fun views(root: View): List<View> = listOf(root) + if(root is ViewGroup) (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()
@@ -61,6 +64,11 @@ class VpnFixtureTest {
             .put("detail", TunnelVpnService.detail).put("protected", TunnelVpnService.protectedCount)
             .put("native", JSONObject(NativeBridge.status()))
         try {
+            if (protect) store.protectedPackages = store.packages
+            if (priority) {
+                store.priorityUdpPackages = store.packages
+                store.tuning = previousTuning.copy(ssh = previousTuning.ssh.copy(qos = "voice", priorityUdpSsh = true))
+            }
             instrumentation.runOnMainSync {
                 views(activity.window.decorView).filterIsInstance<Button>().first { it.text.toString() == "Подключить" }.performClick()
             }
@@ -73,6 +81,8 @@ class VpnFixtureTest {
             }
             assertEquals("VPN failed to start", "Работает", TunnelVpnService.phase)
             if (protect) assertEquals(store.packages.size, TunnelVpnService.protectedCount)
+            if (priority) assertTrue("Second SSH failed to start",
+                JSONObject(NativeBridge.status()).optJSONObject("priority_udp_ssh")?.optBoolean("separate") == true)
             if(InstrumentationRegistry.getArguments().getString("injectEngineCrash")=="true"){
                 val engine=TunnelVpnService()
                 assertTrue(engine.TProxyIsRunning())
@@ -102,6 +112,10 @@ class VpnFixtureTest {
             while (TunnelVpnService.active && System.currentTimeMillis() < deadline) Thread.sleep(100)
             File(context.filesDir, "integration-stop.json").writeText(snapshot().toString())
             if (protect) store.protectedPackages = previousProtection
+            if (priority) {
+                store.priorityUdpPackages = previousPriority
+                store.tuning = previousTuning
+            }
             instrumentation.runOnMainSync { activity.finish() }
             ready.delete(); finish.delete()
         }

@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Установка Secret Tunnel</title>
+  <meta name="description" content="Пошаговая установка Secret Tunnel для macOS, Windows и Linux: от сервера с паролем root до первого подключения. Команды, картинки и пояснения к каждой настройке.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="stylesheet" href="assets/site.css?v=20261114">
+</head>
+<body data-os="mac" data-login="root">
+  <a class="skip" href="#main">К содержанию</a>
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/logo.svg" alt="">Secret Tunnel</a>
+      <button class="menu" aria-expanded="false" aria-controls="nav">Меню</button>
+      <nav id="nav" aria-label="Разделы">
+        <a href="./#features">Возможности</a>
+        <a href="./#screens">Скриншоты</a>
+        <a href="guide.html" aria-current="page">Установка</a>
+        <a href="knowledge.html">База знаний</a>
+        <a href="releases.html">Релизы</a>
+      </nav>
+      <a class="button primary" href="releases.html">Скачать</a>
+    </div>
+  </header>
+
+  <div class="wrap kb guide">
+    <aside>
+      <div class="setup" aria-label="Ваши данные">
+        <div class="os-switch" role="group" aria-label="Ваш компьютер">
+          <button type="button" data-set-os="mac">macOS</button>
+          <button type="button" data-set-os="win">Windows</button>
+          <button type="button" data-set-os="linux">Linux</button>
+        </div>
+        <label>
+          <span>Адрес сервера от хостера</span>
+          <input id="v-ip" inputmode="url" autocomplete="off" spellcheck="false" placeholder="203.0.113.10">
+        </label>
+        <label>
+          <span>Логин от хостера</span>
+          <input id="v-login" autocomplete="off" spellcheck="false" placeholder="root">
+        </label>
+        <p class="setup-note">Команды ниже подставят эти значения сами. Адрес остаётся в этой вкладке и никуда не отправляется.</p>
+      </div>
+      <ul class="toc">
+        <li class="group">Сервер</li>
+        <li><a href="#ssh">Как работает SSH</a></li>
+        <li><a href="#need">Что понадобится</a></li>
+        <li><a href="#terminal">1. Открыть терминал</a></li>
+        <li><a href="#login">2. Войти по паролю</a></li>
+        <li><a href="#key">3. Создать ключ</a></li>
+        <li><a href="#send-key">4. Отправить ключ</a></li>
+        <li><a href="#harden">5. Порт и вход по ключу</a></li>
+        <li><a href="#check">6. Проверить вход</a></li>
+        <li><a href="#agent">7. Поставить агент</a></li>
+        <li class="group">Приложение</li>
+        <li><a href="#install">8. Установить</a></li>
+        <li><a href="#add-server">9. Добавить сервер</a></li>
+        <li><a href="#test">10. Проверить SSH и агент</a></li>
+        <li><a href="#connect">11. Подключиться</a></li>
+        <li><a href="#apps">12. Выбрать программы</a></li>
+        <li><a href="#settings">13. Настройки</a></li>
+        <li class="group">Дополнительно</li>
+        <li><a href="#chain">Цепочка серверов</a></li>
+        <li><a href="#advanced">Проверка ключа хоста</a></li>
+        <li><a href="#trouble">Если не получилось</a></li>
+      </ul>
+    </aside>
+
+    <main id="main">
+      <h1>Установка шаг за шагом</h1>
+      <p class="intro">Настройте SSH на своём сервере и подключите к нему выбранные программы. <span class="site-only">Выберите свою систему и впишите адрес сервера в поле «Адрес сервера от хостера», чтобы подставить его в команды.</span><span class="app-only" hidden>В командах замените <code>203.0.113.10</code> на адрес своего сервера.</span></p>
+      <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
+
+      <article class="doc" id="ssh">
+        <h2><a href="#ssh">Как работает SSH</a></h2>
+        <p>SSH (Secure Shell) — протокол защищённого удалённого подключения. В Secret Tunnel он передаёт трафик выбранных программ между устройством и вашим сервером.</p>
+        <ol>
+          <li><b>Сначала проверьте сервер.</b> При первом подключении сверьте отпечаток ключа с данными администратора или с выводом команды в доверенной консоли сервера. При неожиданной смене ключа остановитесь и выясните причину.</li>
+          <li><b>Войдите по ключу.</b> На сервер добавляют публичный ключ. Клиент доказывает владение приватным ключом цифровой подписью. Храните приватный ключ на своём устройстве и защищайте доступ к нему.</li>
+          <li><b>Передавайте данные в защищённом канале.</b> SSH шифрует данные и проверяет их целостность на участке до сервера. Защита соединения от сервера до конечного ресурса зависит от протокола приложения, например HTTPS.</li>
+        </ol>
+        <p><a href="https://www.rfc-editor.org/rfc/rfc4251#section-4">Архитектура SSH в RFC 4251</a></p>
+      </article>
+
+      <article class="doc" id="need">
+        <h2><a href="#need">Что понадобится</a></h2>
+        <ul>
+          <li><b>Сервер (VPS)</b> на Linux x86_64: Ubuntu 22.04 или 24.04, Debian 11 или 12. Для начала достаточно базового тарифа.</li>
+          <li><b>Данные от хостера</b>: IP-адрес, логин (обычно <code>root</code>) и пароль. Обычно они приходят письмом или лежат в панели управления.</li>
+          <li><b>Компьютер</b>: macOS 15 или новее, Windows 10 или 11. Для Linux приложения пока нет, но сервер с Linux настраивается так же, как с macOS, — шаги 1–7.</li>
+        </ul>
+        <p>Мы сделаем на сервере четыре вещи: вход по ключу вместо пароля, отдельного пользователя <code>tunnel</code> для туннеля, порт SSH <code>2222</code> вместо стандартного <code>22</code> и небольшой агент, через который пойдёт трафик.</p>
+        <p class="note">Во всех командах вместо <code class="v-ip">203.0.113.10</code> должен стоять адрес вашего сервера. <span class="site-only">Впишите его в поле «Адрес сервера от хостера», и он подставится сам.</span></p>
+      </article>
+
+      <p class="part">Сервер</p>
+
+      <article class="doc step" id="terminal">
+        <h2><a href="#terminal">1. Откройте терминал</a></h2>
+        <p>Терминал — окно, в которое вводят команды. Все команды этой инструкции копируются кнопкой «Копировать» и вставляются в терминал целиком.</p>
+
+        <div data-os="mac">
+          <p>Нажмите <kbd>⌘</kbd> + <kbd>Пробел</kbd>, наберите «Терминал» и нажмите <kbd>Enter</kbd>. Или откройте Finder → «Программы» → «Утилиты» → «Терминал».</p>
+          <figure class="illo">
+            <div class="spotlight" aria-hidden="true">
+              <div class="sl-bar"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg><span>Терминал</span></div>
+              <div class="sl-row on"><i class="ic-term">&gt;_</i><span>Терминал</span><small>Программы</small></div>
+            </div>
+            <figcaption>Поиск Spotlight: наберите «Терминал» и нажмите Enter.</figcaption>
+          </figure>
+          <p>Вставить скопированную команду — <kbd>⌘</kbd> + <kbd>V</kbd>, выполнить — <kbd>Enter</kbd>.</p>
+        </div>
+
+        <div data-os="win">
+          <p>Нажмите правой кнопкой мыши на «Пуск» (или <kbd>Win</kbd> + <kbd>X</kbd>) и выберите «Терминал». В Windows 10 этот пункт называется «Windows PowerShell». Права администратора для этих шагов не нужны.</p>
+          <figure class="illo">
+            <div class="winmenu" aria-hidden="true">
+              <span>Приложения и возможности</span>
+              <span>Диспетчер устройств</span>
+              <span>Сетевые подключения</span>
+              <span class="on">Терминал</span>
+              <span>Терминал (администратор)</span>
+              <span>Диспетчер задач</span>
+              <span>Параметры</span>
+              <span>Проводник</span>
+              <b><i>⊞</i> Пуск</b>
+            </div>
+            <figcaption>Меню правой кнопки на «Пуск» в Windows 11.</figcaption>
+          </figure>
+          <p>Вставить команду — <kbd>Ctrl</kbd> + <kbd>V</kbd> или правая кнопка мыши, выполнить — <kbd>Enter</kbd>. Если в начале строки нет <code>PS</code>, у вас командная строка, а не PowerShell: откройте «Терминал» ещё раз и выберите вкладку Windows PowerShell.</p>
+        </div>
+
+        <div data-os="linux">
+          <p>Нажмите <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>T</kbd> или найдите «Терминал» в меню приложений.</p>
+          <p>Вставить команду — <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>V</kbd>, выполнить — <kbd>Enter</kbd>.</p>
+        </div>
+
+        <p class="note">Когда терминал спрашивает пароль, символы не появляются на экране, даже звёздочки. Это нормально: наберите или вставьте пароль и нажмите Enter.</p>
+      </article>
+
+      <article class="doc step" id="login">
+        <h2><a href="#login">2. Войдите на сервер по паролю</a></h2>
+        <p>При первом входе терминал покажет отпечаток ключа сервера. Сверьте его с данными хостера или с отпечатком в доверенной консоли сервера и подтвердите подключение, если они совпадают.</p>
+        <pre class="cmd"><code>ssh <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></code></pre>
+        <figure class="term">
+          <div class="term-bar"><i></i><i></i><i></i><span class="t-mac">Терминал</span><span class="t-win">Windows PowerShell</span><span class="t-linux">Терминал</span></div>
+<pre><span class="p">$</span> <span class="c">ssh <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></span>
+<span class="o">The authenticity of host '<span class="v-ip">203.0.113.10</span>' can't be established.
+ED25519 key fingerprint is SHA256:Xv3nU9TcY0k1bWq4mD7hFZr2pL8sJeA6oN5gKiQwHcE.
+Are you sure you want to continue connecting (yes/no/[fingerprint])?</span> <span class="you">yes</span>  <em class="say">← после сверки введите yes</em>
+<span class="o">Warning: Permanently added '<span class="v-ip">203.0.113.10</span>' (ED25519) to the list of known hosts.
+<span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span>'s password:</span>  <em class="say">← пароль от хостера, он не виден при вводе</em>
+<span class="o">Welcome to Ubuntu 24.04 LTS</span>
+<span class="srv"><span class="v-login">root</span>@vps:~#</span>  <em class="say">← вы на сервере</em></pre>
+        </figure>
+        <p>Строка вида <code>root@vps:~#</code> значит, что вы управляете сервером. Выйти обратно на свой компьютер — команда <code>exit</code>. Сделайте это сейчас: следующий шаг выполняется на компьютере.</p>
+        <details class="more">
+          <summary>Что за «fingerprint» и стоит ли проверять</summary>
+          <p>Это отпечаток ключа сервера. Он защищает от подмены сервера на пути. Если хостер показывает отпечаток в панели, сравните его. Можно открыть консоль сервера в панели хостера (VNC или «Консоль») и выполнить <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> — строка должна совпасть с той, что показал терминал.</p>
+        </details>
+        <details class="more">
+          <summary>Хостер выдал не root, а другой логин (ubuntu, debian, admin)</summary>
+          <p><span class="site-only">Впишите его в поле «Логин от хостера» — команды подстроятся. </span><span class="app-only" hidden>Замените <code>root</code> в командах на свой логин. </span>На шаге 5 сначала выполните <code>sudo -i</code>: она даёт права администратора, а в блоке команд замените <code>/root/.ssh/authorized_keys</code> на <code>/home/ваш-логин/.ssh/authorized_keys</code>.</p>
+        </details>
+      </article>
+
+      <article class="doc step" id="key">
+        <h2><a href="#key">3. Создайте ключ на компьютере</a></h2>
+        <p>Ключ — пара файлов. <b>Приватный</b> (<code>secret-tunnel</code>) остаётся на компьютере и заменяет пароль. <b>Публичный</b> (<code>secret-tunnel.pub</code>) кладётся на сервер. Приватный ключ никому не отправляйте и никуда не вставляйте, кроме приложения.</p>
+        <div data-os="mac linux">
+          <pre class="cmd"><code>mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/secret-tunnel -C "secret-tunnel"</code></pre>
+        </div>
+        <div data-os="win">
+          <pre class="cmd"><code>New-Item -ItemType Directory -Force $env:USERPROFILE\.ssh | Out-Null
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\secret-tunnel -C "secret-tunnel"</code></pre>
+          <p>Первая строка создаёт папку <code>.ssh</code>: без неё Windows не сохранит ключ.</p>
+        </div>
+        <figure class="term">
+          <div class="term-bar"><i></i><i></i><i></i><span class="t-mac">Терминал</span><span class="t-win">Windows PowerShell</span><span class="t-linux">Терминал</span></div>
+<pre><span class="o">Generating public/private ed25519 key pair.
+Enter passphrase for "<span class="keypath">/Users/user/.ssh/secret-tunnel</span>" (empty for no passphrase):</span>  <em class="say">← просто Enter</em>
+<span class="o">Enter same passphrase again:</span>  <em class="say">← ещё раз Enter</em>
+<span class="o">Your identification has been saved in <span class="keypath">/Users/user/.ssh/secret-tunnel</span>
+Your public key has been saved in <span class="keypath">/Users/user/.ssh/secret-tunnel</span>.pub
+The key fingerprint is:
+SHA256:N1vKJKQ6M4dLGqbThYQzY+w4nVYEVnQtvQnE5Fuhyqk secret-tunnel</span></pre>
+        </figure>
+        <p>Пароль ключа (passphrase) оставьте пустым: ключи с паролем приложение пока не поддерживает. Если терминал спросит <code>Overwrite (y/n)?</code>, ключ с таким именем уже есть: ответьте <code>n</code> и пользуйтесь им.</p>
+      </article>
+
+      <article class="doc step" id="send-key">
+        <h2><a href="#send-key">4. Отправьте публичный ключ на сервер</a></h2>
+        <p>Команда положит <code>secret-tunnel.pub</code> на сервер. Пароль от хостера понадобится в последний раз.</p>
+        <div data-os="mac linux">
+          <pre class="cmd"><code>ssh-copy-id -i ~/.ssh/secret-tunnel.pub <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></code></pre>
+          <figure class="term">
+            <div class="term-bar"><i></i><i></i><i></i><span>Терминал</span></div>
+<pre><span class="o">/usr/bin/ssh-copy-id: INFO: 1 key(s) remain to be installed -- if you are prompted now it is to install the new keys
+<span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span>'s password:</span>  <em class="say">← пароль от хостера</em>
+<span class="o">Number of key(s) added:        1</span>  <em class="say">← готово</em></pre>
+          </figure>
+        </div>
+        <div data-os="win">
+          <p>В Windows нет <code>ssh-copy-id</code>, поэтому команда длиннее. Скопируйте её целиком:</p>
+          <pre class="cmd"><code>type $env:USERPROFILE\.ssh\secret-tunnel.pub | ssh <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span> "mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh &amp;&amp; cat &gt;&gt; ~/.ssh/authorized_keys &amp;&amp; chmod 600 ~/.ssh/authorized_keys"</code></pre>
+          <p>Терминал спросит пароль от хостера и ничего не напишет в ответ — так и должно быть.</p>
+        </div>
+        <p>Теперь войдите на сервер уже по ключу. Пароль спрашиваться не должен:</p>
+        <pre class="cmd" data-os="mac linux"><code>ssh -i ~/.ssh/secret-tunnel <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></code></pre>
+        <pre class="cmd" data-os="win"><code>ssh -i $env:USERPROFILE\.ssh\secret-tunnel <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></code></pre>
+        <p>Видите <code><span class="v-login">root</span>@…</code> без вопроса о пароле — ключ работает. <b>Не закрывайте это окно</b>: следующий шаг выполняется в нём.</p>
+      </article>
+
+      <article class="doc step" id="harden">
+        <h2><a href="#harden">5. Порт 2222 и вход только по ключу</a></h2>
+        <div class="nonroot">
+          <p>Вы вошли не как root, поэтому сначала получите права администратора. Команда может спросить пароль — это тот же пароль от хостера:</p>
+          <pre class="cmd"><code>sudo -i</code></pre>
+          <p>Строка должна закончиться на <code>#</code>, например <code>root@vps:~#</code>.</p>
+        </div>
+        <p>Вы на сервере. Вставьте весь блок целиком и нажмите Enter:</p>
+        <pre class="cmd"><code>adduser --disabled-password --gecos "" tunnel
+install -d -m 700 -o tunnel -g tunnel /home/tunnel/.ssh
+install -m 600 -o tunnel -g tunnel <span class="v-akeys">/root/.ssh/authorized_keys</span> /home/tunnel/.ssh/authorized_keys
+cat &gt; /etc/ssh/sshd_config.d/10-secret-tunnel.conf &lt;&lt;'EOF'
+Port 2222
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+EOF
+if command -v ufw &gt;/dev/null &amp;&amp; ufw status | grep -q "Status: active"; then ufw allow 2222/tcp; fi
+sshd -t &amp;&amp; systemctl daemon-reload &amp;&amp; { systemctl restart ssh.socket 2&gt;/dev/null || true; systemctl restart ssh; } &amp;&amp; echo "ГОТОВО: SSH слушает порт 2222"</code></pre>
+        <figure class="term">
+          <div class="term-bar"><i></i><i></i><i></i><span>сервер</span></div>
+<pre><span class="o">info: Adding user `tunnel' ...
+info: Creating home directory `/home/tunnel' ...</span>
+<span class="ok">ГОТОВО: SSH слушает порт 2222</span>  <em class="say">← последняя строка должна быть такой</em></pre>
+        </figure>
+        <table class="explain">
+          <tr><th>Что делает блок</th><th>Зачем</th></tr>
+          <tr><td>Создаёт пользователя <code>tunnel</code> и копирует ему ваш ключ</td><td>Туннель работает без прав администратора. Даже если ключ украдут, сервером не завладеют.</td></tr>
+          <tr><td><code>Port 2222</code></td><td>На стандартный порт 22 постоянно стучатся боты, перебирая пароли. На 2222 их почти нет.</td></tr>
+          <tr><td><code>PasswordAuthentication no</code></td><td>Вход по паролю выключен совсем — подобрать его больше нельзя. Входить можно только с вашим ключом.</td></tr>
+          <tr><td><code>PermitRootLogin prohibit-password</code></td><td>Вы сохраняете вход под <code>root</code>, но только по ключу — для обслуживания сервера.</td></tr>
+          <tr><td><code>ufw allow 2222/tcp</code></td><td>Если на сервере включён фаервол, открывает в нём новый порт.</td></tr>
+          <tr><td><code>sshd -t</code> и перезапуск SSH</td><td>Сначала проверяет настройки и только потом применяет. С ошибкой в настройках SSH не перезапустится.</td></tr>
+        </table>
+        <p class="note"><b>Не закрывайте это окно</b>, пока не проверите вход на шаге 6. Текущее соединение не оборвётся, и через него можно всё исправить. Если же доступ всё-таки потерян, откройте консоль сервера в панели хостера (VNC, «Консоль») и удалите файл: <code>rm /etc/ssh/sshd_config.d/10-secret-tunnel.conf &amp;&amp; systemctl restart ssh</code>.</p>
+        <p>У некоторых хостеров есть свой фаервол в панели управления («Сетевой экран», «Firewall», «Группы безопасности»). Если там открыт только порт 22, добавьте правило для TCP 2222.</p>
+      </article>
+
+      <article class="doc step" id="check">
+        <h2><a href="#check">6. Проверьте вход в новом окне</a></h2>
+        <p>Откройте <b>второе</b> окно терминала (<span data-os="mac"><kbd>⌘</kbd> + <kbd>N</kbd></span><span data-os="win"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd></span><span data-os="linux"><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd></span>) и войдите как <code>tunnel</code> на порт 2222:</p>
+        <pre class="cmd" data-os="mac linux"><code>ssh -i ~/.ssh/secret-tunnel -p 2222 tunnel@<span class="v-ip">203.0.113.10</span></code></pre>
+        <pre class="cmd" data-os="win"><code>ssh -i $env:USERPROFILE\.ssh\secret-tunnel -p 2222 tunnel@<span class="v-ip">203.0.113.10</span></code></pre>
+        <figure class="term">
+          <div class="term-bar"><i></i><i></i><i></i><span class="t-mac">Терминал</span><span class="t-win">Windows PowerShell</span><span class="t-linux">Терминал</span></div>
+<pre><span class="o">The authenticity of host '[<span class="v-ip">203.0.113.10</span>]:2222' can't be established.
+ED25519 key fingerprint is SHA256:Xv3nU9TcY0k1bWq4mD7hFZr2pL8sJeA6oN5gKiQwHcE.
+This host key is known by the following other names/addresses:
+    ~/.ssh/known_hosts:1: <span class="v-ip">203.0.113.10</span>
+Are you sure you want to continue connecting (yes/no/[fingerprint])?</span> <span class="you">yes</span>  <em class="say">← это тот же сервер, на новом порту</em>
+<span class="srv">tunnel@vps:~$</span>  <em class="say">← всё работает</em></pre>
+        </figure>
+        <p>Вопрос про ключ сервера появится ещё раз: компьютер запоминает сервер вместе с портом. Отпечаток тот же, что на шаге 2, — отвечайте <code>yes</code>. Этот ответ нужен и приложению: оно проверяет сервер по тому же списку известных серверов.</p>
+        <p>Получилось — первое окно можно закрыть командой <code>exit</code>. Пароль от хостера больше не нужен: вход по нему выключен.</p>
+      </article>
+
+      <article class="doc step" id="agent">
+        <h2><a href="#agent">7. Установите агент на сервер</a></h2>
+        <p>Агент — небольшая программа, через которую пойдут TCP и UDP: сайты, звонки, игры. Он запускается только на время подключения, не открывает портов и не требует прав администратора. В окне, где вы вошли как <code>tunnel</code>, вставьте блок:</p>
+        <pre class="cmd"><code>mkdir -p ~/st-agent &amp;&amp; cd ~/st-agent
+V=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/openm1ke/Secret-Tunnel/releases/latest | sed 's#.*/v##')
+echo "Последняя версия: $V"
+curl -fLO "https://github.com/openm1ke/Secret-Tunnel/releases/download/v$V/SecretTunnel-$V-server-linux-x86_64.tar.gz"
+curl -fLO "https://github.com/openm1ke/Secret-Tunnel/releases/download/v$V/SHA256SUMS.txt"
+sha256sum --ignore-missing -c SHA256SUMS.txt
+tar xzf "SecretTunnel-$V-server-linux-x86_64.tar.gz" &amp;&amp; sh install-server-agent.sh</code></pre>
+        <figure class="term">
+          <div class="term-bar"><i></i><i></i><i></i><span>сервер</span></div>
+<pre><span class="o">Последняя версия: 0.3.22</span>
+<span class="o">./SecretTunnel-0.3.22-server-linux-x86_64.tar.gz: OK</span>  <em class="say">← файл не подменён</em>
+<span class="o">Agent capabilities verified: 0.3.22
+PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associations; EOF</span>
+<span class="ok">Agent install complete.</span>  <em class="say">← агент установлен</em></pre>
+        </figure>
+        <p>Блок скачивает агент последней версии с GitHub, сверяет контрольную сумму, проверяет агент в работе и кладёт его в <code>~/.local/bin</code>. Версия агента совпадёт с версией приложения, если вы ставите приложение тоже последней версии. При обновлении приложения повторите этот шаг.</p>
+        <details class="more">
+          <summary>Сервер не может скачать с GitHub</summary>
+          <p>Скачайте архив <code>SecretTunnel-…-server-linux-x86_64.tar.gz</code> на компьютер со страницы <a href="releases.html">релизов</a> и отправьте на сервер из папки «Загрузки»:</p>
+          <pre class="cmd" data-os="mac linux"><code>scp -P 2222 -i ~/.ssh/secret-tunnel ~/Downloads/SecretTunnel-*-server-linux-x86_64.tar.gz tunnel@<span class="v-ip">203.0.113.10</span>:</code></pre>
+          <pre class="cmd" data-os="win"><code>scp -P 2222 -i $env:USERPROFILE\.ssh\secret-tunnel $env:USERPROFILE\Downloads\SecretTunnel-*-server-linux-x86_64.tar.gz tunnel@<span class="v-ip">203.0.113.10</span>:</code></pre>
+          <p>Затем на сервере: <code>mkdir -p ~/st-agent &amp;&amp; tar xzf ~/SecretTunnel-*-server-linux-x86_64.tar.gz -C ~/st-agent &amp;&amp; cd ~/st-agent &amp;&amp; sh install-server-agent.sh</code>.</p>
+        </details>
+        <p>Сервер готов. Окно терминала можно закрыть.</p>
+      </article>
+
+      <p class="part">Приложение</p>
+
+      <article class="doc step" id="install">
+        <h2><a href="#install">8. Установите приложение</a></h2>
+        <p>Скачайте последнюю версию со страницы <a href="releases.html">релизов</a>.</p>
+        <div data-os="mac">
+          <ol>
+            <li>Откройте файл <code>SecretTunnel-…-macos-universal.dmg</code> и перетащите Secret Tunnel в папку «Программы».</li>
+            <li>При первом запуске macOS может сказать, что не удалось проверить разработчика. Откройте <span class="path"><span>Системные настройки</span><span>Конфиденциальность и безопасность</span></span>, внизу нажмите «Всё равно открыть» и подтвердите паролем Mac.</li>
+          </ol>
+        </div>
+        <div data-os="win">
+          <ol>
+            <li>Запустите <code>SecretTunnel-…-windows-x64-setup.exe</code>.</li>
+            <li>Если появится синее окно SmartScreen «Система Windows защитила ваш компьютер», нажмите «Подробнее» → «Выполнить в любом случае»: у приложения пока нет платной подписи.</li>
+            <li>Для выбора программ Secret Tunnel нужно запускать <b>от имени администратора</b>: правая кнопка на значке → «Запуск от имени администратора». Без этого туннель работает, а перехват программ — нет.</li>
+          </ol>
+        </div>
+        <div data-os="linux">
+          <p>Приложения для Linux пока нет. Сервер, который вы настроили, подойдёт для приложений на macOS, Windows и Android. А на самом Linux можно поднять SOCKS-прокси обычным ssh — только TCP, без выбора программ:</p>
+          <pre class="cmd"><code>ssh -N -D 127.0.0.1:1080 -p 2222 -i ~/.ssh/secret-tunnel tunnel@<span class="v-ip">203.0.113.10</span></code></pre>
+          <p>Пока команда работает, в настройках программы с поддержкой SOCKS5 укажите SOCKS5 <code>127.0.0.1:1080</code> и включите «проксировать DNS через SOCKS». Шаги ниже — для macOS и Windows.</p>
+        </div>
+      </article>
+
+      <article class="doc step" id="add-server">
+        <h2><a href="#add-server">9. Добавьте сервер</a></h2>
+        <p>Откройте вкладку «Серверы» и нажмите «Добавить».</p>
+        <figure class="shot" data-shot="server-form-mac" data-pins="36.89,11.06;71.33,24.34;95.23,24.34;65.08,39.06;95.23,39.06;71.33,53.78;92.73,53.78;92.11,68.5;96.95,68.5;50.23,87.9;77.2,87.9" data-os="mac linux"><img src="assets/guide/server-form-mac.webp" width="1280" height="470" alt="Вкладка «Серверы»: форма нового сервера с заполненными полями"></figure>
+        <figure class="shot" data-shot="server-form-win" data-pins="36.89,11.06;71.33,24.34;95.23,24.34;65.08,39.06;95.23,39.06;71.33,53.78;92.73,53.78;92.11,68.5;96.95,68.5;50.23,87.9;77.2,87.9" data-os="win"><img src="assets/guide/server-form-win.webp" width="1280" height="470" alt="Вкладка «Серверы» в Windows: форма нового сервера с путём к ключу C:\Users\user\.ssh\secret-tunnel"></figure>
+        <ol class="legend">
+          <li><b>Добавить</b> — открывает пустую форму справа.</li>
+          <li><b>Название</b> — любое, оно видно только вам: «Мой сервер», «Нидерланды».</li>
+          <li><b>ID</b> — заполняется сам из названия. Это внутреннее имя профиля; менять не нужно.</li>
+          <li><b>Адрес сервера</b> — IP от хостера: <code class="v-ip">203.0.113.10</code>. Глаз показывает и скрывает адрес, кнопка рядом копирует.</li>
+          <li><b>Порт SSH</b> — <code>2222</code>, который вы задали на шаге 5.</li>
+          <li><b>Пользователь</b> — <code>tunnel</code>. Не <code>root</code>: туннелю права администратора не нужны.</li>
+          <li><b>Подключаться через</b> — оставьте «Напрямую». Другой сервер здесь выбирают для <a href="#chain">цепочки</a>.</li>
+          <li><b>Приватный ключ SSH</b> — путь к файлу ключа <b>без</b> <code>.pub</code>:
+            <span data-os="mac linux"> впишите <code>~/.ssh/secret-tunnel</code>.</span>
+            <span data-os="win"> впишите <code>C:\Users\<i>ваше имя</i>\.ssh\secret-tunnel</code>. Точный путь покажет команда <code>echo "$env:USERPROFILE\.ssh\secret-tunnel"</code> в PowerShell.</span></li>
+          <li><b>Выбрать файл</b> — то же самое через окно выбора файла.<span data-os="mac linux"> Папка <code>.ssh</code> скрытая: в окне нажмите <kbd>⌘</kbd> + <kbd>Shift</kbd> + <kbd>.</kbd>, чтобы её увидеть, или <kbd>⌘</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd> и введите <code>~/.ssh/secret-tunnel</code>.</span></li>
+          <li><b>Сохранить</b> — запоминает профиль. Сохраните перед проверкой.</li>
+          <li><b>Проверить SSH и агент</b> — пробное подключение, следующий шаг.</li>
+        </ol>
+        <p class="note">В версии 0.3.22 и раньше русское название не заполняет ID, и «Сохранить» остаётся серой. Назовите сервер латиницей, например <code>netherlands</code>, — ID появится сам. В следующей версии это исправлено.</p>
+      </article>
+
+      <article class="doc step" id="test">
+        <h2><a href="#test">10. Проверьте SSH и агент</a></h2>
+        <p>Нажмите «Проверить SSH и агент». Приложение войдёт на сервер вашим ключом и проверит агент, не включая туннель.</p>
+        <figure class="shot" data-shot="server-check" data-pins="49.01,6.88;71.72,86.4"><img src="assets/guide/server-check.webp" width="1032" height="480" alt="Сообщение «SSH и ключ: OK. Агент 0.3.22: TCP и UDP. Проверка STMUX003: OK.»"></figure>
+        <ol class="legend">
+          <li><b>Результат проверки.</b> «SSH и ключ: OK» и «Агент …: TCP и UDP» — всё готово. Подробности пишутся в журнал внизу окна.</li>
+          <li><b>Проверить SSH и агент</b> — можно нажимать сколько угодно раз.</li>
+        </ol>
+        <p>Если вместо OK ошибка — найдите её в таблице <a href="#trouble">«Если не получилось»</a>.</p>
+      </article>
+
+      <article class="doc step" id="connect">
+        <h2><a href="#connect">11. Подключитесь</a></h2>
+        <p>Вкладка «Подключение».</p>
+        <figure class="shot" data-shot="connect-off" data-pins="43.99,47.34;92.83,47.34;79.7,13.02"><img src="assets/guide/connect-off.webp" width="1032" height="430" alt="Вкладка «Подключение» до подключения: выбор сервера и прокси, кнопка «Подключить»"></figure>
+        <ol class="legend">
+          <li><b>Сервер</b> — через какой сервер выходить в интернет. Здесь же выбираются цепочки.</li>
+          <li><b>Локальный прокси для приложений</b> — адрес на вашем компьютере, через который трафик уходит в туннель. По умолчанию <code>127.0.0.1:1080</code>, менять не нужно.</li>
+          <li><b>Подключить</b> — поднимает туннель.</li>
+        </ol>
+        <p>Через пару секунд экран станет таким:</p>
+        <figure class="shot" data-shot="connect-on" data-pins="2.62,4.9;3.3,12.4;77.5,5.8;2.0,50.7;26.0,50.7;2.0,57.4;1.6,79.3"><img src="assets/guide/connect-on.webp" width="1032" height="960" alt="Вкладка «Подключение» после подключения: маршрут через SSH-шлюз, внешний IP, скорость и журнал"></figure>
+        <ol class="legend">
+          <li><b>Подключено</b> — туннель работает, рядом время в сети.</li>
+          <li><b>Маршрут</b> показывает сервер и промежуточные звенья, если они настроены.</li>
+          <li><b>Отключить</b> и <b>Переподключить</b>.</li>
+          <li><b>Внешний IP</b> — адрес, с которого сервер обращается к ресурсу. Он может отличаться от адреса SSH, если сервер находится за NAT.</li>
+          <li><b>Страна выхода</b> — страна сервера.</li>
+          <li><b>Пинг до сервера</b> — задержка. До 100 мс — хорошо для звонков и игр.</li>
+          <li><b>Журнал</b> — события и соединения: какая программа куда идёт через туннель. Нажмите на заголовок, чтобы свернуть.</li>
+        </ol>
+        <p>Туннель уже работает как SOCKS5-прокси <code>127.0.0.1:1080</code>: его можно указать в браузере вручную. Чтобы направить целые программы без настроек прокси, переходите к следующему шагу.</p>
+      </article>
+
+      <article class="doc step" id="apps">
+        <h2><a href="#apps">12. Выберите программы</a></h2>
+        <div data-os="mac linux">
+          <p>На macOS перехват программ делает бесплатный компонент <b>ProxyBridge</b>. Установите его один раз:</p>
+          <ol>
+            <li>Скачайте ProxyBridge 4.1.2 для macOS: <a href="https://github.com/InterceptSuite/ProxyBridge/releases/tag/v4.1.2_MacOS">страница релиза ProxyBridge</a>, файл <code>ProxyBridge-v4.1.2-Universal-Installer.pkg</code>.</li>
+            <li>Откройте его и пройдите установку — ProxyBridge окажется в «Программах». Само окно ProxyBridge открывать не нужно; если открылось, закройте.</li>
+            <li>При первом включении перехвата macOS попросит разрешить сетевое расширение: <span class="path"><span>Системные настройки</span><span>Основные</span><span>Объекты входа и расширения</span><span>Сетевые расширения</span></span>, включите ProxyBridge.</li>
+          </ol>
+        </div>
+        <div data-os="win">
+          <p>В Windows компонент перехвата уже входит в установщик. Нужно только запустить Secret Tunnel от имени администратора (шаг 8).</p>
+        </div>
+        <figure class="shot" data-shot="apps-mac" data-pins="31.0,52.7;78.3,11.7;4.0,29.4;70.0,29.4;82.0,29.4;3.7,89.8;79.0,91.5" data-os="mac linux"><img src="assets/guide/apps-mac.webp" width="1032" height="446" alt="Вкладка «Приложения» на macOS: отмечены демонстрационные приложения"></figure>
+        <figure class="shot" data-shot="apps-win" data-pins="31.0,52.7;78.3,11.7;4.0,29.4;70.3,29.4;82.2,29.4;3.7,89.8;79.0,91.5" data-os="win"><img src="assets/guide/apps-win.webp" width="1032" height="446" alt="Вкладка «Приложения» в Windows: отмечены демонстрационные приложения"></figure>
+        <ol class="legend">
+          <li><b>Переключатель у программы</b> — включённые пойдут через туннель целиком, по TCP и UDP. Остальные работают напрямую, как раньше.</li>
+          <li><b>Включить перехват</b> — применяет выбор. Работает поверх подключённого туннеля.</li>
+          <li><b>Поиск</b> по установленным программам.</li>
+          <li><b>Обновить</b> — найти программы заново, если вы что-то установили.</li>
+          <li><b>Добавить <span data-os="mac linux">.app</span><span data-os="win">.exe</span></b> — программа не нашлась сама? Укажите её файл.</li>
+          <li><b>Дополнительно</b> — ручные правила и путь к компоненту перехвата. Обычно не нужно.</li>
+          <li><b>Сохранить выбор</b> — запомнить отметки. При включённом перехвате кнопка называется «Применить выбор» и применяет их сразу, без разрыва соединений.</li>
+        </ol>
+        <p><b>Перезапустите отмеченные программы</b> после включения перехвата. Маршрут новых соединений виден в журнале с фильтром «Соединения».</p>
+      </article>
+
+      <article class="doc step" id="settings">
+        <h2><a href="#settings">13. Настройки: что значит каждая галочка</a></h2>
+        <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
+        <p>Значения по умолчанию подходят большинству. Менять ничего не обязательно.</p>
+        <figure class="shot shot-tall" data-shot="settings-mac" data-pins="86.87,12.57;4.42,16.22;4.42,19.7;4.42,23.18;4.42,26.66;4.42,30.31;4.42,33.97;4.42,37.44;4.42,45.2;4.42,48.68;80.81,54.35;4.42,59.14;4.42,95.65"><img src="assets/guide/settings-mac.webp" width="792" height="1150" alt="Вкладка «Настройки» со всеми переключателями"></figure>
+        <ol class="legend">
+          <li><b>Движок SSH.</b> «Встроенный SSH» передаёт TCP и UDP и умеет цепочки — оставьте его. «Системный OpenSSH» — только TCP, для особых случаев.</li>
+          <li><b>SSH мимо других VPN</b> (только macOS). При включённой настройке SSH использует физическое подключение Wi-Fi или Ethernet. Если ваш сервер доступен через корпоративный VPN, отключите эту настройку.</li>
+          <li><b>Сворачивать <span data-os="mac linux">в строку меню</span><span data-os="win">в трей</span> при закрытии окна.</b> Крестик прячет окно, а туннель продолжает работать. Подключиться, отключиться и выйти можно из значка <span data-os="mac linux">вверху экрана</span><span data-os="win">возле часов</span>.</li>
+          <li><b>Подхватывать программы, запущенные выбранными приложениями</b> (только macOS). Вспомогательные процессы получают правила без перезапуска перехвата.</li>
+          <li><b>Переподключаться автоматически.</b> Оборвалась связь — приложение подключится снова само.</li>
+          <li><b>Пауза перед переподключением</b> — сколько секунд ждать перед новой попыткой.</li>
+          <li><b>Подключаться при запуске приложения.</b> Включайте, когда всё уже проверено: туннель поднимется сразу при открытии.</li>
+          <li><b>Проверять прокси после подключения.</b> Показывает результаты TCP, UDP, DNS и IPv6 через локальный SOCKS. Состояние перехвата приложений отображается отдельно.</li>
+          <li><b>Скрывать IP-адреса и токены.</b> Адреса закрыты точками, пока не нажать на глаз. Удобно для скриншотов.</li>
+          <li><b>Очищать журнал при подключении</b> — начинать журнал заново при каждом подключении.</li>
+          <li><b>Токен IPinfo</b> — необязательный. С ним приложение показывает внешний IP и страну выхода; бесплатный токен IPinfo Lite выдают на ipinfo.io. Можно оставить пустым.</li>
+          <li><b>Для опытных: встроенный SSH</b> — шифрование, очередь, приоритет звонков и окна UDP для загрузки и отправки. Оставьте «Авто», «Стандартная», «Сбалансированный» и «По умолчанию». Те же настройки есть на телефоне: «Ещё» → «Настройки».</li>
+          <li><b>Сохранить настройки</b> — изменения применяются после сохранения, некоторые — при следующем подключении.</li>
+          <li data-os="mac win"><b>Отдельный SSH для UDP</b> появляется в профиле «Голос» со встроенным SSH. Во вкладке «Приложения» добавьте нужную программу в перехват и отметьте «UDP через второй SSH». Сохраните выбор, переподключите туннель и снова включите перехват.</li>
+        </ol>
+      </article>
+
+      <p class="part">Дополнительно</p>
+
+      <article class="doc" id="chain">
+        <h2><a href="#chain">Цепочка серверов</a></h2>
+        <p>Если доступ к вашему серверу организован через SSH-шлюз, настройте цепочку. Приложение подключится к шлюзу, а через него установит SSH к конечному серверу.</p>
+        <ol>
+          <li>На промежуточном сервере повторите шаги 2–6 <b>тем же ключом</b> <code>secret-tunnel</code>. Агент на нём не нужен — только на сервере выхода.</li>
+          <li>Добавьте промежуточный сервер в приложение отдельным профилем «SSH-шлюз».</li>
+          <li>В профиле конечного сервера в поле «Подключаться через» выберите «SSH-шлюз» и сохраните.</li>
+        </ol>
+        <figure class="shot" data-shot="chain" data-pins="4.0,33.4;95.1,50.8;37.9,58.2"><img src="assets/guide/chain.webp" width="1032" height="500" alt="Профиль тестового сервера с выбранным SSH-шлюзом и подсказкой о маршруте"></figure>
+        <ol class="legend">
+          <li><b>Два профиля.</b> У тестового сервера указан промежуточный SSH-шлюз.</li>
+          <li><b>Подключаться через</b> — промежуточный сервер.</li>
+          <li><b>Маршрут</b> — приложение показывает всю цепочку и напоминает, где нужен агент.</li>
+        </ol>
+        <p>Перед подключением нажмите «Проверить SSH и агент» в профиле конечного сервера. Проверка пройдёт по всей цепочке.</p>
+      </article>
+
+      <article class="doc" id="advanced">
+        <h2><a href="#advanced">Проверка ключа хоста и таймауты</a></h2>
+        <p>В профиле сервера под строкой «Для опытных» спрятаны редкие настройки.</p>
+        <figure class="shot shot-narrow" data-shot="server-advanced" data-pins="39.18,68.11;90.7,68.11;44.05,78.92;90.7,78.92;0.61,85.8"><img src="assets/guide/server-advanced.webp" width="656" height="640" alt="Раздел «Для опытных» в профиле сервера"></figure>
+        <ol class="legend">
+          <li><b>Проверка ключа хоста.</b> «Строго» — подключаться только к серверу, которому вы ответили <code>yes</code> в терминале. Оставьте так. «Не проверять» отключает защиту от подмены сервера — не выбирайте.</li>
+          <li><b>Таймаут подключения</b> — сколько секунд ждать ответа сервера.</li>
+          <li><b>Проверка связи каждые</b> — как часто проверять, что соединение живо.</li>
+          <li><b>Пропусков до разрыва</b> — сколько проверок подряд может пропасть, прежде чем приложение переподключится.</li>
+          <li><b>Сжатие SSH</b> — только для системного OpenSSH. Помогает на очень медленных каналах.</li>
+        </ol>
+      </article>
+
+      <article class="doc" id="trouble">
+        <h2><a href="#trouble">Если не получилось</a></h2>
+        <table>
+          <tr><th>Что видно</th><th>Что делать</th></tr>
+          <tr><td><code>Connection refused</code> или <code>timed out</code> на порту 2222</td><td>SSH не перезапустился или порт закрыт фаерволом хостера. Вернитесь в первое окно (шаг 5) и выполните <code>ss -tlnp | grep 2222</code>. Пусто — повторите блок шага 5. Строка есть — откройте TCP 2222 в панели хостера.</td></tr>
+          <tr><td><code>Permission denied (publickey)</code></td><td>Сервер не принял ключ. Проверьте пользователя (<code>tunnel</code>) и что в приложении указан файл <b>без</b> <code>.pub</code>. Если ошибка в терминале на шаге 4 — повторите шаг 4.</td></tr>
+          <tr><td><code>WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED</code></td><td>Сервер переустановили, и у него новый ключ. Если вы его переустанавливали — удалите старую запись: <code>ssh-keygen -R "[<span class="v-ip">203.0.113.10</span>]:2222"</code> и войдите снова. Если нет — не подключайтесь и напишите хостеру.</td></tr>
+          <tr><td>Приложение: ключ хоста отклонён</td><td>Компьютер ещё не знает сервер на этом порту. Выполните шаг 6 и подтвердите подключение после сверки отпечатка.</td></tr>
+          <tr><td><code>AGENT_MISSING</code></td><td>Агент не установлен на сервере выхода — шаг 7.</td></tr>
+          <tr><td><code>AGENT_INCOMPATIBLE</code></td><td>Агент старше приложения. Повторите шаг 7: он поставит последнюю версию.</td></tr>
+          <tr><td>Шаг 7: <code>curl: command not found</code> или <code>python3: not found</code></td><td>Войдите под root (<code>ssh -i … -p 2222 root@…</code>), выполните <code>apt update &amp;&amp; apt install -y curl python3</code> и повторите шаг 7 под <code>tunnel</code>.</td></tr>
+          <tr><td>Шаг 7: <code>requires x86_64</code></td><td>Сервер на ARM. Готового агента для ARM пока нет — выберите тариф с x86_64 (Intel или AMD).</td></tr>
+          <tr><td>«Сохранить» серая</td><td>Не заполнен ID: назовите сервер латиницей (шаг 9).</td></tr>
+          <tr><td>Программа идёт мимо туннеля</td><td>Перезапустите её. Посмотрите предупреждения вверху вкладки «Приложения».</td></tr>
+          <tr><td data-os="mac linux">Перехват не включается</td><td data-os="mac linux">Разрешите сетевое расширение ProxyBridge (шаг 12) и закройте окно ProxyBridge, если оно открыто.</td>
+              <td data-os="win">Перехват недоступен</td><td data-os="win">Запустите Secret Tunnel от имени администратора (шаг 8).</td></tr>
+        </table>
+        <p>Если проблема осталась, скопируйте журнал с включённым «Скрывать IP-адреса» и создайте обращение в <a href="https://github.com/openm1ke/Secret-Tunnel/issues">Issues на GitHub</a>. Для настройки с ассистентом есть <a href="setup-for-ai.md">инструкция для ИИ</a>.</p>
+      </article>
+    </main>
+  </div>
+
+  <footer class="foot">
+    <div class="wrap">
+      <span>Secret Tunnel — открытый исходный код</span>
+      <span><a href="https://github.com/openm1ke/Secret-Tunnel">Исходники на GitHub</a> · <a href="knowledge.html">База знаний</a> · <a href="releases.html">Релизы</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js?v=20261114"></script>
+  <script src="assets/guide.js"></script>
+</body>
+</html>

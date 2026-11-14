@@ -7,7 +7,7 @@
   <meta name="description" content="Пошаговая установка Secret Tunnel для macOS, Windows и Linux: от сервера с паролем root до первого подключения. Команды, картинки и пояснения к каждой настройке.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-  <link rel="stylesheet" href="assets/site.css">
+  <link rel="stylesheet" href="assets/site.css?v=20261114">
 </head>
 <body data-os="mac" data-login="root">
   <a class="skip" href="#main">К содержанию</a>
@@ -46,6 +46,7 @@
       </div>
       <ul class="toc">
         <li class="group">Сервер</li>
+        <li><a href="#ssh">Как работает SSH</a></li>
         <li><a href="#need">Что понадобится</a></li>
         <li><a href="#terminal">1. Открыть терминал</a></li>
         <li><a href="#login">2. Войти по паролю</a></li>
@@ -70,12 +71,24 @@
 
     <main id="main">
       <h1>Установка шаг за шагом</h1>
-      <p class="intro">От сервера, который хостер выдал с паролем root, до программ, которые ходят в интернет через него. <span class="site-only">Выберите свою систему и впишите адрес сервера в поле «Адрес сервера от хостера» — команды подстроятся. </span><span class="app-only" hidden>В командах замените <code>203.0.113.10</code> на адрес своего сервера. </span>Займёт около 30 минут.</p>
+      <p class="intro">Настройте SSH на своём сервере и подключите к нему выбранные программы. <span class="site-only">Выберите свою систему и впишите адрес сервера в поле «Адрес сервера от хостера», чтобы подставить его в команды.</span><span class="app-only" hidden>В командах замените <code>203.0.113.10</code> на адрес своего сервера.</span></p>
+      <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
+
+      <article class="doc" id="ssh">
+        <h2><a href="#ssh">Как работает SSH</a></h2>
+        <p>SSH (Secure Shell) — протокол защищённого удалённого подключения. В Secret Tunnel он передаёт трафик выбранных программ между устройством и вашим сервером.</p>
+        <ol>
+          <li><b>Сначала проверьте сервер.</b> При первом подключении сверьте отпечаток ключа с данными администратора или с выводом команды в доверенной консоли сервера. При неожиданной смене ключа остановитесь и выясните причину.</li>
+          <li><b>Войдите по ключу.</b> На сервер добавляют публичный ключ. Клиент доказывает владение приватным ключом цифровой подписью. Храните приватный ключ на своём устройстве и защищайте доступ к нему.</li>
+          <li><b>Передавайте данные в защищённом канале.</b> SSH шифрует данные и проверяет их целостность на участке до сервера. Защита соединения от сервера до конечного ресурса зависит от протокола приложения, например HTTPS.</li>
+        </ol>
+        <p><a href="https://www.rfc-editor.org/rfc/rfc4251#section-4">Архитектура SSH в RFC 4251</a></p>
+      </article>
 
       <article class="doc" id="need">
         <h2><a href="#need">Что понадобится</a></h2>
         <ul>
-          <li><b>Сервер (VPS)</b> на Linux x86_64: Ubuntu 22.04 или 24.04, Debian 11 или 12. Хватит самого простого тарифа. Страна сервера — страна, из которой вы будете выходить в интернет.</li>
+          <li><b>Сервер (VPS)</b> на Linux x86_64: Ubuntu 22.04 или 24.04, Debian 11 или 12. Для начала достаточно базового тарифа.</li>
           <li><b>Данные от хостера</b>: IP-адрес, логин (обычно <code>root</code>) и пароль. Обычно они приходят письмом или лежат в панели управления.</li>
           <li><b>Компьютер</b>: macOS 15 или новее, Windows 10 или 11. Для Linux приложения пока нет, но сервер с Linux настраивается так же, как с macOS, — шаги 1–7.</li>
         </ul>
@@ -130,14 +143,14 @@
 
       <article class="doc step" id="login">
         <h2><a href="#login">2. Войдите на сервер по паролю</a></h2>
-        <p>Первый вход нужен, чтобы компьютер запомнил сервер. Выполните:</p>
+        <p>При первом входе терминал покажет отпечаток ключа сервера. Сверьте его с данными хостера или с отпечатком в доверенной консоли сервера и подтвердите подключение, если они совпадают.</p>
         <pre class="cmd"><code>ssh <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></code></pre>
         <figure class="term">
           <div class="term-bar"><i></i><i></i><i></i><span class="t-mac">Терминал</span><span class="t-win">Windows PowerShell</span><span class="t-linux">Терминал</span></div>
 <pre><span class="p">$</span> <span class="c">ssh <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span></span>
 <span class="o">The authenticity of host '<span class="v-ip">203.0.113.10</span>' can't be established.
 ED25519 key fingerprint is SHA256:Xv3nU9TcY0k1bWq4mD7hFZr2pL8sJeA6oN5gKiQwHcE.
-Are you sure you want to continue connecting (yes/no/[fingerprint])?</span> <span class="you">yes</span>  <em class="say">← напишите yes и нажмите Enter</em>
+Are you sure you want to continue connecting (yes/no/[fingerprint])?</span> <span class="you">yes</span>  <em class="say">← после сверки введите yes</em>
 <span class="o">Warning: Permanently added '<span class="v-ip">203.0.113.10</span>' (ED25519) to the list of known hosts.
 <span class="v-login">root</span>@<span class="v-ip">203.0.113.10</span>'s password:</span>  <em class="say">← пароль от хостера, он не виден при вводе</em>
 <span class="o">Welcome to Ubuntu 24.04 LTS</span>
@@ -308,7 +321,7 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
         <div data-os="linux">
           <p>Приложения для Linux пока нет. Сервер, который вы настроили, подойдёт для приложений на macOS, Windows и Android. А на самом Linux можно поднять SOCKS-прокси обычным ssh — только TCP, без выбора программ:</p>
           <pre class="cmd"><code>ssh -N -D 127.0.0.1:1080 -p 2222 -i ~/.ssh/secret-tunnel tunnel@<span class="v-ip">203.0.113.10</span></code></pre>
-          <p>Пока команда работает, в браузере или расширении FoxyProxy укажите SOCKS5 <code>127.0.0.1:1080</code> и включите «проксировать DNS через SOCKS». Шаги ниже — для macOS и Windows.</p>
+          <p>Пока команда работает, в настройках программы с поддержкой SOCKS5 укажите SOCKS5 <code>127.0.0.1:1080</code> и включите «проксировать DNS через SOCKS». Шаги ниже — для macOS и Windows.</p>
         </div>
       </article>
 
@@ -356,12 +369,12 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
           <li><b>Подключить</b> — поднимает туннель.</li>
         </ol>
         <p>Через пару секунд экран станет таким:</p>
-        <figure class="shot" data-shot="connect-on" data-pins="2.62,6.1;2.62,14.91;79.7,7;1.74,34.36;25.75,34.34;1.74,42.24;1.36,79.25"><img src="assets/guide/connect-on.webp" width="1032" height="800" alt="Вкладка «Подключение» после подключения: маршрут, внешний IP, страна, скорость и журнал"></figure>
+        <figure class="shot" data-shot="connect-on" data-pins="2.62,4.9;3.3,12.4;77.5,5.8;2.0,50.7;26.0,50.7;2.0,57.4;1.6,79.3"><img src="assets/guide/connect-on.webp" width="1032" height="960" alt="Вкладка «Подключение» после подключения: маршрут через SSH-шлюз, внешний IP, скорость и журнал"></figure>
         <ol class="legend">
           <li><b>Подключено</b> — туннель работает, рядом время в сети.</li>
-          <li><b>Маршрут</b>: ваш компьютер → сервер → интернет, с флагом страны выхода.</li>
+          <li><b>Маршрут</b> показывает сервер и промежуточные звенья, если они настроены.</li>
           <li><b>Отключить</b> и <b>Переподключить</b>.</li>
-          <li><b>Внешний IP</b> — адрес, который видят сайты. Должен совпасть с адресом сервера.</li>
+          <li><b>Внешний IP</b> — адрес, с которого сервер обращается к ресурсу. Он может отличаться от адреса SSH, если сервер находится за NAT.</li>
           <li><b>Страна выхода</b> — страна сервера.</li>
           <li><b>Пинг до сервера</b> — задержка. До 100 мс — хорошо для звонков и игр.</li>
           <li><b>Журнал</b> — события и соединения: какая программа куда идёт через туннель. Нажмите на заголовок, чтобы свернуть.</li>
@@ -382,8 +395,8 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
         <div data-os="win">
           <p>В Windows компонент перехвата уже входит в установщик. Нужно только запустить Secret Tunnel от имени администратора (шаг 8).</p>
         </div>
-        <figure class="shot" data-shot="apps-mac" data-pins="32.69,40.76;78.19,11.06;44.53,27.78;75.21,24.16;96.22,27.78;2.33,95.67;96.22,97.35" data-os="mac linux"><img src="assets/guide/apps-mac.webp" width="1032" height="470" alt="Вкладка «Приложения» на macOS: отмечены ChatGPT, Discord и Telegram"></figure>
-        <figure class="shot" data-shot="apps-win" data-pins="32.69,40.76;78.19,11.06;44.92,27.78;75.41,24.16;96.22,27.78;2.33,95.67;96.22,97.35" data-os="win"><img src="assets/guide/apps-win.webp" width="1032" height="470" alt="Вкладка «Приложения» в Windows: отмечены ChatGPT, Discord и Telegram"></figure>
+        <figure class="shot" data-shot="apps-mac" data-pins="31.0,52.7;78.3,11.7;4.0,29.4;70.0,29.4;82.0,29.4;3.7,89.8;79.0,91.5" data-os="mac linux"><img src="assets/guide/apps-mac.webp" width="1032" height="446" alt="Вкладка «Приложения» на macOS: отмечены демонстрационные приложения"></figure>
+        <figure class="shot" data-shot="apps-win" data-pins="31.0,52.7;78.3,11.7;4.0,29.4;70.3,29.4;82.2,29.4;3.7,89.8;79.0,91.5" data-os="win"><img src="assets/guide/apps-win.webp" width="1032" height="446" alt="Вкладка «Приложения» в Windows: отмечены демонстрационные приложения"></figure>
         <ol class="legend">
           <li><b>Переключатель у программы</b> — включённые пойдут через туннель целиком, по TCP и UDP. Остальные работают напрямую, как раньше.</li>
           <li><b>Включить перехват</b> — применяет выбор. Работает поверх подключённого туннеля.</li>
@@ -393,18 +406,19 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
           <li><b>Дополнительно</b> — ручные правила и путь к компоненту перехвата. Обычно не нужно.</li>
           <li><b>Сохранить выбор</b> — запомнить отметки. При включённом перехвате кнопка называется «Применить выбор» и применяет их сразу, без разрыва соединений.</li>
         </ol>
-        <p><b>Перезапустите отмеченные программы</b> после включения перехвата: он действует на новые соединения. Проверить, что всё идёт через туннель, можно в журнале с фильтром «Соединения» — там будут строки «туннель · Telegram → …».</p>
+        <p><b>Перезапустите отмеченные программы</b> после включения перехвата. Маршрут новых соединений виден в журнале с фильтром «Соединения».</p>
       </article>
 
       <article class="doc step" id="settings">
         <h2><a href="#settings">13. Настройки: что значит каждая галочка</a></h2>
+        <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
         <p>Значения по умолчанию подходят большинству. Менять ничего не обязательно.</p>
         <figure class="shot shot-tall" data-shot="settings-mac" data-pins="86.87,12.57;4.42,16.22;4.42,19.7;4.42,23.18;4.42,26.66;4.42,30.31;4.42,33.97;4.42,37.44;4.42,45.2;4.42,48.68;80.81,54.35;4.42,59.14;4.42,95.65"><img src="assets/guide/settings-mac.webp" width="792" height="1150" alt="Вкладка «Настройки» со всеми переключателями"></figure>
         <ol class="legend">
           <li><b>Движок SSH.</b> «Встроенный SSH» передаёт TCP и UDP и умеет цепочки — оставьте его. «Системный OpenSSH» — только TCP, для особых случаев.</li>
-          <li><b>SSH мимо других VPN</b> (только macOS). Если включён другой VPN (Clash, v2RayTun), соединение с сервером идёт мимо него, напрямую через Wi-Fi. Выключайте, только если ваш сервер доступен лишь через тот VPN.</li>
+          <li><b>SSH мимо других VPN</b> (только macOS). При включённой настройке SSH использует физическое подключение Wi-Fi или Ethernet. Если ваш сервер доступен через корпоративный VPN, отключите эту настройку.</li>
           <li><b>Сворачивать <span data-os="mac linux">в строку меню</span><span data-os="win">в трей</span> при закрытии окна.</b> Крестик прячет окно, а туннель продолжает работать. Подключиться, отключиться и выйти можно из значка <span data-os="mac linux">вверху экрана</span><span data-os="win">возле часов</span>.</li>
-          <li><b>Подхватывать программы, запущенные выбранными приложениями</b> (только macOS). Помощники вроде <code>node</code> у ChatGPT или программы обновления сразу добавляются в туннель, без перезапуска перехвата.</li>
+          <li><b>Подхватывать программы, запущенные выбранными приложениями</b> (только macOS). Вспомогательные процессы получают правила без перезапуска перехвата.</li>
           <li><b>Переподключаться автоматически.</b> Оборвалась связь — приложение подключится снова само.</li>
           <li><b>Пауза перед переподключением</b> — сколько секунд ждать перед новой попыткой.</li>
           <li><b>Подключаться при запуске приложения.</b> Включайте, когда всё уже проверено: туннель поднимется сразу при открытии.</li>
@@ -422,19 +436,19 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
 
       <article class="doc" id="chain">
         <h2><a href="#chain">Цепочка серверов</a></h2>
-        <p>Если до зарубежного сервера напрямую медленно или нестабильно, поставьте между ними промежуточный сервер ближе к вам. Трафик пойдёт так: компьютер → промежуточный → сервер выхода → интернет.</p>
+        <p>Если доступ к вашему серверу организован через SSH-шлюз, настройте цепочку. Приложение подключится к шлюзу, а через него установит SSH к конечному серверу.</p>
         <ol>
           <li>На промежуточном сервере повторите шаги 2–6 <b>тем же ключом</b> <code>secret-tunnel</code>. Агент на нём не нужен — только на сервере выхода.</li>
-          <li>Добавьте промежуточный сервер в приложение отдельным профилем, например «RU».</li>
-          <li>В профиле сервера выхода в поле «Подключаться через» выберите «RU» и сохраните.</li>
+          <li>Добавьте промежуточный сервер в приложение отдельным профилем «SSH-шлюз».</li>
+          <li>В профиле конечного сервера в поле «Подключаться через» выберите «SSH-шлюз» и сохраните.</li>
         </ol>
-        <figure class="shot" data-shot="chain" data-pins="21.25,30.76;92.73,50.87;49.06,58.35"><img src="assets/guide/chain.webp" width="1280" height="500" alt="Профиль France с полем «Подключаться через: RU» и подсказкой о маршруте"></figure>
+        <figure class="shot" data-shot="chain" data-pins="4.0,33.4;95.1,50.8;37.9,58.2"><img src="assets/guide/chain.webp" width="1032" height="500" alt="Профиль тестового сервера с выбранным SSH-шлюзом и подсказкой о маршруте"></figure>
         <ol class="legend">
-          <li><b>Два профиля</b>: RU и France. У France подписано «через RU».</li>
+          <li><b>Два профиля.</b> У тестового сервера указан промежуточный SSH-шлюз.</li>
           <li><b>Подключаться через</b> — промежуточный сервер.</li>
           <li><b>Маршрут</b> — приложение показывает всю цепочку и напоминает, где нужен агент.</li>
         </ol>
-        <p>Перед подключением нажмите «Проверить SSH и агент» в профиле France: проверка пройдёт по всей цепочке. На вкладке «Скорость» удобно сравнить цепочку с прямым подключением.</p>
+        <p>Перед подключением нажмите «Проверить SSH и агент» в профиле конечного сервера. Проверка пройдёт по всей цепочке.</p>
       </article>
 
       <article class="doc" id="advanced">
@@ -457,7 +471,7 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
           <tr><td><code>Connection refused</code> или <code>timed out</code> на порту 2222</td><td>SSH не перезапустился или порт закрыт фаерволом хостера. Вернитесь в первое окно (шаг 5) и выполните <code>ss -tlnp | grep 2222</code>. Пусто — повторите блок шага 5. Строка есть — откройте TCP 2222 в панели хостера.</td></tr>
           <tr><td><code>Permission denied (publickey)</code></td><td>Сервер не принял ключ. Проверьте пользователя (<code>tunnel</code>) и что в приложении указан файл <b>без</b> <code>.pub</code>. Если ошибка в терминале на шаге 4 — повторите шаг 4.</td></tr>
           <tr><td><code>WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED</code></td><td>Сервер переустановили, и у него новый ключ. Если вы его переустанавливали — удалите старую запись: <code>ssh-keygen -R "[<span class="v-ip">203.0.113.10</span>]:2222"</code> и войдите снова. Если нет — не подключайтесь и напишите хостеру.</td></tr>
-          <tr><td>Приложение: ключ хоста отклонён</td><td>Компьютер ещё не знает сервер на этом порту. Выполните шаг 6 и ответьте <code>yes</code>.</td></tr>
+          <tr><td>Приложение: ключ хоста отклонён</td><td>Компьютер ещё не знает сервер на этом порту. Выполните шаг 6 и подтвердите подключение после сверки отпечатка.</td></tr>
           <tr><td><code>AGENT_MISSING</code></td><td>Агент не установлен на сервере выхода — шаг 7.</td></tr>
           <tr><td><code>AGENT_INCOMPATIBLE</code></td><td>Агент старше приложения. Повторите шаг 7: он поставит последнюю версию.</td></tr>
           <tr><td>Шаг 7: <code>curl: command not found</code> или <code>python3: not found</code></td><td>Войдите под root (<code>ssh -i … -p 2222 root@…</code>), выполните <code>apt update &amp;&amp; apt install -y curl python3</code> и повторите шаг 7 под <code>tunnel</code>.</td></tr>
@@ -467,7 +481,7 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
           <tr><td data-os="mac linux">Перехват не включается</td><td data-os="mac linux">Разрешите сетевое расширение ProxyBridge (шаг 12) и закройте окно ProxyBridge, если оно открыто.</td>
               <td data-os="win">Перехват недоступен</td><td data-os="win">Запустите Secret Tunnel от имени администратора (шаг 8).</td></tr>
         </table>
-        <p>Не помогло — скопируйте журнал (с включённым «Скрывать IP-адреса») и создайте обращение в <a href="https://github.com/openm1ke/Secret-Tunnel/issues">Issues на GitHub</a>. Можно настраивать и вместе с ChatGPT или Claude: дайте ассистенту ссылку на <a href="setup-for-ai.md">инструкцию для ИИ</a>.</p>
+        <p>Если проблема осталась, скопируйте журнал с включённым «Скрывать IP-адреса» и создайте обращение в <a href="https://github.com/openm1ke/Secret-Tunnel/issues">Issues на GitHub</a>. Для настройки с ассистентом есть <a href="setup-for-ai.md">инструкция для ИИ</a>.</p>
       </article>
     </main>
   </div>
@@ -478,7 +492,7 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
       <span><a href="https://github.com/openm1ke/Secret-Tunnel">Исходники на GitHub</a> · <a href="knowledge.html">База знаний</a> · <a href="releases.html">Релизы</a></span>
     </div>
   </footer>
-  <script src="assets/site.js"></script>
+  <script src="assets/site.js?v=20261114"></script>
   <script src="assets/guide.js"></script>
 </body>
 </html>

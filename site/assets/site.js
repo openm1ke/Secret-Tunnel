@@ -25,17 +25,17 @@
   // Screenshots.
   const shots = {
     desktop: [
-      ["desktop-connect.png", "Подключение", "Маршрут от компьютера через RU до France, скорость, пинг и журнал соединений."],
+      ["desktop-connect.png", "Подключение", "Маршрут от компьютера до тестового сервера, скорость и журнал соединений."],
       ["desktop-apps.png", "Приложения", "Галочки у нужных программ. Процессы, которые они запускают, подхватываются сами."],
       ["desktop-speed.png", "Скорость", "Тесты через туннель и без него, история замеров с маршрутом и страной выхода."],
       ["desktop-stats.png", "Статистика", "Сеансы и трафик каждой программы за выбранный период."],
       ["desktop-servers.png", "Серверы", "Серверы и цепочки: промежуточное звено выбирается в профиле."],
     ],
     android: [
-      ["android-home.png", "Главная", "Маршрут RU → France и кнопка подключения. Ниже — скорость и трафик приложений."],
-      ["android-apps.png", "Приложения", "Через VPN пойдут только отмеченные: здесь Chrome, Drive и YouTube."],
-      ["android-servers.png", "Серверы", "Сервер выхода с промежуточным RU и импортированным ключом."],
-      ["android-proxy.png", "Профиль трафика", "Окна UDP, шифрование, очередь и приоритет звонков. С 0.3.23 — во «Ещё» → «Настройки», как на компьютере."],
+      ["android-home.png", "Главная", "Профиль подключения, текущая скорость и трафик приложений."],
+      ["android-apps.png", "Приложения", "Список программ, для которых используется туннель."],
+      ["android-servers.png", "Серверы", "SSH-профиль с адресом, портом и ключом."],
+      ["android-settings.png", "Настройки", "Проверка подключения, показ адресов и параметры SSH. Настройки общие для всех профилей."],
       ["android-journal.png", "Журнал", "Диагностика транспорта: очереди, UDP, задержки."],
     ],
   };
@@ -179,30 +179,6 @@
       if (/sha256sums/.test(n)) return "Контрольные суммы";
       return name;
     };
-    // Release notes are short Markdown: headings, lists, code and links.
-    const markdown = (text) => {
-      const inline = (line) => esc(line)
-        .replace(/`([^`]+)`/g, "<code>$1</code>")
-        .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2">$1</a>');
-      const out = [];
-      let inList = false;
-      for (const raw of (text || "").split(/\r?\n/)) {
-        const line = raw.trim();
-        const item = /^[-*] (.*)$/.exec(line);
-        if (item) {
-          if (!inList) { out.push("<ul>"); inList = true; }
-          out.push(`<li>${inline(item[1])}</li>`);
-          continue;
-        }
-        if (inList) { out.push("</ul>"); inList = false; }
-        const heading = /^#{1,4} (.*)$/.exec(line);
-        if (heading) out.push(`<h4>${inline(heading[1])}</h4>`);
-        else if (line) out.push(`<p>${inline(line)}</p>`);
-      }
-      if (inList) out.push("</ul>");
-      return out.join("");
-    };
     const render = (releases) => {
       const published = releases.filter((release) => !release.draft);
       if (!published.length) {
@@ -217,15 +193,13 @@
         const downloads = order.filter((key) => groups[key]).map((key) => `
           <section><h3>${key}</h3>${groups[key].map((asset) => `<a href="${esc(asset.browser_download_url)}" title="${esc(asset.name)}">${esc(label(asset.name))}<small>${size(asset.size)}</small></a>`).join("")}</section>`).join("");
         const latest = index === 0 && !release.prerelease;
-        const notes = markdown(release.body);
         return `<article class="release${latest ? " latest" : ""}" id="${esc(release.tag_name)}">
           <header>
-            <h2>${esc(release.name || release.tag_name)}</h2>
+            <h2>${esc(release.tag_name)}</h2>
             ${latest ? '<span class="badge">Последний</span>' : ""}${release.prerelease ? '<span class="badge pre">Пробный</span>' : ""}
             <span class="when">${date(release.published_at || release.created_at)}</span>
           </header>
           ${downloads ? `<div class="downloads">${downloads}</div>` : '<p class="state">Файлы ещё загружаются.</p>'}
-          ${notes ? (index === 0 ? `<div class="notes">${notes}</div>` : `<details class="more"><summary>Что изменилось</summary><div class="notes">${notes}</div></details>`) : ""}
           <a href="${esc(release.html_url)}">Релиз на GitHub</a>
         </article>`;
       }).join("");

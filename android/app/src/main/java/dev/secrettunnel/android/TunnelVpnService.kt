@@ -2,7 +2,11 @@ package dev.secrettunnel.android
 
 import android.app.*
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.*
 import org.json.JSONObject
@@ -17,6 +21,8 @@ class TunnelVpnService : VpnService() {
         @Volatile var phase = "Остановлен"
         @Volatile var detail = ""
         @Volatile var active = false
+        @Volatile var protectedCount = 0
+            private set
         @Volatile var connectedSocksPort: Int? = null
             private set
         val traffic=TrafficHistory()
@@ -43,29 +49,50 @@ class TunnelVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private val main = Handler(Looper.getMainLooper())
     private val recovery=RecoveryPolicy()
-    private val underlying=UnderlyingNetworkTracker()
-    private var recoveryNetworkHandle:Long?=null
-    private val connectivity by lazy {getSystemService(android.net.ConnectivityManager::class.java)}
-    private val networkCallback=object:android.net.ConnectivityManager.NetworkCallback(){
-        override fun onAvailable(network:android.net.Network){
-            connectivity.getNetworkCapabilities(network)?.let{onCapabilitiesChanged(network,it)}
+    private val underlying = UnderlyingNetworkTracker<Network>()
+    @Volatile private var transportLink: UnderlyingNetworkTracker.Link<Network>? = null
+    private var recoveryLink: UnderlyingNetworkTracker.Link<Network>? = null
+    @Volatile private var prepared = false
+    private var polling = false // Main-handler owned.
+    private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { main.post(networkWatch) }
+        override fun onLost(network: Network) { main.post(networkWatch) }
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+            main.post(networkWatch)
         }
-        override fun onCapabilitiesChanged(network:android.net.Network,capabilities:android.net.NetworkCapabilities){
-            if(connectivity.activeNetwork!=network)return
-            if(!capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)&&capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)){
-                if(underlying.currentHandle()!=network.networkHandle)android.util.Log.i("SecretTunnelNetwork","default_available handle=${network.networkHandle}")
-                underlying.available(network.networkHandle,SystemClock.elapsedRealtime())
+    }
+    private val networkWatch = object : Runnable {
+        override fun run() {
+            if (!prepared || stopping.get()) return
+            // Reconcile outside callbacks and independently of a blocking SSH attempt.
+            val network = connectivity.activeNetwork
+            val capabilities = network?.let(connectivity::getNetworkCapabilities)
+            if (network != null && capabilities != null &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                if (underlying.available(network, SystemClock.elapsedRealtime())) {
+                    android.util.Log.i("SecretTunnelNetwork", "default_available handle=${network.networkHandle}")
+                    wakeRecovery()
+                }
+            } else {
+                underlying.currentLink()?.let {
+                    if (underlying.lost(it.network)) {
+                        android.util.Log.i("SecretTunnelNetwork", "default_lost handle=${it.network.networkHandle}")
+                        wakeRecovery()
+                    }
+                }
             }
-        }
-        override fun onLost(network:android.net.Network){
-            if(underlying.currentHandle()==network.networkHandle)android.util.Log.i("SecretTunnelNetwork","default_lost handle=${network.networkHandle}")
-            underlying.lost(network.networkHandle,SystemClock.elapsedRealtime())
+            main.removeCallbacks(this)
+            main.postDelayed(this, 1000)
         }
     }
     private val diagnostics = TransportDiagnostics.Sampler()
-    private var engineIpv6:Boolean?=null
-    private var engineCapacity=0
+    private data class Routes(val packages: Set<String>, val ipv6: Boolean)
+    private var routes: Routes? = null
     private var session:TunnelSession?=null
+    private var newSession = true
+    private var verifyExit = false
     // Flows refused by either multiplexer end in the current SSH session.
     private var reportedRejections=0L
     private var sessionStarted=0L
@@ -84,67 +111,134 @@ class TunnelVpnService : VpnService() {
         sessionSavedAt=SystemClock.elapsedRealtime()
         if(!active)sessionId=null
     }
-    private fun readyDetail()="TCP и UDP · ${if(engineIpv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${session?.packages?.size?:0}"+
+    private fun readyDetail()="TCP и UDP · ${if(routes?.ipv6==true)"IPv4/IPv6" else "IPv4"} · приложений: ${routes?.packages?.size?:0}"+
         if(reportedRejections>0)" · отказов по лимиту: $reportedRejections" else ""
-    private val monitor = object:Runnable {
-        override fun run(){
-            if(stopping.get()||!active||worker.isShutdown)return
+    private fun wakeRecovery() {
+        NativeBridge.cancel()
+        main.removeCallbacks(monitor)
+        main.post(monitor)
+    }
+    private val monitor = object : Runnable {
+        override fun run() {
+            if (!prepared || stopping.get() || worker.isShutdown || polling) return
+            polling = true
             worker.execute {
-                if(stopping.get())return@execute
-                var recoveryAttempted=false
+                val link = underlying.currentLink()
+                val now = SystemClock.elapsedRealtime()
                 try {
-                    val networkAction=underlying.action(SystemClock.elapsedRealtime())
-                    if(networkAction==UnderlyingNetworkTracker.Action.OFFLINE||networkAction==UnderlyingNetworkTracker.Action.WAIT){
-                        val waiting=if(networkAction==UnderlyingNetworkTracker.Action.OFFLINE)"Ожидание сети" else "Смена сети"
-                        if(phase!=waiting){phase=waiting;detail="VPN включён. Ждём доступную сеть для SSH.";notifyState()}
-                        main.postDelayed(this,1500);return@execute
+                    if (!stopping.get()) {
+                        recoverTunnel(link, now)
                     }
-                    val moved=networkAction==UnderlyingNetworkTracker.Action.RECONNECT
-                    val nativeLog=File(filesDir,"tun.log")
-                    if(nativeLog.length()>1_048_576)java.io.RandomAccessFile(nativeLog,"rw").use{it.setLength(0)}
-                    val status=JSONObject(NativeBridge.status())
-                    if (status.optBoolean("running")) {
-                        status.optJSONObject("transport")?.let { diagnostics.sample(SystemClock.elapsedRealtime(), it) }
-                        // Refused flows leave SSH healthy, so "Работает" alone would hide them.
-                        val transport=status.optJSONObject("transport")
-                        val rejected=(transport?.optLong("rejected")?:0L)+(transport?.optJSONObject("server")?.optLong("rejected")?:0L)
-                        if(phase=="Работает"&&rejected!=reportedRejections){reportedRejections=rejected;detail=readyDetail();notifyState()}
-                    }
-                    val newNetwork=moved&&recoveryNetworkHandle!=underlying.currentHandle()
-                    when(if(newNetwork)RecoveryPolicy.Action.RECONNECT_SSH else recovery.action(SystemClock.elapsedRealtime(),status.optBoolean("running")&&!moved,TProxyIsRunning())){
-                        RecoveryPolicy.Action.RECONNECT_SSH->{
-                            recoveryAttempted=!newNetwork
-                            if(newNetwork)recovery.reset()
-                            else if(!beginRecovery(status.optString("error").ifBlank{"SSH connection stopped"})){main.postDelayed(this,1500);return@execute}
-                            phase=if(newNetwork)"Смена сети" else "Переподключение";detail="Восстанавливаем SSH. Трафик остаётся в VPN.";notifyState()
-                            connectedSocksPort = null
-                            NativeBridge.stop()
-                            if(!stopping.get())connectSsh()
-                            if(!stopping.get()){startPacketEngine();markReady()}
+                } catch (error: Exception) {
+                    if (!stopping.get() && link === underlying.currentLink()) {
+                        val reason = error.message.orEmpty()
+                        recovery.failed(reason, SystemClock.elapsedRealtime())
+                        if (recovery.needsUser && tun == null) {
+                            failStart(reason)
+                        } else {
+                            val next = if (recovery.needsUser) "Проверьте настройки SSH или VPN." else "Повторим подключение автоматически."
+                            setState("Ошибка соединения", "${ConnectionMessages.describe(reason)}\n$next", blocked = true)
                         }
-                        RecoveryPolicy.Action.RESTART_ENGINE->{
-                            recoveryAttempted=true
-                            if(!beginRecovery("Обработчик TCP/UDP завершился")){main.postDelayed(this,1500);return@execute}
-                            phase="Восстановление";detail="Перезапускаем обработчик TCP/UDP. VPN остаётся включён.";notifyState()
-                            startPacketEngine();if(!stopping.get())markReady()
-                        }
-                        else->{}
                     }
-                }catch(error:Exception){
-                    if(!stopping.get()){
-                        recovery.failed(error.message.orEmpty(),SystemClock.elapsedRealtime(),countAttempt=!recoveryAttempted)
-                        phase="Ошибка соединения"
-                        detail=if(recovery.needsUser)"${error.message}. Остановите туннель и проверьте настройки." else "${error.message}. Повторяем восстановление…"
-                        notifyState()
+                } finally {
+                    val delay = recovery.delay(SystemClock.elapsedRealtime())
+                    main.post {
+                        polling = false
+                        if (prepared && !stopping.get()) {
+                            main.removeCallbacks(this)
+                            main.postDelayed(this, if (link !== underlying.currentLink()) 0 else delay)
+                        }
                     }
                 }
-                if(!stopping.get())main.postDelayed(this,recovery.delay(SystemClock.elapsedRealtime()).coerceAtLeast(500))
             }
         }
     }
+    private fun recoverTunnel(link: UnderlyingNetworkTracker.Link<Network>?, now: Long) {
+        if (link !== recoveryLink) {
+            if (!recovery.needsUser) recovery.reset()
+            recoveryLink = link
+        }
+        val networkAction = underlying.action(now)
+        if (link == null || networkAction == UnderlyingNetworkTracker.Action.WAIT ||
+            networkAction == UnderlyingNetworkTracker.Action.OFFLINE) {
+            pauseForwarding("Сеть изменилась. Запустите тест после восстановления туннеля.")
+            stopSsh()
+            if (recovery.needsUser) return
+            if (link == null) setState("Ожидание сети", "Ждём доступную сеть для SSH.", blocked = true)
+            else setState("Смена сети", "Ждём, пока Android переключит сеть.", blocked = true)
+            return
+        }
+        if (recovery.needsUser) return
+        val status = JSONObject(NativeBridge.status())
+        val sshReady = transportLink === link && status.optBoolean("running")
+        val engineReady = TProxyIsRunning()
+        if (!sshReady || !engineReady) {
+            val reason = if (networkAction == UnderlyingNetworkTracker.Action.RECONNECT)
+                "Сеть изменилась. Запустите тест после восстановления туннеля."
+            else "Туннель временно недоступен. Запустите тест после восстановления."
+            pauseForwarding(reason)
+            if (!sshReady) stopSsh()
+        }
+        when (recovery.action(now, sshReady, engineReady)) {
+            RecoveryPolicy.Action.RECONNECT_SSH -> {
+                val state = if (networkAction == UnderlyingNetworkTracker.Action.RECONNECT) "Смена сети"
+                    else if (sessionId == null) "Подключение" else "Переподключение"
+                setState(state, "Подключаем SSH и серверный агент.", blocked = true)
+                if (!isCurrent(link)) return
+                connectSsh(link)
+                if (!isCurrent(link)) return
+                startPacketEngine()
+                markReady(link)
+            }
+            RecoveryPolicy.Action.RESTART_ENGINE -> {
+                setState("Восстановление", "Перезапускаем обработчик TCP/UDP.", blocked = true)
+                startPacketEngine()
+                markReady(link)
+            }
+            RecoveryPolicy.Action.HEALTHY -> {
+                val nativeLog = File(filesDir, "tun.log")
+                if (nativeLog.length() > 1_048_576) java.io.RandomAccessFile(nativeLog, "rw").use { it.setLength(0) }
+                val transport = status.optJSONObject("transport")
+                transport?.let { diagnostics.sample(now, it) }
+                val rejected = (transport?.optLong("rejected") ?: 0L) +
+                    (transport?.optJSONObject("server")?.optLong("rejected") ?: 0L)
+                if (rejected != reportedRejections) {
+                    reportedRejections = rejected
+                    setState("Работает", readyDetail())
+                }
+            }
+            RecoveryPolicy.Action.WAIT, RecoveryPolicy.Action.NEEDS_USER -> Unit
+        }
+    }
+    private fun isCurrent(link: UnderlyingNetworkTracker.Link<Network>) =
+        !stopping.get() && link === underlying.currentLink()
+
+    private fun pauseForwarding(reason: String) {
+        connectedSocksPort = null
+        SpeedTest.tunnelUnavailable(reason)
+        TProxyStopService()
+        val guarded = session?.protectedPackages.orEmpty()
+        if (guarded.isNotEmpty()) establishRoutes(Routes(guarded, false))
+    }
+
+    private fun stopSsh() {
+        if (transportLink != null) {
+            NativeBridge.stop()
+            transportLink = null
+            if (tun != null) setUnderlyingNetworks(underlyingNetworks())
+        }
+    }
+
+    private fun setState(state: String, message: String, blocked: Boolean = false) {
+        if (stopping.get()) return
+        val description = if (blocked && protectedCount > 0) "$message\nТрафик приложений с защитой заблокирован." else message
+        if (phase == state && detail == description) return
+        phase = state
+        detail = description
+        notifyState()
+    }
     override fun onCreate() {
         super.onCreate()
-        connectivity.activeNetwork?.let {network->connectivity.getNetworkCapabilities(network)?.let{networkCallback.onCapabilitiesChanged(network,it)}}
         connectivity.registerDefaultNetworkCallback(networkCallback,main)
         File(filesDir, "ssh-key.runtime").delete()
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "SSH-туннель", NotificationManager.IMPORTANCE_LOW))
@@ -156,95 +250,100 @@ class TunnelVpnService : VpnService() {
         traffic.clear()
         appTraffic = null
         exitIp = ""; exitCountry = ""; sessionId = null
-        stopping.set(false); active = true; phase = "Подключение"; detail = "Проверка SSH-сервера"
+        protectedCount = 0
+        active = true; phase = "Подключение"; detail = "Запускаем VPN."
         val notification = notification()
         if (Build.VERSION.SDK_INT >= 34) startForeground(NOTICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         else startForeground(NOTICE, notification)
         worker.execute {
             try {
                 val settings = SettingsStore(this)
-                session = settings.snapshot()
-                val packages = session!!.packages
-                require(packages.isNotEmpty()) { "Выберите хотя бы одно приложение" }
-                require(packageName !in packages) { "Нельзя перехватывать собственный SSH-транспорт" }
-                // SSH authenticates before claiming routes. Socket protection also
-                // applies on reconnection while the VPN interface already exists.
-                connectSsh()
-                if (stopping.get()) return@execute
-                startPacketEngine()
-                if(!stopping.get()){
-                    val accounting = if (Build.VERSION.SDK_INT >= 29) AppTrafficAccounting(this, packages) else null
-                    appTraffic = accounting
-                    TProxySetAccounting(accounting != null)
-                    sampling.scheduleWithFixedDelay({
-                        if (!stopping.get()) {
-                            val now = SystemClock.elapsedRealtime()
-                            val (rx, tx) = NativeBridge.trafficTotals()
-                            traffic.sample(now, rx, tx)
-                            if (accounting != null) accounting.sample(now, TProxyDrainTraffic() ?: ByteArray(0))
-                            if (now - sessionSavedAt >= 30_000) recordSession(true)
-                        }
-                    }, 0, 250, TimeUnit.MILLISECONDS)
-                    sessionStarted = System.currentTimeMillis() / 1000
-                    sessionBaseline = NativeBridge.trafficTotals()
-                    sessionSavedAt = SystemClock.elapsedRealtime()
-                    sessionId = sessionStarted.toString()
-                    markReady()
-                    if (settings.verifyProxy) {
-                        val port = session!!.socksPort
-                        Thread {
-                            SpeedTest.trace(port)?.let { exitIp = it.ip; exitCountry = it.country; if (!stopping.get()) recordSession(true) }
-                        }.apply { isDaemon = true }.start()
-                    }
+                val snapshot = settings.snapshot()
+                require(packageName !in snapshot.packages) { "Нельзя перехватывать собственный SSH-транспорт" }
+                val installed = snapshot.packages.filterTo(mutableSetOf()) {
+                    try { packageManager.getApplicationInfo(it, 0); true }
+                    catch (_: PackageManager.NameNotFoundException) { false }
                 }
-                main.postDelayed(monitor, 1500)
+                require(installed.isNotEmpty()) { "Выберите хотя бы одно установленное приложение" }
+                val guarded = snapshot.protectedPackages.intersect(installed)
+                session = snapshot.copy(packages = installed, protectedPackages = guarded)
+                if (stopping.get()) return@execute
+                if (guarded.isNotEmpty()) {
+                    establishRoutes(Routes(guarded, false))
+                    protectedCount = guarded.size
+                }
+                verifyExit = settings.verifyProxy
+                prepared = true
+                main.post(networkWatch)
+                main.post(monitor)
             } catch (error: Exception) {
-                if(!stopping.get()){phase = "Ошибка"; detail = error.message.orEmpty()}
-                cleanup(); active = false; started.set(false)
-                main.post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+                if (!stopping.get()) failStart(error.message.orEmpty())
             }
         }
         return START_NOT_STICKY
     }
-    private fun beginRecovery(error:String):Boolean {
-        recovery.failed(error,SystemClock.elapsedRealtime())
-        if(!recovery.needsUser)return true
-        phase="Ошибка соединения";detail="$error. Автовосстановление остановлено; проверьте настройки и переподключитесь."
-        notifyState();return false
+    private fun failStart(reason: String) {
+        stopping.set(true)
+        finishService("Ошибка", reason)
     }
-    private fun markReady(){
-        if(stopping.get())return
-        when(underlying.action(SystemClock.elapsedRealtime())){
-            UnderlyingNetworkTracker.Action.OFFLINE->{phase="Ожидание сети";detail="VPN включён. Ждём доступную сеть для SSH."}
-            UnderlyingNetworkTracker.Action.WAIT,UnderlyingNetworkTracker.Action.RECONNECT->{phase="Смена сети";detail="VPN включён. Переподключаем SSH."}
-            // A new SSH session starts its refusal counters from zero.
-            else->{phase="Работает";reportedRejections=0;detail=readyDetail()}
+    private fun markReady(link: UnderlyingNetworkTracker.Link<Network>) {
+        if (!isCurrent(link)) return
+        underlying.connectedOn(link)
+        val current = checkNotNull(session)
+        connectedSocksPort = current.socksPort
+        if (sessionId == null) {
+            val accounting = if (Build.VERSION.SDK_INT >= 29) AppTrafficAccounting(this, current.packages) else null
+            appTraffic = accounting
+            TProxySetAccounting(accounting != null)
+            sessionStarted = System.currentTimeMillis() / 1000
+            sessionBaseline = NativeBridge.trafficTotals()
+            sessionSavedAt = SystemClock.elapsedRealtime()
+            sessionId = sessionStarted.toString()
+            sampling.scheduleWithFixedDelay({
+                if (!stopping.get()) {
+                    val now = SystemClock.elapsedRealtime()
+                    val (rx, tx) = NativeBridge.trafficTotals()
+                    traffic.sample(now, rx, tx)
+                    if (accounting != null) accounting.sample(now, TProxyDrainTraffic() ?: ByteArray(0))
+                    if (now - sessionSavedAt >= 30_000) recordSession(true)
+                }
+            }, 0, 250, TimeUnit.MILLISECONDS)
+            if (verifyExit) {
+                Thread {
+                    SpeedTest.trace(current.socksPort)?.let {
+                        if (!stopping.get()) {
+                            exitIp = it.ip; exitCountry = it.country
+                            recordSession(true)
+                        }
+                    }
+                }.apply { isDaemon = true }.start()
+            }
         }
-        notifyState()
+        reportedRejections = 0
+        setState("Работает", readyDetail())
     }
-    private fun startPacketEngine(){
-        val status = JSONObject(NativeBridge.status())
-        val ipv6 = status.optBoolean("ipv6_supported")
-        val capacity = status.optJSONObject("transport")?.optInt("limit",256) ?: 256
-        check(status.optBoolean("running")){"SSH не готов для обработки пакетов"}
-        val current=session?:error("Нет сеанса VPN")
-        val packages=current.packages
-        TProxyStopService()
-        if(stopping.get())return
-        if(tun==null||engineIpv6!=ipv6||engineCapacity!=capacity){
+    private fun establishRoutes(next: Routes) {
+        if (next == routes) return
         val builder = Builder().setSession("Secret Tunnel SSH").setMtu(1500)
             .addAddress("198.18.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
-        if (ipv6) builder.addAddress("fd00:198:18::1", 126).addRoute("::", 0)
-        // Android 10+ otherwise marks every VPN as metered, including Wi-Fi,
-        // which can make media apps suppress large/background downloads.
+            .setUnderlyingNetworks(underlyingNetworks())
+        // Android blocks IPv6 when the VPN does not configure the family.
+        if (next.ipv6) builder.addAddress("fd00:198:18::1", 126).addRoute("::", 0)
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
-        for (pkg in packages) builder.addAllowedApplication(pkg)
-        val replacement=builder.establish()?:error("Android не разрешил VPN-интерфейс")
-        val previous=tun
-        tun=replacement
+        for (pkg in next.packages) builder.addAllowedApplication(pkg)
+        // Establish first so Android replaces the UID routes without a direct-traffic window.
+        val replacement = builder.establish() ?: error("Android не разрешил VPN-интерфейс")
+        val previous = tun
+        tun = replacement
+        routes = next
         previous?.close()
-        engineIpv6=ipv6;engineCapacity=capacity
-        }
+    }
+    private fun startPacketEngine() {
+        val status = JSONObject(NativeBridge.status())
+        val ipv6 = status.optBoolean("ipv6_supported")
+        val capacity = status.optJSONObject("transport")?.optInt("limit", 256) ?: 256
+        check(status.optBoolean("running")) { "SSH не готов для обработки пакетов" }
+        val current = checkNotNull(session)
         val config = File(filesDir, "tun.yml")
         config.writeText("""
             tunnel:
@@ -253,7 +352,7 @@ class TunnelVpnService : VpnService() {
               ${if (ipv6) "ipv6: 'fd00:198:18::1'" else "# IPv6 blocked: server has no verified IPv6 egress"}
             socks5:
               address: 127.0.0.1
-              port: ${session!!.socksPort}
+              port: ${current.socksPort}
               udp: 'udp'
             misc:
               task-stack-size: 65536
@@ -266,34 +365,49 @@ class TunnelVpnService : VpnService() {
               log-level: warn
         """.trimIndent())
         File(filesDir, "tun.log").writeText("")
-        if(stopping.get())return
-        check(TProxyStartService(config.absolutePath, tun!!.fd)) { "Не удалось запустить обработчик TCP/UDP" }
+        if (stopping.get()) return
+        TProxyStopService() // join the native reader before replacing its borrowed descriptor
+        establishRoutes(Routes(current.packages, ipv6))
+        check(TProxyStartService(config.absolutePath, checkNotNull(tun).fd)) { "Не удалось запустить обработчик TCP/UDP" }
         check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
     }
-    private fun connectSsh() {
-        if (stopping.get()) return
-        val networkWhenConnecting=underlying.currentHandle()
-        recoveryNetworkHandle=networkWhenConnecting
-        val current = session ?: error("Нет параметров сеанса")
+    private fun connectSsh(link: UnderlyingNetworkTracker.Link<Network>) {
+        val current = checkNotNull(session)
+        require(current.route.all { isTrustedSshPin(it.fingerprint) }) { "Ключ сервера не подтверждён" }
         SettingsStore(this).withSshConfig(current.route) { config ->
+            if (!isCurrent(link)) return@withSshConfig
             config.put("socks_port", current.socksPort)
-                .put("new_session", tun == null)
+                .put("new_session", newSession)
                 .put("max_connections", connectionBudget())
                 .put("udp_receive_window", current.udpReceive?.toJson())
                 .put("agent_udp_receive_window", current.udpAgentReceive?.toJson())
                 .put("ssh_tuning",current.ssh.toNativeJson())
+            transportLink = link
+            if (tun != null) setUnderlyingNetworks(underlyingNetworks())
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
-            connectedSocksPort = current.socksPort
-            underlying.connectedOn(networkWhenConnecting)
+            newSession = false
         }
     }
+    // Called from Rust before connect() on the first SSH hop.
+    fun bindSshSocket(fd: Int): Boolean {
+        val link = transportLink ?: return false
+        if (!isCurrent(link) || !protect(fd)) return false
+        return runCatching {
+            ParcelFileDescriptor.fromFd(fd).use { link.network.bindSocket(it.fileDescriptor) }
+            isCurrent(link)
+        }.getOrDefault(false)
+    }
+    private fun underlyingNetworks(): Array<Network> =
+        transportLink?.let { arrayOf(it.network) } ?: emptyArray()
     private fun notification(): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 1, Intent(this, TunnelVpnService::class.java).setAction("STOP"), PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_upload)
+        val builder = Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_upload)
             .setContentTitle("Secret Tunnel: $phase").setContentText(detail).setContentIntent(open)
-            .setOngoing(true).addAction(Notification.Action.Builder(null, "Остановить", stop).build()).build()
+            .setStyle(Notification.BigTextStyle().bigText(detail)).setOngoing(true)
+        if (protectedCount == 0) builder.addAction(Notification.Action.Builder(null, "Остановить", stop).build())
+        return builder.build()
     }
     private fun connectionBudget():Int {
         val manager=getSystemService(ActivityManager::class.java)
@@ -304,25 +418,33 @@ class TunnelVpnService : VpnService() {
     }
     private fun notifyState() { if (active) getSystemService(NotificationManager::class.java).notify(NOTICE, notification()) }
     private fun cleanup() {
+        prepared = false
         connectedSocksPort = null
+        SpeedTest.tunnelUnavailable("Туннель остановлен. Подключите его и запустите тест заново.")
         main.removeCallbacks(monitor)
+        main.removeCallbacks(networkWatch)
         sampling.shutdownNow()
         sampling.awaitTermination(1, TimeUnit.SECONDS)
         recordSession(false)
         exitIp = ""; exitCountry = ""
         TProxyStopService() // join native reader BEFORE closing its borrowed fd
         TProxySetAccounting(false)
-        tun?.close(); tun = null;engineIpv6=null;engineCapacity=0
+        tun?.close(); tun = null; routes = null; protectedCount = 0
         NativeBridge.stop()
+        transportLink = null
         File(filesDir, "ssh-key.runtime").delete()
     }
     private fun stopAsync() {
         if (!stopping.compareAndSet(false, true)) return
         phase = "Остановка"; NativeBridge.cancel(); main.removeCallbacks(monitor)
-        worker.execute {
-            cleanup(); active = false; started.set(false); phase = "Остановлен"; detail = ""
-            main.post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
-        }
+        worker.execute { finishService("Остановлен", "") }
+    }
+    private fun finishService(state: String, reason: String) {
+        cleanup()
+        phase = state
+        detail = reason
+        active = false
+        main.post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
     override fun onRevoke() { stopAsync() }
     override fun onDestroy() {

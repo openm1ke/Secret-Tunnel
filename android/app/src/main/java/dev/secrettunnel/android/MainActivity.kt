@@ -92,6 +92,7 @@ class MainActivity:Activity() {
     private var catalog=listOf<AppEntry>()
     @Volatile private var catalogLoaded=false
     private val selected=mutableSetOf<String>()
+    private val protectedApps = mutableSetOf<String>()
     private val iconCache=android.util.LruCache<String,Drawable>(32)
     private data class AppEntry(val pkg:String,val label:String)
     private val poll=object:Runnable {
@@ -104,7 +105,7 @@ class MainActivity:Activity() {
                 val state=when{checking->"Проверка";pendingTrust->"Подтверждение";phase=="Работает"->"Подключено";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Ошибка";else->"Остановлен"}
                 update(badge,state);badge.setTextColor(when{state=="Подключено"->Palette.accent;state=="Ошибка"->Palette.error;TunnelVpnService.active||checking->Palette.warning;else->Palette.muted})
                 update(heroTitle,when{checking->"Проверяем сервер";pendingTrust->"Подтвердите ключ сервера";phase=="Работает"->"Туннель работает";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Не удалось подключиться";store.activeProxy==null->"Добавьте подключение";else->if(readinessAction()=="Подключить")"Готов к подключению" else "Настройте подключение"})
-                update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->activeTunnelDetails();phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);TunnelVpnService.active->TunnelVpnService.detail;else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
+                update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->activeTunnelDetails();TunnelVpnService.active->TunnelVpnService.detail;phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
                 listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=!checking&&!pendingTrust&&!TunnelVpnService.active}
                 connectButton?.apply{val value=if(TunnelVpnService.active)"Остановить" else readinessAction();if(text.toString()!=value)text=value;isEnabled=!checking&&!pendingTrust&&phase!="Остановка";alpha=if(isEnabled)1f else .45f}
                 update(downSpeed,TrafficMeter.bytes(rate.down)+"/с");update(upSpeed,TrafficMeter.bytes(rate.up)+"/с")
@@ -124,7 +125,7 @@ class MainActivity:Activity() {
     }
     override fun onCreate(savedInstanceState:Bundle?){
         super.onCreate(savedInstanceState);window.statusBarColor=Palette.background;window.navigationBarColor=Palette.background
-        store=SettingsStore(this);selected.addAll(store.packages)
+        store=SettingsStore(this);selected.addAll(store.packages);protectedApps.addAll(store.protectedPackages)
         page=savedInstanceState?.getString("page")?:"home";editingId=savedInstanceState?.getString("editingId").orEmpty()
         helpSection=savedInstanceState?.getString("helpSection")?:"setup"
         helpQuery=savedInstanceState?.getString("helpQuery").orEmpty()
@@ -313,7 +314,7 @@ class MainActivity:Activity() {
             card.addView(label(if(server.host.isBlank())"Укажите адрес и пользователя" else "${server.user}@${server.host}:${server.port}",13,false,Palette.muted),spaced(6))
             if (server.jumpServerId != null) card.addView(label(routeLabel(server.id),13,false,Palette.muted),spaced(6))
             card.addView(label(if(scoped.hasKey())"✓  Ключ доступа добавлен" else "○  Добавьте SSH-ключ",12,false,if(scoped.hasKey())Palette.accent else Palette.warning),spaced(12))
-            card.addView(label(if(validPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,Palette.muted),spaced(6))
+            card.addView(label(if(isTrustedSshPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,Palette.muted),spaced(6))
             card.addView(button("Настроить"){unlocked();editingId=server.id;navigate("serverEditor")},spaced(14));body.addView(card,spaced(12))
         }
         if(store.servers().isEmpty())emptyState("Пока нет серверов","Добавьте SSH-сервер, чтобы создать подключение.")
@@ -367,7 +368,7 @@ class MainActivity:Activity() {
             unlocked();saveServerForm();require(scoped.hasKey()){"Сначала импортируйте уже разрешённый SSH-ключ"};verifyServer(editingId){enrollDevice(editingId)}
         },spaced(8));body.addView(keyCard,spaced(20))
         val trust=card();trust.addView(label("Подлинность сервера",17,true))
-        trust.addView(label(if(validPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,Palette.muted).apply{setTextIsSelectable(true)},spaced(10))
+        trust.addView(label(if(isTrustedSshPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,Palette.muted).apply{setTextIsSelectable(true)},spaced(10))
         trust.addView(button("Проверить отпечаток"){unlocked();saveServerForm();verifyServer(editingId){toast("Сервер доступен, ключ сохранён");render()}},spaced(14))
         val isRelay = store.servers().any { it.jumpServerId == editingId }
         trust.addView(button(if(isRelay) "Проверить SSH" else "Проверить SSH и агент"){
@@ -710,7 +711,7 @@ class MainActivity:Activity() {
     private fun manageServerAgent(server: ServerProfile, install: Boolean) {
         if (agentBusy) return
         val route = store.route(server.id)
-        require(route.all { validPin(it.fingerprint) }) { "Подтвердите отпечатки в разделе «Серверы» → «Проверить SSH и агент»." }
+        require(route.all { isTrustedSshPin(it.fingerprint) }) { "Подтвердите отпечатки в разделе «Серверы» → «Проверить SSH и агент»." }
         agentBusy = true
         agentError = false
         agentResult = if (install) "Скачиваем и проверяем архив агента…" else "Подключаемся к серверу…"
@@ -931,9 +932,10 @@ class MainActivity:Activity() {
     private fun speedTarget():SpeedTest.Target?{
         if(speedDirect)return SpeedTest.Target(null,speedProvider,"",emptyList(),"")
         if(!TunnelVpnService.active||TunnelVpnService.phase!="Работает")return null
+        val port=TunnelVpnService.connectedSocksPort?:return null
         val proxy=store.activeProxy?:return null
         val names=runCatching{store.route(proxy.serverId).map{it.profile.name}}.getOrDefault(emptyList())
-        return SpeedTest.Target(proxy.port,speedProvider,names.lastOrNull().orEmpty(),if(names.size>1)names else emptyList(),TunnelVpnService.exitCountry)
+        return SpeedTest.Target(port,speedProvider,names.lastOrNull().orEmpty(),if(names.size>1)names else emptyList(),TunnelVpnService.exitCountry)
     }
 
     private fun speedPage(){
@@ -1043,13 +1045,14 @@ class MainActivity:Activity() {
 
     private fun appsPage(){
         val layout=column().apply{setPadding(dp(20),dp(8),dp(20),0)};content.addView(layout)
-        layout.addView(label("Приложения",26,true));layout.addView(label("Включите туннель только для нужных приложений.",13,false,Palette.muted),spaced(8))
+        layout.addView(label("Приложения",26,true))
+        layout.addView(label("Защита действует, пока Android держит VPN.",13,false,Palette.muted),spaced(8))
         val search=EditText(this).apply{setSingleLine(true);hint="Поиск по названию или пакету";setTextColor(Palette.text);setHintTextColor(Palette.muted);textSize=14f;inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;background=Palette.panel(Palette.surface,dp(14).toFloat(),Palette.border);setPadding(dp(14),0,dp(14),0);setText(searchQuery)}
         layout.addView(search,LinearLayout.LayoutParams(-1,dp(50)).apply{topMargin=dp(16)})
         appCount=label("",11,false,Palette.muted).also{layout.addView(it,spaced(12))}
         val actions=row();actions.addView(button("Выбранные"){searchQuery="";search.setText("");appAdapter?.showSelected=true;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginEnd=dp(5)})
         actions.addView(button("Все приложения"){appAdapter?.showSelected=false;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginStart=dp(5)});layout.addView(actions,spaced(8))
-        if(TunnelVpnService.active)layout.addView(label("Изменения применятся после переподключения",11,false,Palette.warning),spaced(8))
+        if(TunnelVpnService.active)layout.addView(label("Изменения вступят в силу при следующем ручном запуске туннеля.",11,false,Palette.warning),spaced(8))
         val list=ListView(this).apply{divider=null;cacheColorHint=Palette.background;setPadding(0,dp(6),0,dp(12));clipToPadding=false}
         appAdapter=ApplicationAdapter();list.adapter=appAdapter
         val listArea=FrameLayout(this);listArea.addView(list,FrameLayout.LayoutParams(-1,-1))
@@ -1061,14 +1064,18 @@ class MainActivity:Activity() {
             override fun afterTextChanged(s:Editable?){}
         })
     }
-    private fun refreshApps(){if(page!="apps")return;appAdapter?.refresh();update(appEmpty,if(!catalogLoaded)"Ищем приложения…" else "Ничего не найдено.\nИзмените поиск или откройте все приложения.");update(appCount,if(catalogLoaded)"Найдено: ${catalog.size}  ·  Через туннель: ${selected.size}" else "Ищем установленные приложения…")}
+    private fun refreshApps(){if(page!="apps")return;appAdapter?.refresh();update(appEmpty,if(!catalogLoaded)"Ищем приложения…" else "Ничего не найдено.\nИзмените поиск или откройте все приложения.");updateAppCount()}
+    private fun updateAppCount() {
+        update(appCount, if (catalogLoaded) "Через туннель: ${selected.size}  ·  С защитой: ${selected.count(protectedApps::contains)}"
+            else "Ищем установленные приложения…")
+    }
     private fun scanApps(){Thread{
         val intent=Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         catalog=packageManager.queryIntentActivities(intent,0).map{AppEntry(it.activityInfo.packageName,it.loadLabel(packageManager).toString())}
             .filter{it.pkg!=packageName&&packageManager.checkPermission("android.permission.INTERNET",it.pkg)==PackageManager.PERMISSION_GRANTED}
             .distinctBy{it.pkg}.sortedBy{it.label.lowercase()};catalogLoaded=true;runOnUiThread{refreshApps()}
     }.start()}
-    private class AppHolder(val icon:ImageView,val name:TextView,val pkg:TextView,val toggle:Switch)
+    private class AppHolder(val icon:ImageView,val name:TextView,val pkg:TextView,val toggle:Switch,val guard:CheckBox)
     private inner class ApplicationAdapter:BaseAdapter(){
         private var visible=listOf<AppEntry>();var showSelected=false
         fun refresh(){visible=catalog.filter{(!showSelected||it.pkg in selected)&&(it.label.contains(searchQuery,true)||it.pkg.contains(searchQuery,true))};notifyDataSetChanged()}
@@ -1076,17 +1083,46 @@ class MainActivity:Activity() {
         override fun getItem(position:Int)=visible[position]
         override fun getItemId(position:Int)=visible[position].pkg.hashCode().toLong()
         override fun getView(position:Int,convertView:View?,parent:ViewGroup):View{
-            val container=convertView as? LinearLayout ?: row().apply{
-                gravity=Gravity.CENTER_VERTICAL;minimumHeight=dp(80);setPadding(0,dp(12),0,dp(12))
-                val icon=ImageView(this@MainActivity);addView(icon,LinearLayout.LayoutParams(dp(40),dp(40)).apply{marginEnd=dp(12)})
-                val texts=column();val name=label("",14,true);val pkg=label("",10,false,Palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));addView(texts,LinearLayout.LayoutParams(0,-2,1f))
-                val toggle=Switch(this@MainActivity).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.accent,Palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.raised,Palette.border))};addView(toggle);tag=AppHolder(icon,name,pkg,toggle)
+            val container = convertView as? LinearLayout ?: column().apply {
+                setPadding(0, dp(6), 0, dp(6))
+                val header = row().apply { gravity = Gravity.CENTER_VERTICAL; minimumHeight = dp(64) }
+                val icon = ImageView(this@MainActivity)
+                header.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
+                val texts=column();val name=label("",14,true);val pkg=label("",10,false,Palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));header.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
+                val toggle=Switch(this@MainActivity).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.accent,Palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(Palette.raised,Palette.border))}
+                header.addView(toggle)
+                addView(header)
+                header.setOnClickListener { toggle.isChecked = !toggle.isChecked }
+                val guard = CheckBox(this@MainActivity).apply {
+                    text = "Блокировать при обрыве туннеля"
+                    textSize = 13f
+                    minimumHeight = dp(48)
+                    setTextColor(Palette.text)
+                    buttonTintList = toggle.thumbTintList
+                }
+                addView(guard, LinearLayout.LayoutParams(-1, -2).apply { marginStart = dp(48) })
+                tag = AppHolder(icon, name, pkg, toggle, guard)
             }
             val item=visible[position];val holder=container.tag as AppHolder;holder.name.text=item.label;holder.pkg.text=item.pkg
             holder.icon.setImageDrawable(iconCache.get(item.pkg)?:try{packageManager.getApplicationIcon(item.pkg).also{iconCache.put(item.pkg,it)}}catch(_:Exception){null})
             holder.toggle.setOnCheckedChangeListener(null);holder.toggle.isChecked=item.pkg in selected;holder.toggle.contentDescription="Через туннель: ${item.label}"
-            holder.toggle.setOnCheckedChangeListener{_,enabled->if(enabled)selected.add(item.pkg)else selected.remove(item.pkg);store.packages=selected;update(appCount,"Найдено: ${catalog.size}  ·  Через туннель: ${selected.size}");if(showSelected)refresh()}
-            container.setOnClickListener{holder.toggle.isChecked=!holder.toggle.isChecked};return container
+            holder.guard.setOnCheckedChangeListener(null)
+            holder.guard.isChecked = item.pkg in protectedApps
+            holder.guard.visibility = if (holder.toggle.isChecked) View.VISIBLE else View.GONE
+            holder.guard.contentDescription = "Блокировать при обрыве туннеля: ${item.label}"
+            holder.guard.setOnCheckedChangeListener { _, enabled ->
+                if (enabled) protectedApps.add(item.pkg) else protectedApps.remove(item.pkg)
+                store.protectedPackages = protectedApps
+                updateAppCount()
+            }
+            holder.toggle.setOnCheckedChangeListener { _, enabled ->
+                if (enabled) selected.add(item.pkg) else selected.remove(item.pkg)
+                store.packages = selected
+                holder.guard.visibility = if (enabled) View.VISIBLE else View.GONE
+                updateAppCount()
+                if (showSelected) refresh()
+            }
+            return container
         }
     }
 
@@ -1139,7 +1175,14 @@ class MainActivity:Activity() {
         return "Подключить"
     }
     private fun connectOrStop(){
-        if(TunnelVpnService.active){startService(Intent(this,TunnelVpnService::class.java).setAction("STOP"));return}
+        if (TunnelVpnService.active) {
+            fun stop() { startService(Intent(this, TunnelVpnService::class.java).setAction("STOP")) }
+            if (TunnelVpnService.protectedCount == 0) stop()
+            else AlertDialog.Builder(this).setTitle("Остановить туннель?")
+                .setMessage("После остановки приложения смогут выходить в интернет напрямую.")
+                .setNegativeButton("Отмена", null).setPositiveButton("Остановить") { _, _ -> stop() }.show()
+            return
+        }
         val proxy=store.activeProxy
         if(proxy==null){navigate("proxies");return}
         val server=store.server(proxy.serverId)
@@ -1148,17 +1191,22 @@ class MainActivity:Activity() {
             editingId=server.id;navigate("serverEditor");toast("Заполните сервер и добавьте SSH-ключ");return
         }
         if(store.packages.isEmpty()){navigate("apps");toast("Выберите приложения для туннеля");return}
-        store.snapshot();pendingProxy=store.activeProxyId
-        verifyServer(server.id){val permission=VpnService.prepare(this);if(permission!=null)startActivityForResult(permission,103)else startTunnel()}
+        val session = store.snapshot()
+        pendingProxy = store.activeProxyId
+        fun prepareVpn() {
+            val permission = VpnService.prepare(this)
+            if (permission != null) startActivityForResult(permission, 103) else startTunnel()
+        }
+        if (session.route.all { isTrustedSshPin(it.fingerprint) }) prepareVpn()
+        else verifyServer(server.id) { prepareVpn() }
     }
     private fun startTunnel(){require(pendingProxy==store.activeProxyId){"Профиль изменился. Подключитесь заново."};startForegroundService(Intent(this,TunnelVpnService::class.java))}
-    private fun validPin(value:String)=Regex("SHA256:[A-Za-z0-9+/]{43}").matches(value)
     private fun verifyServer(id:String,after:()->Unit){
         unlocked();require(!pendingTrust){"Проверка уже выполняется"}
         fun verifyNext(index: Int) {
             val route = store.route(id)
             if (index == route.size) { after(); return }
-            if (index < route.lastIndex && validPin(route[index].fingerprint)) verifyNext(index + 1)
+            if (index < route.lastIndex && isTrustedSshPin(route[index].fingerprint)) verifyNext(index + 1)
             else verifyHost(route.take(index + 1)) { verifyNext(index + 1) }
         }
         verifyNext(0)
@@ -1175,12 +1223,12 @@ class MainActivity:Activity() {
                 checking=false;if(isFinishing||isDestroyed)return@runOnUiThread
                 if(store.server(server.id)!=server)return@runOnUiThread
                 val pin=result.optString("fingerprint")
-                if(!validPin(pin)){message("Не удалось проверить сервер «${server.name}»: "+result.optString("error"));return@runOnUiThread}
+                if(!isTrustedSshPin(pin)){message("Не удалось проверить сервер «${server.name}»: "+result.optString("error"));return@runOnUiThread}
                 fun proceed(){scoped.fingerprint=pin;attempt(after)}
                 if(saved==pin)proceed()else{
                     pendingTrust=true
-                    AlertDialog.Builder(this).setTitle(if(validPin(saved))"Ключ сервера изменился" else "Доверять серверу?")
-                        .setMessage("${server.host}:${server.port}\n\n$pin\n\n"+if(validPin(saved))"Сохранён другой ключ. Сверьте замену у администратора перед подтверждением." else "Сверьте отпечаток у администратора. После подтверждения приложение запомнит этот сервер.")
+                    AlertDialog.Builder(this).setTitle(if(isTrustedSshPin(saved))"Ключ сервера изменился" else "Доверять серверу?")
+                        .setMessage("${server.host}:${server.port}\n\n$pin\n\n"+if(isTrustedSshPin(saved))"Сохранён другой ключ. Сверьте замену у администратора перед подтверждением." else "Сверьте отпечаток у администратора. После подтверждения приложение запомнит этот сервер.")
                         .setNegativeButton("Отмена",null).setPositiveButton("Доверять"){dialog,_->
                             dialog.dismiss();pendingTrust=false;proceed()
                         }.setOnDismissListener{pendingTrust=false}.show()

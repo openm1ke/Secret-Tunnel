@@ -79,7 +79,10 @@ data class Tuning(val ssh: SshSettings = SshSettings(), val udpReceive: UdpWindo
 data class ProxyProfile(val id:String, val name:String, val serverId:String, val port:Int,
     val udpReceive:UdpWindow?=null, val udpAgentReceive:UdpWindow?=null, val ssh:SshSettings=SshSettings())
 data class TunnelSession(val route:List<SshEndpoint>, val socksPort:Int, val packages:Set<String>,
-    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?, val ssh:SshSettings)
+    val udpReceive:UdpWindow?, val udpAgentReceive:UdpWindow?, val ssh:SshSettings,
+    val protectedPackages:Set<String> = emptySet())
+
+internal fun isTrustedSshPin(value: String) = Regex("SHA256:[A-Za-z0-9+/]{43}").matches(value)
 
 class SettingsStore(private val context:Context, private val profileId:String?=null) {
     val prefs = context.getSharedPreferences("tunnel", Context.MODE_PRIVATE)
@@ -126,6 +129,9 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     var user:String get()=value("user");set(v){put("user",v)}
     var fingerprint:String get()=value("fingerprint");set(v){put("fingerprint",v)}
     var packages:Set<String> get()=prefs.getStringSet("packages",emptySet())!!.toSet();set(v){prefs.edit().putStringSet("packages",v.toSet()).apply()}
+    var protectedPackages: Set<String>
+        get() = prefs.getStringSet("protected_packages", emptySet())!!.toSet()
+        set(value) { prefs.edit().putStringSet("protected_packages", value.toSet()).apply() }
     var activeProxyId:String get()=prefs.getString("active_proxy","")!!;set(v){require(proxies().any{it.id==v});prefs.edit().putString("active_proxy",v).apply()}
     val activeProxy:ProxyProfile? get()=proxies().firstOrNull{it.id==prefs.getString("active_proxy","")}
     fun servers():List<ServerProfile> = ids().map { id ->
@@ -226,9 +232,11 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
             require(server.host.isNotBlank() && server.user.isNotBlank()) { "Настройте сервер «${server.name}»" }
             require(SettingsStore(context, server.id).hasKey()) { "Добавьте SSH-ключ для сервера «${server.name}»" }
         }
-        require(packages.isNotEmpty()) {"Выберите приложения"}
+        val selected = packages
+        require(selected.isNotEmpty()) {"Выберите приложения"}
         val tuning=tuning
-        return TunnelSession(route,proxy.port,packages,tuning.udpReceive,tuning.udpAgentReceive,tuning.ssh)
+        return TunnelSession(route,proxy.port,selected,tuning.udpReceive,tuning.udpAgentReceive,tuning.ssh,
+            protectedPackages.intersect(selected))
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {

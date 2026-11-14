@@ -31,15 +31,23 @@ class RecoveryPolicyTest {
         assertEquals(RecoveryPolicy.Action.NEEDS_USER,policy.action(100000,false,false))
         policy.reset();repeat(4){policy.failed("timeout",it*30000L);assertTrue(policy.nextAttemptAt-it*30000L<=15000)}
     }
-    @Test fun aFailedAttemptIsCountedOnceAndTerminalErrorsStayLatched(){
+    @Test fun terminalErrorsStayLatched(){
         val policy=RecoveryPolicy()
-        policy.failed("engine stopped",0)
-        policy.failed("permission denied",100,countAttempt=false)
+        policy.failed("permission denied",100)
         assertEquals(1,policy.failures)
         assertTrue(policy.needsUser)
         policy.failed("status unavailable",200)
         assertTrue(policy.needsUser)
         assertEquals(RecoveryPolicy.Action.NEEDS_USER,policy.action(30000,false,false))
+    }
+    @Test fun aLongOutageKeepsRetryingWithBoundedBackoff() {
+        val policy = RecoveryPolicy()
+        repeat(100) {
+            val now = it * 20_000L
+            policy.failed("Connection timed out", now)
+            assertTrue(policy.nextAttemptAt - now <= 15_000)
+        }
+        assertEquals(RecoveryPolicy.Action.RECONNECT_SSH, policy.action(2_000_000, false, false))
     }
     @Test fun agentInstallationErrorsWaitForUserButTimeoutsCanRecover(){
         for(code in listOf("AGENT_MISSING:","AGENT_NOT_EXECUTABLE:","AGENT_INCOMPATIBLE:","AGENT_INVALID_RESPONSE:","AGENT_RESOURCE_LIMIT:","AGENT_CHECK_FAILED:")){

@@ -50,11 +50,16 @@ class VpnFixtureTest {
         val ready = File(context.filesDir, "integration-ready.json")
         val finish = File(context.filesDir, "integration-finish")
         ready.delete(); finish.delete()
-        SettingsStore(context).snapshot() // fail with an actionable fixture error
+        val store = SettingsStore(context)
+        val previousProtection = store.protectedPackages
+        val protect = InstrumentationRegistry.getArguments().getString("protectProbe") == "true"
+        if (protect) store.protectedPackages = store.packages
+        store.snapshot() // fail with an actionable fixture error
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)) as MainActivity
         fun views(root: View): List<View> = listOf(root) + if(root is ViewGroup) (0 until root.childCount).flatMap { views(root.getChildAt(it)) } else emptyList()
         fun snapshot() = JSONObject().put("active", TunnelVpnService.active).put("phase", TunnelVpnService.phase)
-            .put("detail", TunnelVpnService.detail).put("native", JSONObject(NativeBridge.status()))
+            .put("detail", TunnelVpnService.detail).put("protected", TunnelVpnService.protectedCount)
+            .put("native", JSONObject(NativeBridge.status()))
         try {
             instrumentation.runOnMainSync {
                 views(activity.window.decorView).filterIsInstance<Button>().first { it.text.toString() == "Подключить" }.performClick()
@@ -62,10 +67,12 @@ class VpnFixtureTest {
             // The host accepts the real Android VPN consent dialog through UI.
             val startDeadline = System.currentTimeMillis() + 90_000
             while (TunnelVpnService.phase != "Работает" && System.currentTimeMillis() < startDeadline) {
-                check(!TunnelVpnService.phase.startsWith("Ошибка")) { TunnelVpnService.detail }
+                if (!protect) check(!TunnelVpnService.phase.startsWith("Ошибка")) { TunnelVpnService.detail }
+                if (protect) File(context.filesDir,"integration-live.json").writeText(snapshot().toString())
                 Thread.sleep(200)
             }
             assertEquals("VPN failed to start", "Работает", TunnelVpnService.phase)
+            if (protect) assertEquals(store.packages.size, TunnelVpnService.protectedCount)
             if(InstrumentationRegistry.getArguments().getString("injectEngineCrash")=="true"){
                 val engine=TunnelVpnService()
                 assertTrue(engine.TProxyIsRunning())
@@ -94,6 +101,7 @@ class VpnFixtureTest {
             val deadline = System.currentTimeMillis() + 15_000
             while (TunnelVpnService.active && System.currentTimeMillis() < deadline) Thread.sleep(100)
             File(context.filesDir, "integration-stop.json").writeText(snapshot().toString())
+            if (protect) store.protectedPackages = previousProtection
             instrumentation.runOnMainSync { activity.finish() }
             ready.delete(); finish.delete()
         }

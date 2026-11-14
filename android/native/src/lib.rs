@@ -160,7 +160,7 @@ fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), Stri
             vm.attach_current_thread()
                 .ok()
                 .and_then(|mut env| {
-                    env.call_method(service.as_obj(), "protect", "(I)Z", &[JValue::Int(fd)])
+                    env.call_method(service.as_obj(), "bindSshSocket", "(I)Z", &[JValue::Int(fd)])
                         .ok()
                 })
                 .and_then(|v| v.z().ok())

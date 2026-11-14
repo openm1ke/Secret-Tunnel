@@ -1,7 +1,7 @@
 package dev.secrettunnel.android
 
 /** Monotonic recovery deadlines. Waiting never occupies the service worker. */
-class RecoveryPolicy(private val maxFailures: Int = 8) {
+class RecoveryPolicy(private val maxFailures: Int? = null) {
     enum class Action { HEALTHY, WAIT, RECONNECT_SSH, RESTART_ENGINE, NEEDS_USER }
     var failures = 0
         private set
@@ -32,12 +32,14 @@ class RecoveryPolicy(private val maxFailures: Int = 8) {
         if (now < nextAttemptAt) return Action.WAIT
         return if (!ssh) Action.RECONNECT_SSH else Action.RESTART_ENGINE
     }
-    fun failed(error: String, now: Long, countAttempt: Boolean = true) {
-        if (countAttempt) failures++
+    fun failed(error: String, now: Long) {
+        if (failures < Int.MAX_VALUE) failures++
+        healthySince = -1
         val message = error.lowercase()
-        needsUser = needsUser || failures >= maxFailures || listOf(
+        needsUser = needsUser || (maxFailures != null && failures >= maxFailures) || listOf(
             "authentication failed", "public key authentication", "permission denied",
             "unknown server key", "rejected the server host key", "host key verification failed",
+            "server host key rejected", "ключ сервера не подтверждён",
             "stmux003 server agent required", "cannot load ssh key", "encrypted private key",
             "not permitted", "не разрешил vpn",
             "agent_missing:", "agent_not_executable:", "agent_incompatible:",
@@ -45,5 +47,8 @@ class RecoveryPolicy(private val maxFailures: Int = 8) {
         ).any { it in message }
         nextAttemptAt = now + (1000L shl (failures - 1).coerceIn(0, 4)).coerceAtMost(15_000L)
     }
-    fun delay(now: Long) = if (needsUser) 1500L else (nextAttemptAt - now).coerceIn(100, 1500)
+    fun delay(now: Long): Long {
+        val remaining = nextAttemptAt - now
+        return if (!needsUser && remaining in 1..999) remaining else 1000
+    }
 }

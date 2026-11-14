@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.SecretTunnel.Light" parent="Theme.SecretTunnel.Light.Base">
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

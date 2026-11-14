@@ -8,8 +8,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 32700
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.27"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 32800
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.28"
         manifestPlaceholders["appLabel"] = "Secret Tunnel"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }

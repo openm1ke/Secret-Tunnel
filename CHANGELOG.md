@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.28 — 2026-11-14
+
+- Android: disable automatic darkening only on API 29 and later. Android 8 and 9 keep the built-in appearance options, and both APK variants pass Android Lint.
+- Includes the appearance changes from 0.3.27, whose release build was blocked by Android Lint.
+
 ## 0.3.27 — 2026-11-14
 
 - Desktop and Android: choose system, light or dark appearance under «Настройки» → «Оформление». The choice applies immediately and is remembered after restart.

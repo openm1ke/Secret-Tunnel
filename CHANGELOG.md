@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.3.30 — 2026-11-16
 
 - Android TV gets a separate signed APK and a scrollable vertical menu with every section accessible from the remote.
 - Fixed VPN startup on 32-bit ARM Android TV devices. Android now reports native startup errors and unexpected exits during connection.
 - Android TV keeps focus on the server version check, shows focus on switches and lists, and scrolls the journal with the remote.
+- The website and built-in help explain how to install the Android TV APK from a USB drive.
 
 ## 0.3.29 — 2026-11-15
 

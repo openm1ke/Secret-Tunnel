@@ -34,8 +34,6 @@ android {
         getByName("debug") {
             if (System.getenv("ST_ANDROID_LOCAL_TEST") == "1") {
                 applicationIdSuffix = ".testbuild"
-                versionNameSuffix = "-test"
-                manifestPlaceholders["appLabel"] = "Secret Tunnel Test"
             }
         }
         getByName("release") {

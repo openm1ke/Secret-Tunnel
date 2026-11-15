@@ -2,9 +2,12 @@ package dev.secrettunnel.android
 
 import android.app.*
 import android.content.*
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.net.VpnService
@@ -23,6 +26,7 @@ class MainActivity:Activity() {
     private lateinit var uiContext: Context
     private lateinit var content:FrameLayout
     private lateinit var body:LinearLayout
+    private var pageScroll: ScrollView? = null
     private lateinit var badge:TextView
     private val isTv by lazy {
         packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
@@ -90,6 +94,7 @@ class MainActivity:Activity() {
     private var agentBusy = false
     private var agentResult = ""
     private var agentError = false
+    private var agentViews: AgentViews? = null
     private var helpText: String? = null
     private var helpOnline = false
     private var helpLoading = false
@@ -97,6 +102,7 @@ class MainActivity:Activity() {
     private var helpSection = "setup"
     private val installedVersion by lazy { MobileUpdates.installedVersion(this) }
     private class AboutUpdateViews(val status: TextView, val check: Button, val actions: LinearLayout)
+    private class AgentViews(val server: Button, val check: Button, val install: Button, val status: TextView)
     private class SpeedViews(val status:TextView,val steps:TextView,val down:TextView,val up:TextView,val ping:TextView,val start:Button)
     private val speedTick=object:Runnable{
         override fun run(){
@@ -240,7 +246,7 @@ class MainActivity:Activity() {
         if ((palette === Palette.dark) == dark) return
         if (page.endsWith("Editor")) formDraft = captureEditorDraft()
         applyAppearance(dark)
-        render()
+        render(keepTvPosition = true)
     }
 
     @Deprecated("Platform back callback")
@@ -270,13 +276,19 @@ class MainActivity:Activity() {
         else navigate(destination)
     }
     private fun navigate(destination:String){page=destination;formDraft=null;render()}
-    private fun render(){
+    private fun render(keepTvPosition: Boolean = false){
+        val oldScroll = pageScroll?.takeIf { isTv && keepTvPosition }
+        val oldOffset = oldScroll?.scrollY
+        val oldFocus = oldScroll?.findFocus()
+        val focusId = oldFocus?.id ?: View.NO_ID
+        val focusTag = oldFocus?.tag as? String
+        pageScroll = null
         heroTitle=null;heroDetail=null;connectButton=null;downSpeed=null;upSpeed=null;downTotal=null;upTotal=null;chart=null;logView=null
         connectionLayers=null;connectionProbes=null;checkConnectionButton=null
         chartPeaks=null;appTrafficList=null;appTrafficEmpty=null;appTrafficTitle=null;appTrafficRows.clear()
         nameField=null;hostField=null;portField=null;userField=null;serverSpinner=null;exitView=null;speedViews=null
         sshCheckButton=null;fingerprintCheckButton=null;serverCheckView=null;fingerprintView=null
-        aboutUpdate=null;shownUpdate=null;updateNotice=null
+        aboutUpdate=null;shownUpdate=null;updateNotice=null;agentViews=null
         main.removeCallbacks(speedTick)
         proxyUdpReceive=null;proxyUdpAgentReceive=null
         val root=column().apply{
@@ -334,12 +346,34 @@ class MainActivity:Activity() {
         }
         setContentView(root)
         if(page=="apps")appsPage()else{
-            val scroll=ScrollView(this).apply{isFillViewport=true;clipToPadding=false};body=column().apply{setPadding(dp(pageInset),dp(8),dp(pageInset),dp(20))};scroll.addView(body);content.addView(scroll)
+            body=column().apply{setPadding(dp(pageInset),dp(8),dp(pageInset),dp(20))}
+            if(isTv&&page=="logs"){
+                content.addView(body, FrameLayout.LayoutParams(-1,-1))
+            }else{
+                val scroll=ScrollView(this).apply{isFillViewport=true;clipToPadding=false;addView(body)}
+                pageScroll=scroll
+                content.addView(scroll)
+            }
             when(page){"servers"->serversPage();"proxies"->proxiesPage();"logs"->logsPage();"serverEditor"->serverEditor();"proxyEditor"->proxyEditor()
                 "speed"->speedPage();"stats"->statsPage();"more"->morePage();"settings"->settingsPage()
                 "about"->aboutPage();"help"->helpPage();else->{page="home";homePage()}}
         }
-        if(isTv)activeNavigation?.requestFocus() else root.requestFocus()
+        if(isTv){
+            val scroll = pageScroll
+            val target = scroll?.let {
+                (if (focusId == View.NO_ID) null else it.findViewById<View>(focusId))
+                    ?: focusTag?.let { tag -> it.findViewWithTag<View>(tag) }
+            }
+            if(target?.requestFocus()!=true)activeNavigation?.requestFocus()
+            if(scroll!=null && oldOffset!=null){
+                scroll.whenLaidOut {
+                    scroll.scrollTo(0,oldOffset)
+                    if(target?.isFocused==true && target!==scroll){
+                        target.requestRectangleOnScreen(Rect(0,0,target.width,target.height),true)
+                    }
+                }
+            }
+        }else root.requestFocus()
     }
     private fun homePage(){
         val hero=card(palette.raised)
@@ -440,7 +474,7 @@ class MainActivity:Activity() {
             "$label · $value"
         }
         update(connectionProbes,summary)
-        checkConnectionButton?.isEnabled=usable && !running
+        checkConnectionButton?.setActionAvailable(usable && !running)
     }
 
     private fun refreshTraffic() {
@@ -505,11 +539,12 @@ class MainActivity:Activity() {
         body.addView(label("Одновременно используется один профиль. Локальный прокси доступен только на этом устройстве.",12,false,palette.muted),spaced(12))
         for(proxy in store.proxies()){
             val card=card();val title=row().apply{gravity=Gravity.CENTER_VERTICAL}
-            title.addView(RadioButton(uiContext).apply{isChecked=proxy.id==store.activeProxyId;isClickable=false;buttonTintList=ColorStateList.valueOf(palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
+            title.addView(RadioButton(uiContext).apply{isChecked=proxy.id==store.activeProxyId;isClickable=false;isFocusable=false;buttonTintList=ColorStateList.valueOf(palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
             title.addView(label(proxy.name,17,true),LinearLayout.LayoutParams(0,-2,1f));card.addView(title)
             card.addView(label("127.0.0.1:${proxy.port}  →  ${store.server(proxy.serverId)?.name?:"Сервер удалён"}",12,false,palette.muted),spaced(6))
             card.addView(label(if(proxy.id==store.activeProxyId)"Выбран для подключения" else "Нажмите, чтобы выбрать",11,false,if(proxy.id==store.activeProxyId)palette.accent else palette.muted),spaced(10))
-            card.setOnClickListener{attempt{unlocked();store.activeProxyId=proxy.id;render()}};tvCardFocus(card)
+            card.tag = proxy.id
+            card.setOnClickListener{attempt{unlocked();store.activeProxyId=proxy.id;render(keepTvPosition = true)}};tvCardFocus(card)
             card.addView(button("Изменить"){unlocked();editingId=proxy.id;navigate("proxyEditor")},spaced(12));body.addView(card,spaced(12))
         }
         if(store.proxies().isEmpty())emptyState("Создайте первый прокси","Выберите сервер, задайте название и локальный порт.")
@@ -593,6 +628,11 @@ class MainActivity:Activity() {
         tag = choices.map { it.first }
         setSelection(choices.indexOfFirst { it.first == selected }.coerceAtLeast(0))
         backgroundTintList = ColorStateList.valueOf(palette.accent)
+        if (isTv) {
+            id = R.id.server_picker
+            isFocusable = true
+            foreground = focusPanel(Color.TRANSPARENT, 12)
+        }
     }.also { body.addView(it, LinearLayout.LayoutParams(-1, dp(56))) }
 
     private fun selectedServerInEditor(): String? = (serverSpinner?.tag as? List<*>)
@@ -739,11 +779,10 @@ class MainActivity:Activity() {
             val line=row().apply{gravity=Gravity.CENTER_VERTICAL}
             val texts=column();texts.addView(label(title,15,true));texts.addView(label(hint,12,false,palette.muted),spaced(4))
             line.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
-            val switch=Switch(uiContext).apply{isChecked=value;contentDescription=title
-                thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.accent,palette.muted))
-                trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.raised,palette.border))
+            val switch=tunnelSwitch().apply{isChecked=value;contentDescription=title;tag=title
                 setOnCheckedChangeListener{_,on->change(on)}}
-            line.addView(switch);line.setOnClickListener{switch.isChecked=!switch.isChecked}
+            line.addView(switch)
+            if(!isTv)line.setOnClickListener{switch.isChecked=!switch.isChecked}
             parent.addView(line,spaced(14))
     }
 
@@ -761,9 +800,9 @@ class MainActivity:Activity() {
                     if (chosen == current) return@setSingleChoiceItems
                     store.appearance = chosen
                     applyAppearance(chosen.isDark(resources.configuration))
-                    render()
+                    render(keepTvPosition = true)
                 }.setNegativeButton("Отмена", null).show()
-        }, spaced(8))
+        }.apply { tag = "appearance" }, spaced(8))
         body.addView(appearance, spaced(16))
 
         val connection=card();connection.addView(label("Подключение",16,true))
@@ -819,28 +858,32 @@ class MainActivity:Activity() {
         if (server == null) {
             agent.addView(button("Добавить сервер") { go("servers") }, spaced(12))
         } else {
-            agent.addView(button("Сервер · ${server.name}") {
+            val chooseServer = button("Сервер · ${server.name}") {
                 val selectedIndex = servers.indexOf(server)
                 AlertDialog.Builder(uiContext).setTitle("Сервер")
                     .setSingleChoiceItems(servers.map { it.name }.toTypedArray(), selectedIndex) { dialog, index ->
                         dialog.dismiss()
                         agentServerId = servers[index].id
                         agentResult = ""
-                        render()
+                        render(keepTvPosition = true)
                     }.setNegativeButton("Отмена", null).show()
-            }.apply { isEnabled = !agentBusy }, spaced(12))
-            agent.addView(button("Проверить версию") { manageServerAgent(server, false) }
-                .apply { isEnabled = !agentBusy }, spaced(8))
-            agent.addView(button("Установить агент $installedVersion") {
+            }.apply { tag = "agent-server" }
+            agent.addView(chooseServer, spaced(12))
+            val checkAgent = button("Проверить версию") { manageServerAgent(server, false) }
+            agent.addView(checkAgent, spaced(8))
+            val status = label("", 13, false, palette.muted).apply {
+                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            }
+            agent.addView(status, spaced(8))
+            val installAgent = button("Установить агент $installedVersion") {
                 AlertDialog.Builder(uiContext).setTitle("Установить агент $installedVersion?")
                     .setMessage("Сервер «${server.name}». Новые подключения будут использовать установленную версию.")
                     .setNegativeButton("Отмена", null)
                     .setPositiveButton("Установить") { _, _ -> attempt { manageServerAgent(server, true) } }.show()
-            }.apply { isEnabled = !agentBusy }, spaced(8))
-            if (agentResult.isNotEmpty()) agent.addView(label(agentResult, 13, false,
-                if (agentError) palette.error else palette.text).apply {
-                accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-            }, spaced(12))
+            }
+            agent.addView(installAgent, spaced(8))
+            agentViews = AgentViews(chooseServer, checkAgent, installAgent, status)
+            refreshAgentCard()
         }
         body.addView(agent, spaced(12))
 
@@ -884,7 +927,7 @@ class MainActivity:Activity() {
         }
         update(views.status, message)
         views.status.setTextColor(if (status.error.isNotEmpty()) palette.error else palette.muted)
-        views.check.isEnabled = !status.checking && !status.downloading
+        views.check.setActionAvailable(!status.checking && !status.downloading)
         if (status.downloading && previous?.downloading == true) {
             (views.actions.getChildAt(0) as? ProgressBar)?.progress = updatePercent(status.received, total)
             return
@@ -923,6 +966,21 @@ class MainActivity:Activity() {
     private fun updatePercent(received: Long, total: Long) =
         if (total > 0) (received * 100 / total).toInt().coerceIn(0, 100) else 0
 
+    private fun refreshAgentCard(revealResult: Boolean = false) {
+        val views = agentViews ?: return
+        for (button in listOf(views.server, views.check, views.install)) {
+            button.setActionAvailable(!agentBusy)
+        }
+        views.status.visibility = if (agentResult.isEmpty()) View.GONE else View.VISIBLE
+        update(views.status, agentResult)
+        views.status.setTextColor(when {
+            agentError -> palette.error
+            agentBusy -> palette.muted
+            else -> palette.text
+        })
+        if (revealResult) revealTvResult(views.status, views.check, views.install)
+    }
+
     private fun manageServerAgent(server: ServerProfile, install: Boolean) {
         if (agentBusy) return
         val route = store.route(server.id)
@@ -930,7 +988,7 @@ class MainActivity:Activity() {
         agentBusy = true
         agentError = false
         agentResult = if (install) "Скачиваем и проверяем архив агента…" else "Подключаемся к серверу…"
-        render()
+        refreshAgentCard(revealResult = true)
         val proxy = MobileUpdates.proxy()
         Thread {
             val result = runCatching {
@@ -943,7 +1001,7 @@ class MainActivity:Activity() {
                         ReleaseUpdates.download(release, asset, archive, proxy)
                         runOnUiThread {
                             agentResult = "Передаём проверенный архив на сервер по SSH…"
-                            if (page == "about" && !isDestroyed && !isFinishing) render()
+                            if (!isDestroyed && !isFinishing) refreshAgentCard(revealResult = true)
                         }
                     }
                     store.withSshConfig(route) { config ->
@@ -965,7 +1023,7 @@ class MainActivity:Activity() {
                 agentBusy = false
                 agentError = result.isFailure
                 agentResult = result.getOrElse { it.message ?: "Не удалось выполнить операцию с агентом" }
-                if (page == "about" && !isDestroyed && !isFinishing) render()
+                if (!isDestroyed && !isFinishing) refreshAgentCard(revealResult = true)
             }
         }.start()
     }
@@ -984,7 +1042,7 @@ class MainActivity:Activity() {
                     if (!refreshed.isNullOrBlank()) {
                         helpOnline = true
                         helpText = refreshed
-                        if (page == "help" && !isDestroyed && !isFinishing) render()
+                        if (page == "help" && !isDestroyed && !isFinishing) render(keepTvPosition = true)
                     }
                 }
             }.start()
@@ -996,6 +1054,8 @@ class MainActivity:Activity() {
             setTextColor(palette.text)
             setHintTextColor(palette.muted)
             setText(helpQuery)
+            tag = "help-search"
+            tvOptionFocus(this)
         }
         body.addView(search, spaced(12))
         body.addView(button("Открыть на сайте") {
@@ -1075,7 +1135,7 @@ class MainActivity:Activity() {
     private fun statsPage(){
         heading("Статистика","Сеансы туннеля и трафик приложений")
         val periods=listOf("today" to "Сегодня","week" to "7 дней","month" to "30 дней","all" to "Всё время")
-        body.addView(segmented(periods,statsPeriod){statsPeriod=it;render()},spaced(16))
+        body.addView(segmented(periods,statsPeriod){statsPeriod=it;render(keepTvPosition = true)},spaced(16))
         val now=System.currentTimeMillis()/1000
         val from=when(statsPeriod){
             "today"->java.util.Calendar.getInstance().apply{set(java.util.Calendar.HOUR_OF_DAY,0);set(java.util.Calendar.MINUTE,0);set(java.util.Calendar.SECOND,0)}.timeInMillis/1000
@@ -1136,7 +1196,7 @@ class MainActivity:Activity() {
         if(shown.isNotEmpty()||SessionHistory.load(this,TunnelVpnService.sessionId).isNotEmpty())
             body.addView(button("Очистить историю",danger=true){
                 AlertDialog.Builder(uiContext).setTitle("Удалить историю?").setMessage("Сеансы и трафик приложений за всё время удалятся с этого телефона.")
-                    .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->SessionHistory.clear(this,TunnelVpnService.sessionId);render()}.show()
+                    .setNegativeButton("Отмена",null).setPositiveButton("Удалить"){_,_->SessionHistory.clear(this,TunnelVpnService.sessionId);render(keepTvPosition = true)}.show()
             },spaced(12))
         body.addView(label("История хранится только на этом телефоне: названия приложений, время и объём трафика, без адресов.",11,false,palette.muted),spaced(12))
     }
@@ -1157,8 +1217,8 @@ class MainActivity:Activity() {
     private fun speedPage(){
         val live=SpeedTest.live
         heading("Скорость","Тесты через туннель и без него")
-        body.addView(segmented(listOf("tunnel" to "Через туннель","direct" to "Без туннеля"),if(speedDirect)"direct" else "tunnel",!live.running){speedDirect=it=="direct";render()},spaced(16))
-        if(speedKind!="mlab")body.addView(segmented(listOf("cloudflare" to "Cloudflare","librespeed" to "LibreSpeed"),speedProvider,!live.running){speedProvider=it;render()},spaced(8))
+        body.addView(segmented(listOf("tunnel" to "Через туннель","direct" to "Без туннеля"),if(speedDirect)"direct" else "tunnel",!live.running){speedDirect=it=="direct";render(keepTvPosition = true)},spaced(16))
+        if(speedKind!="mlab")body.addView(segmented(listOf("cloudflare" to "Cloudflare","librespeed" to "LibreSpeed"),speedProvider,!live.running){speedProvider=it;render(keepTvPosition = true)},spaced(8))
         body.addView(label(when{
             speedKind=="mlab"->"M-Lab сам выбирает ближайший сервер на этом пути."
             speedProvider=="librespeed"->"Открытые серверы LibreSpeed: выбирается тот, что быстрее отвечает на этом пути."
@@ -1191,12 +1251,13 @@ class MainActivity:Activity() {
             val chosen=kind.id==speedKind
             val item=card(if(chosen)palette.raised else palette.surface)
             val title=row().apply{gravity=Gravity.CENTER_VERTICAL}
-            title.addView(RadioButton(uiContext).apply{isChecked=chosen;isClickable=false;buttonTintList=ColorStateList.valueOf(palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
+            title.addView(RadioButton(uiContext).apply{isChecked=chosen;isClickable=false;isFocusable=false;buttonTintList=ColorStateList.valueOf(palette.accent);importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO})
             title.addView(label(kind.title,15,true,if(chosen)palette.accent else palette.text),LinearLayout.LayoutParams(0,-2,1f))
             title.addView(label("${kind.time} · ${kind.traffic}",11,false,palette.muted))
             item.addView(title);item.addView(label(kind.text,12,false,palette.muted),spaced(6))
             item.contentDescription=kind.title
-            item.setOnClickListener{if(!SpeedTest.live.running){speedKind=kind.id;render()}};tvCardFocus(item)
+            item.tag = kind.id
+            item.setOnClickListener{if(!SpeedTest.live.running){speedKind=kind.id;render(keepTvPosition = true)}};tvCardFocus(item)
             body.addView(item,spaced(8))
         }
 
@@ -1229,7 +1290,7 @@ class MainActivity:Activity() {
         }
         if(history.isNotEmpty())body.addView(button("Очистить историю",danger=true){
             AlertDialog.Builder(uiContext).setTitle("Удалить историю замеров?").setNegativeButton("Отмена",null)
-                .setPositiveButton("Удалить"){_,_->SpeedHistory.clear(this);render()}.show()
+                .setPositiveButton("Удалить"){_,_->SpeedHistory.clear(this);render(keepTvPosition = true)}.show()
         },spaced(12))
         refreshSpeed();main.removeCallbacks(speedTick);main.post(speedTick)
     }
@@ -1237,7 +1298,7 @@ class MainActivity:Activity() {
     private fun refreshSpeed(){
         val views=speedViews?:return
         val live=SpeedTest.live
-        if(speedWasRunning&&!live.running){speedWasRunning=false;render();return}
+        if(speedWasRunning&&!live.running){speedWasRunning=false;render(keepTvPosition = true);return}
         speedWasRunning=live.running
         val shown=if(live.running)live.results else live.last?.results
         update(views.status,when{
@@ -1324,8 +1385,7 @@ class MainActivity:Activity() {
                 val icon = ImageView(this@MainActivity)
                 header.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
                 val texts=column();val name=label("",14,true);val pkg=label("",10,false,palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));header.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
-                val toggle=Switch(uiContext).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.accent,palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.raised,palette.border))}
-                if(isTv){toggle.isFocusable=true;toggle.background=focusPanel(palette.background,10)}
+                val toggle=tunnelSwitch().apply{minimumWidth=dp(if(isTv)64 else 52);minimumHeight=dp(48)}
                 header.addView(toggle)
                 addView(header)
                 if(!isTv)header.setOnClickListener { toggle.isChecked = !toggle.isChecked }
@@ -1335,7 +1395,7 @@ class MainActivity:Activity() {
                     minimumHeight = dp(48)
                     setTextColor(palette.text)
                     buttonTintList = toggle.thumbTintList
-                    if(isTv){isFocusable=true;background=focusPanel(palette.background,10)}
+                    tvOptionFocus(this)
                 }
                 val guard = option("Блокировать при обрыве туннеля")
                 val priority = option("UDP через второй SSH")
@@ -1379,8 +1439,49 @@ class MainActivity:Activity() {
 
     private fun logsPage(){
         heading("Журнал","Диагностика подключения и ошибок")
-        body.addView(button("Копировать журнал"){(getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(ClipData.newPlainText("Secret Tunnel",diagnostics()));toast("Журнал скопирован")},spaced(16))
-        logView=label(diagnostics(),11,false,palette.muted).apply{typeface=Typeface.MONOSPACE;setTextIsSelectable(true)}.also{body.addView(it,spaced(16))}
+        val copy = button("Копировать журнал") {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Secret Tunnel", diagnostics()))
+            toast("Журнал скопирован")
+        }
+        body.addView(copy, spaced(16))
+        val events = label(diagnostics(),11,false,palette.muted).apply {
+            typeface = Typeface.MONOSPACE
+            if (!isTv) setTextIsSelectable(true)
+        }
+        logView = events
+        if (!isTv) {
+            body.addView(events, spaced(16))
+            return
+        }
+        val scroll = ScrollView(this).apply {
+            id = View.generateViewId()
+            tag = "log-scroll"
+            isFocusable = true
+            isScrollbarFadingEnabled = false
+            scrollBarStyle = View.SCROLLBARS_INSIDE_INSET
+            background = focusPanel(palette.surface, 12, palette.border)
+            setPadding(dp(12),dp(12),dp(12),dp(12))
+            addView(events)
+            setOnKeyListener { _, key, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                val step = maxOf(dp(48), height / 4)
+                when (key) {
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        if (canScrollVertically(-1)) scrollBy(0, -step) else copy.requestFocus()
+                        true
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        scrollBy(0, step)
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
+        copy.nextFocusDownId = scroll.id
+        body.addView(scroll, LinearLayout.LayoutParams(-1,0,1f).apply{topMargin=dp(16)})
+        pageScroll = scroll
     }
     private fun activeTunnelDetails(): String {
         val status = TunnelVpnService.detail
@@ -1479,18 +1580,19 @@ class MainActivity:Activity() {
         val running=status?.state==CheckState.RUNNING
         val visible=status?.takeIf{it.id==editingId}
         val enabled=!running&&!checking&&!pendingTrust
-        listOf(sshCheckButton,fingerprintCheckButton).forEach {
-            it?.isEnabled=enabled
-            it?.alpha=if(enabled)1f else .45f
-        }
+        sshCheckButton?.setActionAvailable(enabled)
+        fingerprintCheckButton?.setActionAvailable(enabled)
         serverCheckView?.apply {
             visibility=if(visible==null)View.GONE else View.VISIBLE
-            update(this,visible?.text.orEmpty())
+            val result = visible?.text.orEmpty()
+            val changed = text.toString() != result
+            update(this, result)
             setTextColor(when(visible?.state) {
                 CheckState.PASSED -> palette.accent
                 CheckState.FAILED -> palette.error
                 else -> palette.muted
             })
+            if(changed && visible!=null) revealTvResult(this, sshCheckButton, fingerprintCheckButton)
         }
     }
 
@@ -1621,7 +1723,7 @@ class MainActivity:Activity() {
                 }
                 scoped.importKey(privateKey);""
             }catch(e:Exception){e.message?:"Не удалось зарегистрировать ключ"}finally{bytes?.fill(0);device?.delete()}
-            runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed){if(error.isEmpty()){render();message("Ключ телефона добавлен и проверен. Можно подключаться.")}else message(error)}}
+            runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed){if(error.isEmpty()){render(keepTvPosition = true);message("Ключ телефона добавлен и проверен. Можно подключаться.")}else message(error)}}
         }.start()
     }
     @Deprecated("Platform activity result")
@@ -1643,7 +1745,7 @@ class MainActivity:Activity() {
                     val bytes=contentResolver.openInputStream(uri)!!.use{input->val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(8192);while(out.size()<=1048576){val count=input.read(buffer);if(count<0)break;out.write(buffer,0,count)};out.toByteArray()}
                     try{SettingsStore(this,id).importKey(bytes)}finally{bytes.fill(0)};""
                 }catch(e:Exception){e.message?:"Не удалось импортировать ключ"}
-                runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed){if(error.isEmpty()){render();toast("SSH-ключ добавлен")}else message(error)}}
+                runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed){if(error.isEmpty()){render(keepTvPosition = true);toast("SSH-ключ добавлен")}else message(error)}}
             }.start()
         }
     }
@@ -1664,7 +1766,51 @@ class MainActivity:Activity() {
         text=value;isAllCaps=false;textSize=14f;minimumHeight=dp(50);setPadding(dp(12),dp(9),dp(12),dp(9))
         background=focusPanel(if(primary)palette.accent else palette.raised,14,if(primary)0 else palette.border,if(primary)palette.onAccent else palette.accent)
         setTextColor(if(danger)palette.error else if(primary)palette.onAccent else palette.accent);setOnClickListener{attempt(action)}
-        if(isTv){isFocusable=true;textSize=16f}
+        if(isTv){isFocusable=true;textSize=16f;tag=value}
+    }
+    private fun Button.setActionAvailable(available: Boolean) {
+        // The focused action keeps its place while its result arrives.
+        if (isTv) isClickable = available else isEnabled = available
+        alpha = if (available) 1f else if (isTv) .7f else .45f
+    }
+    private fun revealTvResult(status: TextView, vararg actions: View?) {
+        if (!isTv || actions.none { it?.isFocused == true }) return
+        status.whenLaidOut {
+            if (status.isShown && actions.any { it?.isFocused == true }) {
+                status.requestRectangleOnScreen(Rect(0,0,status.width,minOf(status.height,status.lineHeight * 2)),true)
+            }
+        }
+    }
+    private fun View.whenLaidOut(action: () -> Unit) {
+        if (isLaidOut && !isLayoutRequested) {
+            action()
+            return
+        }
+        addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+            override fun onLayoutChange(
+                view: View, left: Int, top: Int, right: Int, bottom: Int,
+                oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int,
+            ) {
+                view.removeOnLayoutChangeListener(this)
+                action()
+            }
+        })
+    }
+    private fun tunnelSwitch() = Switch(uiContext).apply {
+        thumbTintList = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.accent,palette.muted))
+        trackTintList = ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.raised,palette.border))
+        tvOptionFocus(this)
+        if (isTv) {
+            minimumWidth = dp(64)
+            setPaddingRelative(dp(8),0,dp(8),0)
+        }
+    }
+    private fun tvOptionFocus(view: View) {
+        if (isTv) {
+            view.isFocusable = true
+            view.minimumHeight = dp(48)
+            view.foreground = focusPanel(Color.TRANSPARENT, 10)
+        }
     }
     private fun focusPanel(fill:Int,radius:Int,stroke:Int=0,focusColor:Int=palette.accent):Drawable {
         val idle=palette.panel(fill,dp(radius).toFloat(),stroke)

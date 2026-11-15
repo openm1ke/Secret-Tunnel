@@ -38,7 +38,7 @@ internal object MobileUpdates {
         status = previous.copy(checking = true, error = "")
         worker.execute {
             status = try {
-                val release = ReleaseUpdates.latest(port)
+                val release = ReleaseUpdates.latest(port, tv = BuildConfig.FLAVOR == "tv")
                 if (previous.release == release) previous.copy(error = "")
                 else Status(release = release)
             } catch (error: Exception) {

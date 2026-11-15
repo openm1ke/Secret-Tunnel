@@ -31,6 +31,17 @@ class ReleaseUpdatesTest {
         }
     }
 
+    @Test fun tvSelectsItsOwnApkAndDoesNotFallBackToMobile() {
+        val tvName = "SecretTunnel-0.3.24-android-tv.apk"
+        val tvAsset = JSONObject().put("name", tvName).put("size", 42)
+            .put("browser_download_url", "$PROJECT_URL/releases/download/v0.3.24/$tvName")
+        val json = JSONObject().put("tag_name", "v0.3.24").put("assets", JSONArray().put(asset))
+        assertNull(parseAppRelease(json, tv = true).apk)
+        json.getJSONArray("assets").put(tvAsset)
+        assertEquals(tvName, parseAppRelease(json, tv = true).apk?.name)
+        assertEquals(name, parseAppRelease(json).apk?.name)
+    }
+
     @Test fun versionsCompareNumerically() {
         assertTrue(compareReleaseVersions("0.3.10", "0.3.9") > 0)
         assertTrue(compareReleaseVersions("0.3.24", "1.0.0") < 0)

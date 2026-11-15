@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Android TV gets a separate signed APK and a scrollable vertical menu with every section accessible from the remote.
+- Fixed VPN startup on 32-bit ARM Android TV devices. Android now reports native startup errors and unexpected exits during connection.
+
 ## 0.3.29 — 2026-11-15
 
 - Desktop: server checks return a result or a timeout without blocking tunnel controls. Fixed a crash in the embedded SSH check that left the button waiting.

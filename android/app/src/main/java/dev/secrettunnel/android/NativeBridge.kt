@@ -1,7 +1,17 @@
 package dev.secrettunnel.android
 
 object NativeBridge {
-    init { System.loadLibrary("secret_tunnel_android") }
+    private val loadError = try {
+        System.loadLibrary("secret_tunnel_android")
+        null
+    } catch (error: LinkageError) {
+        error
+    }
+
+    internal fun requireAvailable() {
+        loadError?.let { throw IllegalStateException("Не удалось загрузить SSH: ${it.message}", it) }
+    }
+
     external fun start(config: String, service: TunnelVpnService): String
     external fun probe(config: String): String
     external fun checkServer(config: String): String

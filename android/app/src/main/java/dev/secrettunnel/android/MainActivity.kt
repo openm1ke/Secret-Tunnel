@@ -24,6 +24,11 @@ class MainActivity:Activity() {
     private lateinit var content:FrameLayout
     private lateinit var body:LinearLayout
     private lateinit var badge:TextView
+    private val isTv by lazy {
+        packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
+            resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION
+    }
+    private val pageInset get() = if (isTv) 28 else 20
     private var page="home"
     private var editingId=""
     private var importId=""
@@ -103,8 +108,11 @@ class MainActivity:Activity() {
     private val main=Handler(Looper.getMainLooper())
     private val meter=TrafficMeter()
     private var lastStatus=JSONObject()
+    private var previousConnectionFailure: String? = null
+    private var startupFailed = false
     private var catalog=listOf<AppEntry>()
-    @Volatile private var catalogLoaded=false
+    private var catalogLoaded=false
+    private var catalogError: String? = null
     private val selected=mutableSetOf<String>()
     private val protectedApps = mutableSetOf<String>()
     private val iconCache=android.util.LruCache<String,Drawable>(32)
@@ -112,7 +120,9 @@ class MainActivity:Activity() {
     private val poll=object:Runnable {
         override fun run(){
             try{
-                lastStatus=JSONObject(NativeBridge.status())
+                if (TunnelVpnService.nativeStatusAvailable) {
+                    lastStatus=JSONObject(NativeBridge.status())
+                }
                 val rx=lastStatus.optLong("rx");val tx=lastStatus.optLong("tx")
                 val rate=meter.sample(SystemClock.elapsedRealtime(),rx,tx)
                 val phase=TunnelVpnService.phase
@@ -141,9 +151,20 @@ class MainActivity:Activity() {
     }
     override fun onCreate(savedInstanceState:Bundle?){
         super.onCreate(savedInstanceState)
+        try {
+            initialize(savedInstanceState)
+        } catch (error: Exception) {
+            showStartupError(error)
+        } catch (error: LinkageError) {
+            showStartupError(error)
+        }
+    }
+
+    private fun initialize(savedInstanceState: Bundle?) {
         store=SettingsStore(this);selected.addAll(store.packages);protectedApps.addAll(store.protectedPackages)
         applyAppearance(store.appearance.isDark(resources.configuration))
-        page=savedInstanceState?.getString("page")?:"home";editingId=savedInstanceState?.getString("editingId").orEmpty()
+        page=savedInstanceState?.getString("page")?.takeUnless{isTv&&it=="more"}?:"home"
+        editingId=savedInstanceState?.getString("editingId").orEmpty()
         helpSection=savedInstanceState?.getString("helpSection")?:"setup"
         helpQuery=savedInstanceState?.getString("helpQuery").orEmpty()
         agentServerId=savedInstanceState?.getString("agentServerId")
@@ -155,10 +176,32 @@ class MainActivity:Activity() {
         listOf("enrollment-key.runtime","device-key.runtime").forEach{java.io.File(filesDir,it).delete()}
         if(Build.VERSION.SDK_INT>=33)onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT){handleBack()}
         render();scanApps()
+        previousConnectionFailure = ConnectionAttempt.previousFailure(this)
+        if (savedInstanceState == null) previousConnectionFailure?.let { failure ->
+            AlertDialog.Builder(uiContext).setTitle("Предыдущее завершение приложения")
+                .setMessage(failure).setPositiveButton("Понятно", null).show()
+        }
         if (store.checkUpdates) MobileUpdates.check(automatic = true)
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"),101)
     }
-    override fun onResume(){super.onResume();main.removeCallbacks(poll);main.post(poll);if(page=="speed"){main.removeCallbacks(speedTick);main.post(speedTick)}}
+
+    private fun showStartupError(error: Throwable) {
+        startupFailed = true
+        android.util.Log.e("SecretTunnelStartup", "Не удалось открыть приложение", error)
+        val message = listOfNotNull(error.javaClass.simpleName, error.localizedMessage).joinToString("\n")
+        val device = "Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}\n${Build.SUPPORTED_ABIS.joinToString()}"
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(android.graphics.Color.BLACK)
+            addView(TextView(this@MainActivity).apply {
+                text = "Secret Tunnel\n\nНе удалось открыть приложение\n\n$message\n\n$device"
+                textSize = 20f
+                setTextColor(android.graphics.Color.WHITE)
+                setPadding(dp(32), dp(24), dp(32), dp(24))
+            })
+        })
+    }
+
+    override fun onResume(){super.onResume();if(startupFailed)return;main.removeCallbacks(poll);main.post(poll);if(page=="speed"){main.removeCallbacks(speedTick);main.post(speedTick)}}
     override fun onPause(){main.removeCallbacks(poll);main.removeCallbacks(speedTick);super.onPause()}
     override fun onSaveInstanceState(out:Bundle){
         out.putString("page",page);out.putString("editingId",editingId);out.putString("importId",importId);out.putString("pendingProxy",pendingProxy);out.putString("search",searchQuery)
@@ -192,6 +235,7 @@ class MainActivity:Activity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
+        if (startupFailed) return
         val dark = store.appearance.isDark(newConfig)
         if ((palette === Palette.dark) == dark) return
         if (page.endsWith("Editor")) formDraft = captureEditorDraft()
@@ -202,13 +246,23 @@ class MainActivity:Activity() {
     @Deprecated("Platform back callback")
     override fun onBackPressed(){handleBack()}
     private fun handleBack(){when{
+        startupFailed->finish()
         page.endsWith("Editor")->go(if(page=="serverEditor")"servers" else "proxies")
         page=="help"->go("about")
-        page in moreSections->go("more")
+        !isTv && page in moreSections->go("more")
         page!="home"->go("home")
         else->finish()
     }}
     private val moreSections=setOf("servers","proxies","settings","logs","about","help")
+    private val phoneDestinations=listOf(
+        "home" to "Главная", "apps" to "Приложения", "speed" to "Скорость",
+        "stats" to "Статистика", "more" to "Ещё",
+    )
+    private val tvDestinations=listOf(
+        "home" to "Главная", "apps" to "Приложения", "servers" to "Серверы", "proxies" to "Прокси",
+        "speed" to "Скорость", "stats" to "Статистика", "logs" to "Журнал",
+        "settings" to "Настройки", "about" to "О программе", "help" to "Справка",
+    )
     private fun go(destination:String){
         if(checking||pendingTrust){toast("Дождитесь завершения проверки");return}
         if(page.endsWith("Editor")&&formSignature()!=formSnapshot)AlertDialog.Builder(uiContext).setTitle("Сохранить изменения?").setMessage("В форме есть несохранённые данные.")
@@ -225,30 +279,67 @@ class MainActivity:Activity() {
         aboutUpdate=null;shownUpdate=null;updateNotice=null
         main.removeCallbacks(speedTick)
         proxyUdpReceive=null;proxyUdpAgentReceive=null
-        val root=column().apply{setBackgroundColor(palette.background);isFocusableInTouchMode=true}
-        val header=row().apply{setPadding(dp(20),dp(15),dp(20),dp(12));gravity=Gravity.CENTER_VERTICAL}
+        val root=column().apply{
+            setBackgroundColor(palette.background)
+            isFocusableInTouchMode=!isTv
+            if(isTv)setPadding(dp(32),dp(18),dp(32),dp(18))
+        }
+        val header=row().apply{setPadding(dp(pageInset),dp(15),dp(pageInset),dp(12));gravity=Gravity.CENTER_VERTICAL}
         header.addView(label("Secret Tunnel",21,true),LinearLayout.LayoutParams(0,-2,1f))
         badge=label("Остановлен",11).apply{setPadding(dp(12),dp(7),dp(12),dp(7));background=palette.panel(palette.raised,dp(20).toFloat())};header.addView(badge);root.addView(header)
-        content=FrameLayout(this);root.addView(content,LinearLayout.LayoutParams(-1,0,1f))
-        val nav=row().apply{setPadding(dp(8),dp(8),dp(8),dp(9));setBackgroundColor(palette.surface)}
-        for((id,title) in listOf("home" to "Главная","apps" to "Приложения","speed" to "Скорость","stats" to "Статистика","more" to "Ещё")){
-            val active=page==id||(id=="more"&&(page in moreSections||page.endsWith("Editor")))
-            nav.addView(column().apply{gravity=Gravity.CENTER;minimumHeight=dp(56);contentDescription=title
-                if(active)background=palette.panel(palette.raised,dp(15).toFloat())
+        content=FrameLayout(this)
+        val nav=(if(isTv)column() else row()).apply{
+            setPadding(dp(8),dp(8),dp(8),dp(9))
+            if(!isTv)setBackgroundColor(palette.surface)
+        }
+        val activePage=when(page){
+            "serverEditor"->"servers"
+            "proxyEditor"->"proxies"
+            else->page
+        }
+        var activeNavigation:View?=null
+        for((id,title) in if(isTv)tvDestinations else phoneDestinations){
+            val active=activePage==id||(id=="more"&&activePage in moreSections)
+            val destination=(if(isTv)row() else column()).apply{
+                gravity=if(isTv)Gravity.CENTER_VERTICAL else Gravity.CENTER
+                minimumHeight=dp(if(isTv)48 else 56);contentDescription=title
+                if(isTv){setPadding(dp(12),0,dp(8),0);background=focusPanel(if(active)palette.raised else palette.surface,15)}
+                else if(active)background=palette.panel(palette.raised,dp(15).toFloat())
                 addView(NavigationIcon(this@MainActivity,id,if(active)palette.accent else palette.muted),LinearLayout.LayoutParams(dp(23),dp(23)))
-                addView(label(title,11,active,if(active)palette.accent else palette.muted).apply{
-                    gravity=Gravity.CENTER;maxLines=1;setPadding(dp(2),dp(5),dp(2),0)
-                    setAutoSizeTextTypeUniformWithConfiguration(9,11,1,android.util.TypedValue.COMPLEX_UNIT_SP)
-                },LinearLayout.LayoutParams(-1,dp(24)))
+                addView(label(title,if(isTv)14 else 11,active,if(active)palette.accent else palette.muted).apply{
+                    maxLines=1
+                    if(isTv)setPadding(dp(10),0,0,0)
+                    else {gravity=Gravity.CENTER;setPadding(dp(2),dp(5),dp(2),0)
+                        setAutoSizeTextTypeUniformWithConfiguration(9,11,1,android.util.TypedValue.COMPLEX_UNIT_SP)}
+                },if(isTv)LinearLayout.LayoutParams(0,-2,1f) else LinearLayout.LayoutParams(-1,dp(24)))
                 setOnClickListener{go(id)}
-            },LinearLayout.LayoutParams(0,-2,1f))
-        };root.addView(nav);setContentView(root)
+                if(isTv)isFocusable=true
+            }
+            nav.addView(destination,if(isTv) LinearLayout.LayoutParams(-1,-2) else LinearLayout.LayoutParams(0,-2,1f))
+            if(active)activeNavigation=destination
+        }
+        if(isTv){
+            val workspace=row()
+            val menu=ScrollView(this).apply{
+                background=palette.panel(palette.surface,dp(16).toFloat())
+                isFocusable=false
+                isScrollbarFadingEnabled=false
+                addView(nav)
+            }
+            workspace.addView(menu,LinearLayout.LayoutParams(dp(180),-1))
+            workspace.addView(content,LinearLayout.LayoutParams(0,-1,1f))
+            root.addView(workspace,LinearLayout.LayoutParams(-1,0,1f))
+        }else{
+            root.addView(content,LinearLayout.LayoutParams(-1,0,1f));root.addView(nav)
+        }
+        setContentView(root)
         if(page=="apps")appsPage()else{
-            val scroll=ScrollView(this).apply{isFillViewport=true;clipToPadding=false};body=column().apply{setPadding(dp(20),dp(8),dp(20),dp(20))};scroll.addView(body);content.addView(scroll)
+            val scroll=ScrollView(this).apply{isFillViewport=true;clipToPadding=false};body=column().apply{setPadding(dp(pageInset),dp(8),dp(pageInset),dp(20))};scroll.addView(body);content.addView(scroll)
             when(page){"servers"->serversPage();"proxies"->proxiesPage();"logs"->logsPage();"serverEditor"->serverEditor();"proxyEditor"->proxyEditor()
                 "speed"->speedPage();"stats"->statsPage();"more"->morePage();"settings"->settingsPage()
                 "about"->aboutPage();"help"->helpPage();else->{page="home";homePage()}}
-        };root.requestFocus()
+        }
+        if(isTv)activeNavigation?.requestFocus() else root.requestFocus()
     }
     private fun homePage(){
         val hero=card(palette.raised)
@@ -274,11 +365,11 @@ class MainActivity:Activity() {
         profile.addView(label((proxy?.name?:"Профиль не выбран")+"  ›",16,true,palette.accent))
         profile.addView(label(server?.let{"${it.name} · ${it.host.ifBlank{"адрес не указан"}}"}?:"Добавьте сервер и прокси",13,false,palette.muted),spaced(4))
         if (server?.jumpServerId != null) profile.addView(label(routeLabel(server.id),13,false,palette.muted),spaced(5))
-        profile.setOnClickListener{go("proxies")};profile.contentDescription="Выбрать профиль подключения";body.addView(profile,spaced(12))
+        profile.setOnClickListener{go("proxies")};tvCardFocus(profile);profile.contentDescription="Выбрать профиль подключения";body.addView(profile,spaced(12))
         val exit=card();exit.addView(label("Выход в интернет",12,true,palette.muted))
         exitView=label(exitLine(),15,true).also{exit.addView(it,spaced(6))}
         if(TunnelVpnService.active&&store.hideSensitive)exit.addView(label("Нажмите, чтобы показать или скрыть IP",11,false,palette.muted),spaced(6))
-        exit.setOnClickListener{revealIp=!revealIp;update(exitView,exitLine())};exit.contentDescription="Внешний IP и страна выхода"
+        exit.setOnClickListener{revealIp=!revealIp;update(exitView,exitLine())};tvCardFocus(exit);exit.contentDescription="Внешний IP и страна выхода"
         body.addView(exit,spaced(12))
         val metrics=row()
         fun metric(title:String,color:Int,down:Boolean):LinearLayout{
@@ -418,7 +509,7 @@ class MainActivity:Activity() {
             title.addView(label(proxy.name,17,true),LinearLayout.LayoutParams(0,-2,1f));card.addView(title)
             card.addView(label("127.0.0.1:${proxy.port}  →  ${store.server(proxy.serverId)?.name?:"Сервер удалён"}",12,false,palette.muted),spaced(6))
             card.addView(label(if(proxy.id==store.activeProxyId)"Выбран для подключения" else "Нажмите, чтобы выбрать",11,false,if(proxy.id==store.activeProxyId)palette.accent else palette.muted),spaced(10))
-            card.setOnClickListener{attempt{unlocked();store.activeProxyId=proxy.id;render()}}
+            card.setOnClickListener{attempt{unlocked();store.activeProxyId=proxy.id;render()}};tvCardFocus(card)
             card.addView(button("Изменить"){unlocked();editingId=proxy.id;navigate("proxyEditor")},spaced(12));body.addView(card,spaced(12))
         }
         if(store.proxies().isEmpty())emptyState("Создайте первый прокси","Выберите сервер, задайте название и локальный порт.")
@@ -453,7 +544,7 @@ class MainActivity:Activity() {
         keyCard.addView(button(if(scoped.hasKey())"Заменить SSH-ключ" else "Импортировать SSH-ключ"){
             unlocked();saveServerForm();importId=editingId;startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),102)
         },spaced(14))
-        keyCard.addView(button("Создать отдельный ключ телефона"){
+        keyCard.addView(button(if(isTv)"Создать ключ для телевизора" else "Создать отдельный ключ телефона"){
             unlocked();saveServerForm();require(scoped.hasKey()){"Сначала импортируйте уже разрешённый SSH-ключ"};verifyServer(editingId){enrollDevice(editingId)}
         },spaced(8));body.addView(keyCard,spaced(20))
         val trust=card();trust.addView(label("Подлинность сервера",17,true))
@@ -488,7 +579,8 @@ class MainActivity:Activity() {
         val originalSignature=formSignature()
         restoreDraft()
         body.addView(label("Адрес: 127.0.0.1. Порт используется локальным SOCKS5-прокси и VPN выбранных приложений.",13,false,palette.muted),spaced(14))
-        body.addView(label("Шифрование, очередь, приоритет звонков и окна UDP — в «Ещё» → «Настройки», они общие для всех подключений.",12,false,palette.muted),spaced(10))
+        val settingsPath=if(isTv)"«Настройки»" else "«Ещё» → «Настройки»"
+        body.addView(label("Шифрование, очередь, приоритет звонков и окна UDP — в разделе $settingsPath. Они общие для всех подключений.",12,false,palette.muted),spaced(10))
         body.addView(button("Сохранить прокси",true){unlocked();saveProxyForm();navigate("proxies")},spaced(20))
         if(proxy!=null)body.addView(button("Удалить прокси",danger=true){unlocked();confirmDelete("Удалить прокси ${proxy.name}?"){store.deleteProxy(proxy.id);navigate("proxies")}},spaced(8))
         formSnapshot=originalSignature
@@ -634,7 +726,7 @@ class MainActivity:Activity() {
         heading("Ещё","Подключения, настройки и журнал")
         fun item(id:String,title:String,detail:String){
             val card=card();card.addView(label("$title  ›",17,true,palette.accent));card.addView(label(detail,13,false,palette.muted),spaced(6))
-            card.setOnClickListener{go(id)};card.contentDescription=title;body.addView(card,spaced(12))
+            card.setOnClickListener{go(id)};tvCardFocus(card);card.contentDescription=title;body.addView(card,spaced(12))
         }
         item("servers","Серверы","SSH-серверы, ключи доступа, цепочки и проверка агента · ${store.servers().size}")
         item("proxies","Прокси","Профили подключения и локальный порт SOCKS5 · ${store.proxies().size}")
@@ -855,6 +947,7 @@ class MainActivity:Activity() {
                         }
                     }
                     store.withSshConfig(route) { config ->
+                        NativeBridge.requireAvailable()
                         val response = JSONObject(NativeBridge.manageAgent(config.toString(), installedVersion, archive?.path.orEmpty()))
                         require(!response.has("error")) { friendlyError(response.optString("error")) }
                         when {
@@ -1103,7 +1196,7 @@ class MainActivity:Activity() {
             title.addView(label("${kind.time} · ${kind.traffic}",11,false,palette.muted))
             item.addView(title);item.addView(label(kind.text,12,false,palette.muted),spaced(6))
             item.contentDescription=kind.title
-            item.setOnClickListener{if(!SpeedTest.live.running){speedKind=kind.id;render()}}
+            item.setOnClickListener{if(!SpeedTest.live.running){speedKind=kind.id;render()}};tvCardFocus(item)
             body.addView(item,spaced(8))
         }
 
@@ -1167,10 +1260,10 @@ class MainActivity:Activity() {
     }
 
     private fun appsPage(){
-        val layout=column().apply{setPadding(dp(20),dp(8),dp(20),0)};content.addView(layout)
+        val layout=column().apply{setPadding(dp(pageInset),dp(8),dp(pageInset),0)};content.addView(layout)
         layout.addView(label("Приложения",26,true))
         layout.addView(label("Защита действует, пока Android держит VPN.",13,false,palette.muted),spaced(8))
-        val search=EditText(uiContext).apply{setSingleLine(true);hint="Поиск по названию или пакету";setTextColor(palette.text);setHintTextColor(palette.muted);textSize=14f;inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;background=palette.panel(palette.surface,dp(14).toFloat(),palette.border);setPadding(dp(14),0,dp(14),0);setText(searchQuery)}
+        val search=EditText(uiContext).apply{setSingleLine(true);hint="Поиск по названию или пакету";setTextColor(palette.text);setHintTextColor(palette.muted);textSize=if(isTv)16f else 14f;inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;background=focusPanel(palette.surface,14,palette.border);setPadding(dp(14),0,dp(14),0);setText(searchQuery)}
         layout.addView(search,LinearLayout.LayoutParams(-1,dp(50)).apply{topMargin=dp(16)})
         appCount=label("",11,false,palette.muted).also{layout.addView(it,spaced(12))}
         val actions=row();actions.addView(button("Выбранные"){searchQuery="";search.setText("");appAdapter?.showSelected=true;refreshApps()},LinearLayout.LayoutParams(0,dp(48),1f).apply{marginEnd=dp(5)})
@@ -1179,7 +1272,10 @@ class MainActivity:Activity() {
         val priorityAvailable = Build.VERSION.SDK_INT >= 29 &&
             store.tuning.ssh.let { it.qos == "voice" && it.priorityUdpSsh }
         if (priorityAvailable) layout.addView(label("Для приложений со звонками отметьте «UDP через второй SSH».", 12, false, palette.muted), spaced(8))
-        val list=ListView(this).apply{divider=null;cacheColorHint=palette.background;setPadding(0,dp(6),0,dp(12));clipToPadding=false}
+        val list=ListView(this).apply{
+            divider=null;cacheColorHint=palette.background;setPadding(0,dp(6),0,dp(12));clipToPadding=false
+            if(isTv){itemsCanFocus=true;descendantFocusability=ViewGroup.FOCUS_AFTER_DESCENDANTS}
+        }
         appAdapter=ApplicationAdapter(priorityAvailable);list.adapter=appAdapter
         val listArea=FrameLayout(this);listArea.addView(list,FrameLayout.LayoutParams(-1,-1))
         appEmpty=label("Ищем приложения…",14,false,palette.muted).apply{gravity=Gravity.CENTER;setPadding(dp(12),dp(24),dp(12),dp(24))}.also{listArea.addView(it,FrameLayout.LayoutParams(-1,-1));list.emptyView=it}
@@ -1190,16 +1286,28 @@ class MainActivity:Activity() {
             override fun afterTextChanged(s:Editable?){}
         })
     }
-    private fun refreshApps(){if(page!="apps")return;appAdapter?.refresh();update(appEmpty,if(!catalogLoaded)"Ищем приложения…" else "Ничего не найдено.\nИзмените поиск или откройте все приложения.");updateAppCount()}
+    private fun refreshApps(){if(page!="apps")return;appAdapter?.refresh();update(appEmpty,catalogError ?: if(!catalogLoaded)"Ищем приложения…" else "Ничего не найдено.\nИзмените поиск или откройте все приложения.");updateAppCount()}
     private fun updateAppCount() {
         update(appCount, if (catalogLoaded) "Через туннель: ${selected.size}  ·  С защитой: ${selected.count(protectedApps::contains)}"
             else "Ищем установленные приложения…")
     }
     private fun scanApps(){Thread{
-        val intent=Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        catalog=packageManager.queryIntentActivities(intent,0).map{AppEntry(it.activityInfo.packageName,it.loadLabel(packageManager).toString())}
-            .filter{it.pkg!=packageName&&packageManager.checkPermission("android.permission.INTERNET",it.pkg)==PackageManager.PERMISSION_GRANTED}
-            .distinctBy{it.pkg}.sortedBy{it.label.lowercase()};catalogLoaded=true;runOnUiThread{refreshApps()}
+        val found = try {
+            val categories=if(isTv)listOf(Intent.CATEGORY_LEANBACK_LAUNCHER,Intent.CATEGORY_LAUNCHER) else listOf(Intent.CATEGORY_LAUNCHER)
+            categories.flatMap{category->packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category),0)}
+                .map{AppEntry(it.activityInfo.packageName,it.loadLabel(packageManager).toString())}
+                .filter{it.pkg!=packageName&&packageManager.checkPermission("android.permission.INTERNET",it.pkg)==PackageManager.PERMISSION_GRANTED}
+                .distinctBy{it.pkg}.sortedBy{it.label.lowercase()}
+        } catch (error: Exception) {
+            android.util.Log.e("SecretTunnelStartup", "Не удалось прочитать список приложений", error)
+            runOnUiThread {
+                catalogError = "Не удалось прочитать список приложений.\n${error.javaClass.simpleName}"
+                catalogLoaded = true
+                refreshApps()
+            }
+            return@Thread
+        }
+        runOnUiThread { catalog=found; catalogLoaded=true; refreshApps() }
     }.start()}
     private class AppHolder(val icon:ImageView,val name:TextView,val pkg:TextView,val toggle:Switch,val guard:CheckBox,val priority:CheckBox)
     private inner class ApplicationAdapter(private val priorityAvailable: Boolean):BaseAdapter(){
@@ -1217,15 +1325,17 @@ class MainActivity:Activity() {
                 header.addView(icon, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) })
                 val texts=column();val name=label("",14,true);val pkg=label("",10,false,palette.muted).apply{maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END};texts.addView(name);texts.addView(pkg,spaced(4));header.addView(texts,LinearLayout.LayoutParams(0,-2,1f))
                 val toggle=Switch(uiContext).apply{minimumWidth=dp(52);minimumHeight=dp(48);thumbTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.accent,palette.muted));trackTintList=ColorStateList(arrayOf(intArrayOf(android.R.attr.state_checked),intArrayOf()),intArrayOf(palette.raised,palette.border))}
+                if(isTv){toggle.isFocusable=true;toggle.background=focusPanel(palette.background,10)}
                 header.addView(toggle)
                 addView(header)
-                header.setOnClickListener { toggle.isChecked = !toggle.isChecked }
+                if(!isTv)header.setOnClickListener { toggle.isChecked = !toggle.isChecked }
                 fun option(title: String) = CheckBox(uiContext).apply {
                     text = title
                     textSize = 13f
                     minimumHeight = dp(48)
                     setTextColor(palette.text)
                     buttonTintList = toggle.thumbTintList
+                    if(isTv){isFocusable=true;background=focusPanel(palette.background,10)}
                 }
                 val guard = option("Блокировать при обрыве туннеля")
                 val priority = option("UDP через второй SSH")
@@ -1283,6 +1393,7 @@ class MainActivity:Activity() {
         return listOfNotNull(status,windows,latency).joinToString("\n")
     }
     private fun diagnostics():String=buildString{
+        previousConnectionFailure?.let { append("Предыдущее завершение\n$it\n\n") }
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
         lastStatus.optString("agent").takeIf{it.isNotBlank()&&it!="null"}?.let{append(it+"\n\n")}
         lastStatus.optJSONObject("transport")?.let { t->
@@ -1335,13 +1446,34 @@ class MainActivity:Activity() {
         val session = store.snapshot()
         pendingProxy = store.activeProxyId
         fun prepareVpn() {
-            val permission = VpnService.prepare(this)
-            if (permission != null) startActivityForResult(permission, 103) else startTunnel()
+            ConnectionAttempt.mark(this, "Разрешение Android VPN")
+            try {
+                val permission = VpnService.prepare(this)
+                if (permission != null) startActivityForResult(permission, 103) else startTunnel()
+            } catch (error: Exception) {
+                ConnectionAttempt.clear(this)
+                message(error.message ?: "Не удалось запросить разрешение Android VPN")
+            }
         }
         if (session.route.all { isTrustedSshPin(it.fingerprint) }) prepareVpn()
-        else verifyServer(server.id) { prepareVpn() }
+        else {
+            ConnectionAttempt.mark(this, "Проверка отпечатка SSH")
+            verifyServer(server.id, onFailure = { error ->
+                ConnectionAttempt.clear(this)
+                message(error)
+            }, onCancel = { ConnectionAttempt.clear(this) }) { prepareVpn() }
+        }
     }
-    private fun startTunnel(){require(pendingProxy==store.activeProxyId){"Профиль изменился. Подключитесь заново."};startForegroundService(Intent(this,TunnelVpnService::class.java))}
+    private fun startTunnel() {
+        require(pendingProxy == store.activeProxyId) { "Профиль изменился. Подключитесь заново." }
+        ConnectionAttempt.mark(this, "Запуск службы VPN")
+        try {
+            startForegroundService(Intent(this, TunnelVpnService::class.java))
+        } catch (error: Exception) {
+            ConnectionAttempt.clear(this)
+            throw error
+        }
+    }
     private fun refreshServerCheck() {
         val status=serverCheck
         val running=status?.state==CheckState.RUNNING
@@ -1427,7 +1559,10 @@ class MainActivity:Activity() {
         val scoped=SettingsStore(this,server.id);val saved=endpoint.fingerprint
         if(!readOnly){checkingDetail="Получаем ключ SSH-сервера «${server.name}»…";checking=true}
         Thread{
-            val result=try{store.withSshConfig(route, includeTargetKey=false) { JSONObject(NativeBridge.probe(it.toString())) }}
+            val result=try{
+                NativeBridge.requireAvailable()
+                store.withSshConfig(route, includeTargetKey=false) { JSONObject(NativeBridge.probe(it.toString())) }
+            }
                 catch(e:Exception){JSONObject().put("error",e.message)}
             runOnUiThread{
                 if(!readOnly)checking=false
@@ -1459,6 +1594,7 @@ class MainActivity:Activity() {
     private fun checkServerAgent(route:List<SshEndpoint>,checkAgent:Boolean,complete:(Boolean,String)->Unit){
         Thread{
             val result=try{
+                NativeBridge.requireAvailable()
                 store.withSshConfig(route) { config ->
                     config.put("check_agent",checkAgent)
                     val response=JSONObject(NativeBridge.checkServer(config.toString()))
@@ -1474,6 +1610,7 @@ class MainActivity:Activity() {
         Thread{
             var device:java.io.File?=null;var bytes:ByteArray?=null
             val error=try{
+                NativeBridge.requireAvailable()
                 val pair=JSONObject(NativeBridge.generateKey());require(!pair.has("error")){pair.optString("error")}
                 val file=java.io.File.createTempFile("ssh-device-",".runtime",cacheDir);device=file
                 val privateKey=pair.getString("private").toByteArray(Charsets.UTF_8);bytes=privateKey
@@ -1494,7 +1631,10 @@ class MainActivity:Activity() {
             if (resultCode == RESULT_FIRST_USER) message("Android не смог установить обновление. Можно повторить установку из «О программе».")
             return
         }
-        if(resultCode!=RESULT_OK)return
+        if(resultCode!=RESULT_OK){
+            if(requestCode==103)ConnectionAttempt.clear(this)
+            return
+        }
         if(requestCode==103){attempt{startTunnel()};return}
         if(requestCode==102){val id=importId;val uri=data?.data?:return;checking=true
             Thread{
@@ -1514,16 +1654,29 @@ class MainActivity:Activity() {
         body.addView(label(title,12,true,palette.muted),spaced(16))
         return EditText(uiContext).apply{id=idValue;setSingleLine(true);inputType=if(numeric)InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             importantForAutofill=View.IMPORTANT_FOR_AUTOFILL_NO;setText(value);this.hint=hint;textSize=16f;setTextColor(palette.text);setHintTextColor(palette.muted)
-            background=palette.panel(palette.surface,dp(13).toFloat(),palette.border);setPadding(dp(14),0,dp(14),0);body.addView(this,LinearLayout.LayoutParams(-1,dp(54)).apply{topMargin=dp(7)})}
+            background=focusPanel(palette.surface,13,palette.border);setPadding(dp(14),0,dp(14),0);body.addView(this,LinearLayout.LayoutParams(-1,dp(54)).apply{topMargin=dp(7)})}
     }
     private fun card(color:Int=palette.surface)=column().apply{setPadding(dp(18),dp(18),dp(18),dp(18));background=palette.panel(color,dp(22).toFloat())}
     private fun column()=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
     private fun row()=LinearLayout(this).apply{orientation=LinearLayout.HORIZONTAL}
-    private fun label(value:String,size:Int,bold:Boolean=false,color:Int=palette.text)=TextView(this).apply{text=value;textSize=size.toFloat();setTextColor(color);if(bold)typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL);includeFontPadding=false}
+    private fun label(value:String,size:Int,bold:Boolean=false,color:Int=palette.text)=TextView(this).apply{text=value;textSize=(size+if(isTv)2 else 0).toFloat();setTextColor(color);if(bold)typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL);includeFontPadding=false}
     private fun button(value:String,primary:Boolean=false,danger:Boolean=false,action:()->Unit)=Button(uiContext).apply{
         text=value;isAllCaps=false;textSize=14f;minimumHeight=dp(50);setPadding(dp(12),dp(9),dp(12),dp(9))
-        background=palette.panel(if(primary)palette.accent else palette.raised,dp(14).toFloat(),if(primary)0 else palette.border)
+        background=focusPanel(if(primary)palette.accent else palette.raised,14,if(primary)0 else palette.border,if(primary)palette.onAccent else palette.accent)
         setTextColor(if(danger)palette.error else if(primary)palette.onAccent else palette.accent);setOnClickListener{attempt(action)}
+        if(isTv){isFocusable=true;textSize=16f}
+    }
+    private fun focusPanel(fill:Int,radius:Int,stroke:Int=0,focusColor:Int=palette.accent):Drawable {
+        val idle=palette.panel(fill,dp(radius).toFloat(),stroke)
+        if(!isTv)return idle
+        val focused=palette.panel(fill,dp(radius).toFloat()).apply{setStroke(dp(3),focusColor)}
+        return android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused),focused)
+            addState(intArrayOf(),idle)
+        }
+    }
+    private fun tvCardFocus(view:View){
+        if(isTv){view.isFocusable=true;view.background=focusPanel(palette.surface,22)}
     }
     private fun spaced(top:Int)=LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(top)}
     private fun update(view:TextView?,value:String){if(view!=null&&view.text.toString()!=value)view.text=value}

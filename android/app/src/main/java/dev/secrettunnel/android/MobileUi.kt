@@ -145,6 +145,17 @@ class NavigationIcon(context:Context,private val kind:String,var tint:Int):View(
             "logs"->{canvas.drawRoundRect(4f,3f,20f,21f,2f,2f,paint);for(y in listOf(8f,12f,16f))line(8f,y,16f,y)}
             "speed"->{canvas.drawArc(3f,5f,21f,23f,180f,180f,false,paint);line(12f,14f,16.5f,9f);canvas.drawCircle(12f,14f,1.2f,paint)}
             "stats"->{line(4f,20f,20f,20f);for((x,top) in listOf(6.5f to 13f,11f to 7f,15.5f to 10f))canvas.drawRoundRect(x,top,x+3f,20f,1f,1f,paint)}
+            "settings"->{
+                for((y,knob) in listOf(6f to 9f,12f to 15f,18f to 10f)){
+                    line(4f,y,knob-2f,y);line(knob+2f,y,20f,y);canvas.drawCircle(knob,y,2f,paint)
+                }
+            }
+            "about"->{canvas.drawCircle(12f,12f,8.5f,paint);line(12f,12f,12f,16f);line(12f,8f,12f,8.1f)}
+            "help"->{
+                canvas.drawCircle(12f,12f,8.5f,paint)
+                val mark=Path().apply{moveTo(9.5f,9.5f);cubicTo(9.5f,6f,15.5f,6.5f,14.5f,10f);cubicTo(14f,11.5f,12f,11.5f,12f,13.5f)}
+                canvas.drawPath(mark,paint);line(12f,16.5f,12f,16.6f)
+            }
             "more"->{paint.style=Paint.Style.FILL;for(x in listOf(6f,12f,18f))canvas.drawCircle(x,12f,1.7f,paint)}
         }
         canvas.restore()

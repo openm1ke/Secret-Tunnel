@@ -28,6 +28,12 @@ Android-клиент находится в **этом же репозитори�
 
 Для отдельного ключа телефона нажмите «Создать отдельный ключ этого телефона»: клиент войдёт уже разрешённым импортированным ключом, добавит Ed25519-ключ в authorized_keys вашего пользователя и проверит новый вход перед сохранением. Другие ключи и службы сервера сохраняются. Подробности: [подключение и доверие](android-connection.md).
 
+## Android TV
+
+Для телевизора или приставки скачайте `SecretTunnel-<версия>-android-tv.apk` из релиза. APK можно открыть с USB-накопителя в файловом менеджере приставки, если её прошивка разрешает установку. В вертикальном меню через пульт откройте «Серверы» и «Приложения», затем нажмите «Подключить» на «Главной». Выбор приложений и разрешение VPN работают так же, как на телефоне. Подключение и воспроизведение YouTube проверены на DV9135 с Android TV 11.
+
+Оба релизных APK используют один идентификатор приложения и сертификат. Если на приставке уже была официальная сборка, ТВ-APK более новой версии сохранит настройки после обновления. Локальные приставочные тестовые сборки с `.testbuild` используют другой идентификатор, и для релизной сборки нужно настроить профиль заново.
+
 ## Сборка
 
 Требуются macOS, Linux или WSL, JDK 17, Android SDK platform 34/build-tools 34.0.0, NDK 27.0.12077973, Rust stable, Git, Python 3, make. Скрипт автоматически выбирает macOS/Linux host toolchain NDK. Эмулятор не нужен для сборки APK.
@@ -37,23 +43,25 @@ export JAVA_HOME=/path/to/jdk17
 export ANDROID_HOME=/path/to/android-sdk
 export PATH="$HOME/.cargo/bin:$JAVA_HOME/bin:$PATH"
 bash scripts/build-android.sh
+ANDROID_APP_TARGET=tv bash scripts/build-android.sh
 ```
 
 На текущем Windows-компьютере исходный SDK расположен в `D:\SDK\AndroidSDK`, Linux JDK — в `D:\SDK\LinuxSDK\amazon-corretto-17.0.12.7.1-linux-x64`. Для сборки подготовлен изолированный SDK view в `D:\SecretTunnelBuild\android-sdk-view`: он использует чистую platform 34 в кэше WSL, необходимые build-tools и NDK, без перебора старых SDK/эмуляторов. Windows-скрипт выбирает этот view, если он существует:
 
 ```powershell
 ./scripts/build-android.ps1
+./scripts/build-android.ps1 -AppTarget tv
 ```
 
 Пути переопределяются параметрами `-SdkDirectory` и `-JavaDirectory`. Это **Linux SDK/JDK**, используемые через WSL. Скрипт не скачивает эмулятор и не меняет защиту Windows. Если принадлежащие текущему пользователю NDK/JDK на `/mnt/...` имеют непригодные NTFS/Unix права после переноса, скрипт восстанавливает владельцу доступ к этим каталогам инструментов. Rust для WSL устанавливается отдельно; Android Rust targets добавляются скриптом.
 
-Сборка создаёт ARM64 и x86_64 `.so` с выравниванием ELF-сегментов 16 KiB, собирает APK, запускает lint и доступные Gradle unit tests. Выход: `artifacts/android/SecretTunnel-debug.apk`. Для установки через adb: `adb install -r artifacts/android/SecretTunnel-debug.apk`.
+Скрипт создаёт ARMv7, ARM64 и x86_64 `.so` с выравниванием ELF-сегментов 16 КиБ, собирает APK и запускает lint и unit-тесты. Сборка для телефона сохраняется в `artifacts/android/SecretTunnel-debug.apk`, для телевизора в `artifacts/android/SecretTunnel-tv-debug.apk`. Значение `both` собирает оба APK за один запуск.
 
 Кэш по умолчанию: `$HOME/.cache/secret-tunnel-android`; его можно перенести через `ANDROID_BUILD_ROOT`. На текущей машине тяжёлые подкаталоги `rust-target`, `gradle-home`, `ndk-obj` перенесены в `D:\SecretTunnelBuild\android-cache`, а исходные пути сохранены символическими ссылками. `GRADLE_USER_HOME`, `ANDROID_NDK_HOME`, `HEV_SOURCE_DIRECTORY` и `GRADLE_CMD` также переопределяются. Gradle wrapper закреплён на 8.7 и проверяет SHA256 дистрибутива; подготовленная локальная установка Gradle может использоваться из кэша или через `GRADLE_CMD`.
 
 Нативный tun2socks закреплён на `heiher/hev-socks5-tunnel@8e3b4cd7168fe64b64f8b58537b5623fb6a7074d`; вложенные репозитории проверяются по gitlink. Исходники скачиваются в кэш, сторонние уведомления об авторских правах включаются в APK assets. В YAML используется `socks5.udp: udp`: UDP идёт локально в наш SOCKS, где уже оборачивается в собственный SSH-протокол. Проприетарный hev UDP-over-TCP режим не используется.
 
-Workflow `.github/workflows/android.yml` собирает debug APK для pull request/push затронутых файлов или вручную. Публикации в Google Play и release-ключа подписи в нём нет.
+Workflow `.github/workflows/android.yml` собирает два debug APK для pull request, push затронутых файлов или ручного запуска. Подписанные APK для GitHub Releases собирает [релизный workflow](RELEASES.md).
 
 ## Проверки
 

@@ -237,7 +237,7 @@ mark { background: var(--highlight); color: inherit; border-radius: 3px; padding
 .release .when { color: var(--muted); font-size: 15px; }
 .badge { font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: var(--teal-wash); color: var(--teal); }
 .badge.pre { background: var(--amber-wash); color: var(--amber-ink); }
-.downloads { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.downloads { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
 .downloads section { display: grid; gap: 6px; align-content: start; }
 .downloads h3 { font: 600 15px var(--text); color: var(--muted); }
 .downloads a { display: flex; justify-content: space-between; gap: 10px; text-decoration: none; background: var(--mist); color: var(--ink); padding: 10px 12px; border-radius: 10px; font-weight: 500; font-size: 15px; }

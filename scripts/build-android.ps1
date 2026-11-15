@@ -1,6 +1,8 @@
 param(
     [string]$SdkDirectory = '',
-    [string]$JavaDirectory = 'D:/SDK/LinuxSDK/amazon-corretto-17.0.12.7.1-linux-x64'
+    [string]$JavaDirectory = 'D:/SDK/LinuxSDK/amazon-corretto-17.0.12.7.1-linux-x64',
+    [ValidateSet('mobile', 'tv', 'both')]
+    [string]$AppTarget = 'mobile'
 )
 $ErrorActionPreference='Stop'
 if(-not $SdkDirectory){
@@ -16,5 +18,5 @@ function LinuxPath([string]$value) {
 $script=LinuxPath (Join-Path $repo 'scripts/build-android.sh')
 $sdk=LinuxPath $SdkDirectory
 $java=LinuxPath $JavaDirectory
-& wsl.exe -e env "ANDROID_HOME=$sdk" "JAVA_HOME=$java" bash -c 'export PATH="$HOME/.cargo/bin:$PATH"; exec bash "$1"' build-android $script
+& wsl.exe -e env "ANDROID_HOME=$sdk" "JAVA_HOME=$java" "ANDROID_APP_TARGET=$($AppTarget.ToLowerInvariant())" bash -c 'export PATH="$HOME/.cargo/bin:$PATH"; exec bash "$1"' build-android $script
 if($LASTEXITCODE -ne 0){throw 'Android build failed; see the output above.'}

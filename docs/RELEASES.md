@@ -2,7 +2,7 @@
 
 Workflow **Publish releases** (`.github/workflows/release.yml`) создаёт:
 
-- подписанный **release** APK (ARM64/x86_64), не debug APK;
+- подписанные APK `SecretTunnel-<версия>-android.apk` для телефона и `SecretTunnel-<версия>-android-tv.apk` для Android TV (ARMv7, ARM64, x86_64);
 - Windows x64 NSIS setup с offline WebView2 и полным комплектом перехвата;
 - Windows x64 portable ZIP: EXE, ProxyBridge CLI/Core, WinDivert DLL/подписанный SYS, лицензии, SHA256-манифест и серверный агент;
 - macOS 13+ universal DMG и ZIP с `.app` для Apple Silicon и Intel, Embedded SSH, лицензиями и серверным агентом;
@@ -19,7 +19,7 @@ Workflow **Publish releases** (`.github/workflows/release.yml`) создаёт:
 
 Через GitHub CLI: `gh workflow run release.yml -f tag=v0.2.0 --ref main`.
 
-Для проверки кандидата до публикации выключите input `publish`: все платформы и подписанный APK соберутся в Actions artifacts, тег и GitHub Release не создаются. Например: `gh workflow run release.yml --ref <branch> -f tag=v0.2.3 -F publish=false`. Проверенные файлы можно затем опубликовать для точного commit кандидата вместе с SHA256SUMS.txt.
+Для проверки кандидата до публикации выключите input `publish`. Все платформы, включая оба подписанных APK, соберутся в Actions artifacts. Команда для запуска сборки кандидата `gh workflow run release.yml --ref <branch> -f tag=v0.2.3 -F publish=false`. Проверенные файлы можно затем опубликовать для точного commit кандидата вместе с `SHA256SUMS.txt`.
 
 ## Windows: инструменты упаковки
 

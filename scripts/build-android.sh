@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
+variant=${ANDROID_BUILD_TYPE:-debug}
+case "$variant" in
+    debug) build_type=Debug ;;
+    release) build_type=Release ;;
+    *) echo 'ANDROID_BUILD_TYPE must be debug or release' >&2; exit 1 ;;
+esac
+case "${ANDROID_APP_TARGET:-mobile}" in
+    mobile) flavors=(mobile) ;;
+    tv) flavors=(tv) ;;
+    both) flavors=(mobile tv) ;;
+    *) echo 'ANDROID_APP_TARGET must be mobile, tv or both' >&2; exit 1 ;;
+esac
 work=${ANDROID_BUILD_ROOT:-"$HOME/.cache/secret-tunnel-android"}
 sdk=${ANDROID_HOME:?Set ANDROID_HOME to the Android SDK directory}
 ndk=${ANDROID_NDK_HOME:-"$sdk/ndk/27.0.12077973"}
@@ -41,13 +53,16 @@ fi
 "$llvm/clang" --version >/dev/null
 export CARGO_TARGET_DIR="$work/rust-target"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$llvm/aarch64-linux-android26-clang"
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$llvm/armv7a-linux-androideabi26-clang"
 export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$llvm/x86_64-linux-android26-clang"
 export CC_aarch64_linux_android="$llvm/aarch64-linux-android26-clang"
+export CC_armv7_linux_androideabi="$llvm/armv7a-linux-androideabi26-clang"
 export CC_x86_64_linux_android="$llvm/x86_64-linux-android26-clang"
 export AR_aarch64_linux_android="$llvm/llvm-ar"
+export AR_armv7_linux_androideabi="$llvm/llvm-ar"
 export AR_x86_64_linux_android="$llvm/llvm-ar"
 export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
-for pair in 'aarch64-linux-android arm64-v8a' 'x86_64-linux-android x86_64'; do
+for pair in 'armv7-linux-androideabi armeabi-v7a' 'aarch64-linux-android arm64-v8a' 'x86_64-linux-android x86_64'; do
     read -r target abi <<< "$pair"
     rustup target add "$target"
     cargo build --manifest-path "$repo/android/native/Cargo.toml" --target "$target" --release --locked -j 2
@@ -64,7 +79,7 @@ cp "$repo/android/ndk/"st-traffic.[ch] "$hev_build/src/"
 "$ndk/ndk-build" NDK_PROJECT_PATH=null APP_BUILD_SCRIPT="$hev_build/Android.mk" REV_ID="$revision" \
     NDK_APPLICATION_MK="$repo/android/ndk/Application.mk" NDK_OUT="$hev_obj" \
     NDK_LIBS_OUT="$repo/android/app/src/main/jniLibs" -j 2 hev-socks5-tunnel
-for abi in arm64-v8a x86_64; do
+for abi in armeabi-v7a arm64-v8a x86_64; do
     cp "$hev_obj/local/$abi/libhev-socks5-tunnel.so" "$repo/android/app/src/main/jniLibs/$abi/"
 done
 # Preserve dependency notices in the installable application.
@@ -97,14 +112,32 @@ export PATH="$JAVA_HOME/bin:$PATH"
 if [[ -n ${GRADLE_CMD:-} ]]; then gradle=("$GRADLE_CMD")
 elif [[ -x "$work/gradle-local/bin/gradle" ]]; then gradle=("$work/gradle-local/bin/gradle")
 else gradle=(bash "$repo/android/gradlew"); fi
-variant=${ANDROID_BUILD_TYPE:-debug}
-case "$variant" in debug) tasks=(:app:testDebugUnitTest :app:assembleDebug :app:lintDebug);; release) tasks=(:app:testReleaseUnitTest :app:assembleRelease :app:lintRelease);; *) echo 'ANDROID_BUILD_TYPE must be debug or release' >&2; exit 1;; esac
+tasks=()
+for flavor in "${flavors[@]}"; do
+    case "$flavor" in mobile) flavor_task=Mobile ;; tv) flavor_task=Tv ;; esac
+    variant_task="$flavor_task$build_type"
+    tasks+=(":app:test${variant_task}UnitTest" ":app:assemble$variant_task" ":app:lint$variant_task")
+done
 if [[ ${ST_BUILD_TRAFFIC_PROBE:-0} == 1 ]]; then tasks+=(:traffic-probe:assembleDebug); fi
 "${gradle[@]}" -p "$repo/android" --no-daemon "${tasks[@]}"
 mkdir -p "$repo/artifacts/android"
-apk="$repo/artifacts/android/SecretTunnel-$variant.apk"
-cp "$repo/android/app/build/outputs/apk/$variant/app-$variant.apk" "$apk"
-python3 "$repo/scripts/check-android-apk.py" "$apk"
-"$JAVA_HOME/bin/java" -jar "$sdk/build-tools/34.0.0/lib/apksigner.jar" verify --verbose "$apk"
-if command -v sha256sum >/dev/null 2>&1; then sha256sum "$apk"
-else shasum -a 256 "$apk"; fi
+for flavor in "${flavors[@]}"; do
+    suffix=
+    if [[ "$flavor" == tv ]]; then suffix=-tv; fi
+    apk="$repo/artifacts/android/SecretTunnel$suffix-$variant.apk"
+    cp "$repo/android/app/build/outputs/apk/$flavor/$variant/app-$flavor-$variant.apk" "$apk"
+    python3 "$repo/scripts/check-android-apk.py" "$apk"
+    badging=$("$sdk/build-tools/34.0.0/aapt" dump badging "$apk")
+    if [[ "$flavor" == tv ]]; then
+        grep -Eq "^leanback-launchable-activity:.*banner='[^']+'" <<< "$badging" || {
+            echo 'Missing TV launcher or banner in Android TV APK' >&2
+            exit 1
+        }
+    elif grep -q '^leanback-launchable-activity:' <<< "$badging"; then
+        echo 'Unexpected TV launcher in phone APK' >&2
+        exit 1
+    fi
+    "$JAVA_HOME/bin/java" -jar "$sdk/build-tools/34.0.0/lib/apksigner.jar" verify --verbose "$apk"
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$apk"
+    else shasum -a 256 "$apk"; fi
+done

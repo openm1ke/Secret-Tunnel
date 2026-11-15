@@ -2,9 +2,9 @@ name: Android APK
 on:
   workflow_dispatch:
   push:
-    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/agent_update.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'docs/help/knowledge.md', 'scripts/build-android.sh', '.github/workflows/android.yml']
+    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/agent_update.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'docs/help/knowledge.md', 'scripts/build-android.sh', 'scripts/check-android-apk.py', '.github/workflows/android.yml']
   pull_request:
-    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/agent_update.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'docs/help/knowledge.md', 'scripts/build-android.sh', '.github/workflows/android.yml']
+    paths: ['android/**', 'tunnel-core/**', 'stream-mux/**', 'src-tauri/src/embedded_ssh.rs', 'src-tauri/src/agent_preflight_tests.rs', 'src-tauri/src/agent_update.rs', 'src-tauri/src/udp_protocol.rs', 'src-tauri/src/tls_target.rs', 'docs/help/knowledge.md', 'scripts/build-android.sh', 'scripts/check-android-apk.py', '.github/workflows/android.yml']
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -19,12 +19,18 @@ jobs:
           packages: platform-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
       - run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;27.0.12077973'
       - run: cargo test --manifest-path tunnel-core/Cargo.toml --locked
       - run: cargo test --manifest-path stream-mux/Cargo.toml --locked
-      - run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973" bash scripts/build-android.sh
+      - run: ANDROID_APP_TARGET=both ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973" bash scripts/build-android.sh
       - uses: actions/upload-artifact@v4
         with:
           name: SecretTunnel-Android-debug
           path: artifacts/android/SecretTunnel-debug.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SecretTunnel-AndroidTV-debug
+          path: artifacts/android/SecretTunnel-tv-debug.apk
+          if-no-files-found: error

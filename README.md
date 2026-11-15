@@ -7,9 +7,9 @@ Desktop app for managing SSH dynamic SOCKS tunnels.
 
 macOS supports selecting installed `.app` programs and routing their traffic through SSH using the signed ProxyBridge Network Extension. Embedded SSH supports TCP/UDP with the server agent; System OpenSSH supports TCP and blocks selected UDP. Setup, the five-process Discord family, limitations and real macOS validation: [macOS per-app tunneling](docs/MACOS.md). Current desktop findings: [macOS audit, 8 November 2026](docs/AUDIT-2026-11-08-MACOS.md).
 
-Android client in the same repository: per-app VPN with TCP/UDP over the shared Rust SSH core, traffic chart, managed server trust, key import and device-key enrollment. Build and device-check instructions: [Android](docs/ANDROID.md). Run `bash scripts/build-android.sh` on macOS/Linux or `./scripts/build-android.ps1` through WSL on Windows. APK output: `artifacts/android/SecretTunnel-debug.apk`.
+The Android and Android TV clients share a per-app VPN, TCP/UDP over the Rust SSH core, traffic charts, managed server trust and key import. Android TV has a separate APK and a vertical menu for remote controls. See the [Android and Android TV build and installation guide](docs/ANDROID.md).
 
-Signed Android release APKs, complete Windows setup/portable packages, universal macOS DMG/ZIP and the Linux server agent are published together by [Publish releases](.github/workflows/release.yml). See [release instructions](docs/RELEASES.md) and [Windows package contents](docs/WINDOWS-RELEASE.md).
+Signed Android and Android TV APKs, complete Windows setup/portable packages, universal macOS DMG/ZIP and the Linux server agent are published together by [Publish releases](.github/workflows/release.yml). See [release instructions](docs/RELEASES.md) and [Windows package contents](docs/WINDOWS-RELEASE.md).
 
 Select installed programs using the searchable checkbox list in Applications. See [selector and UDP performance validation](docs/APPLICATION-SELECTOR.md).
 

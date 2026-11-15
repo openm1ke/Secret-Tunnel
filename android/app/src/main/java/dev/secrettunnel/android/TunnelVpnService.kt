@@ -19,10 +19,19 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class TunnelVpnService : VpnService() {
     companion object {
-        init { System.loadLibrary("hev-socks5-tunnel") }
+        private val packetEngineError by lazy {
+            try {
+                System.loadLibrary("hev-socks5-tunnel")
+                null
+            } catch (error: LinkageError) {
+                error
+            }
+        }
         @Volatile var phase = "Остановлен"
         @Volatile var detail = ""
         @Volatile var active = false
+        @Volatile internal var nativeStatusAvailable = false
+            private set
         @Volatile internal var interceptionActive = false
             private set
         @Volatile var protectedCount = 0
@@ -50,6 +59,7 @@ class TunnelVpnService : VpnService() {
     private val sampling = Executors.newSingleThreadScheduledExecutor()
     private val stopping = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
+    @Volatile private var enginesReady = false
     private var tun: ParcelFileDescriptor? = null
     private val main = Handler(Looper.getMainLooper())
     private val recovery=RecoveryPolicy()
@@ -275,6 +285,15 @@ class TunnelVpnService : VpnService() {
         else startForeground(NOTICE, notification)
         worker.execute {
             try {
+                ConnectionAttempt.mark(this, "Загрузка библиотеки SSH")
+                NativeBridge.requireAvailable()
+                nativeStatusAvailable = true
+                ConnectionAttempt.mark(this, "Загрузка обработчика TCP/UDP")
+                packetEngineError?.let {
+                    throw IllegalStateException("Не удалось загрузить обработчик TCP/UDP: ${it.message}", it)
+                }
+                enginesReady = true
+                ConnectionAttempt.mark(this, "Чтение конфигурации VPN")
                 val settings = SettingsStore(this)
                 val snapshot = settings.snapshot()
                 require(packageName !in snapshot.packages) { "Нельзя перехватывать собственный SSH-транспорт" }
@@ -297,6 +316,7 @@ class TunnelVpnService : VpnService() {
                 }
                 verifyExit = settings.verifyProxy
                 prepared = true
+                ConnectionAttempt.mark(this, "Ожидание сети для SSH")
                 main.post(networkWatch)
                 main.post(monitor)
             } catch (error: Exception) {
@@ -345,9 +365,11 @@ class TunnelVpnService : VpnService() {
         reportedRejections = 0
         setState("Работает", readyDetail())
         if (verifyExit) NativeBridge.checkConnection()
+        ConnectionAttempt.clear(this)
     }
     private fun establishRoutes(next: Routes) {
         if (next == routes) return
+        ConnectionAttempt.mark(this, "Создание VPN-интерфейса Android")
         val builder = Builder().setSession("Secret Tunnel SSH").setMtu(1500)
             .addAddress("198.18.0.1", 30).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
             .setUnderlyingNetworks(underlyingNetworks())
@@ -393,6 +415,7 @@ class TunnelVpnService : VpnService() {
         TProxyStopService() // join the native reader before replacing its borrowed descriptor
         establishRoutes(Routes(current.packages, ipv6))
         val priorityPort = status.optJSONObject("priority_udp_ssh")?.optInt("port") ?: 0
+        ConnectionAttempt.mark(this, "Запуск обработчика TCP/UDP")
         check(TProxyStartService(config.absolutePath, checkNotNull(tun).fd, priorityPort)) { "Не удалось запустить обработчик TCP/UDP" }
         check(TProxyIsRunning()) { "Ошибка запуска обработчика TCP/UDP; смотрите журнал" }
         interceptionActive = true
@@ -411,6 +434,7 @@ class TunnelVpnService : VpnService() {
                 .put("priority_udp_ssh", priorityUids.isNotEmpty())
             transportLink = link
             if (tun != null) setUnderlyingNetworks(underlyingNetworks())
+            ConnectionAttempt.mark(this, "Подключение SSH и запуск серверного агента")
             val error = NativeBridge.start(config.toString(), this)
             check(error.isEmpty()) { error }
             newSession = false
@@ -455,20 +479,25 @@ class TunnelVpnService : VpnService() {
         sampling.awaitTermination(1, TimeUnit.SECONDS)
         recordSession(false)
         exitIp = ""; exitCountry = ""
-        TProxyStopService() // join native reader BEFORE closing its borrowed fd
-        TProxySetAccounting(false)
+        if (enginesReady) {
+            TProxyStopService() // join native reader before closing its borrowed fd
+            TProxySetAccounting(false)
+        }
         tun?.close(); tun = null; routes = null; protectedCount = 0
-        NativeBridge.stop()
+        if (enginesReady) NativeBridge.stop()
         transportLink = null
         File(filesDir, "ssh-key.runtime").delete()
     }
     private fun stopAsync() {
         if (!stopping.compareAndSet(false, true)) return
-        phase = "Остановка"; NativeBridge.cancel(); main.removeCallbacks(monitor)
+        phase = "Остановка"
+        if (enginesReady) NativeBridge.cancel()
+        main.removeCallbacks(monitor)
         worker.execute { finishService("Остановлен", "") }
     }
     private fun finishService(state: String, reason: String) {
         cleanup()
+        ConnectionAttempt.clear(this)
         phase = state
         detail = reason
         active = false

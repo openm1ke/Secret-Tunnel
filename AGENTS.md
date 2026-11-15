@@ -44,7 +44,8 @@ cargo check --manifest-path android/native/Cargo.toml --locked
 
 Desktop app bundle (macOS): `npm run tauri -- build --bundles app --features embedded-ssh`.
 Android APK: `bash scripts/build-android.sh` (JDK 17+, SDK 34, NDK 27.0.12077973); the release
-APK needs the signing keystore, so check resources with `./gradlew :app:processDebugResources`.
+APKs need the signing keystore. Check debug resources with
+`./gradlew :app:processMobileDebugResources :app:processTvDebugResources`.
 
 `--ignored` tests in `speedtest.rs` measure a live tunnel on `127.0.0.1:1080`; run them only on purpose.
 

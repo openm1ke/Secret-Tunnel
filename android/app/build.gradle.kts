@@ -1,4 +1,5 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+val supportedAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
 android {
     namespace = "dev.secrettunnel.android"
     compileSdk = 34
@@ -11,8 +12,14 @@ android {
         versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 32900
         versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.29"
         manifestPlaceholders["appLabel"] = "Secret Tunnel"
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        ndk { abiFilters += supportedAbis }
     }
+    flavorDimensions += "device"
+    productFlavors {
+        create("mobile") { dimension = "device" }
+        create("tv") { dimension = "device" }
+    }
+    buildFeatures { buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/help-assets"))
@@ -52,7 +59,7 @@ val copyHelpAssets by tasks.registering(Copy::class) {
 tasks.named("preBuild").configure { dependsOn(copyHelpAssets) }
 tasks.register("checkNativeLibraries") {
     doLast {
-        listOf("arm64-v8a", "x86_64").forEach { abi ->
+        supportedAbis.forEach { abi ->
             listOf("libsecret_tunnel_android.so", "libhev-socks5-tunnel.so").forEach { name ->
                 check(file("src/main/jniLibs/$abi/$name").isFile) { "Missing $abi/$name. Run scripts/build-android.sh first." }
             }
@@ -67,4 +74,5 @@ tasks.register("checkReleaseSigning") {
         }
     }
 }
-tasks.matching { it.name == "preReleaseBuild" }.configureEach { dependsOn("checkReleaseSigning") }
+tasks.matching { it.name == "preMobileReleaseBuild" || it.name == "preTvReleaseBuild" }
+    .configureEach { dependsOn("checkReleaseSigning") }

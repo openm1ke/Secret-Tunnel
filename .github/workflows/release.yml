@@ -108,7 +108,7 @@ jobs:
           packages: platform-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: armv7-linux-androideabi,aarch64-linux-android,x86_64-linux-android
       - uses: actions/cache@v4
         with:
           path: ~/.cache/secret-tunnel-android
@@ -134,7 +134,7 @@ jobs:
           test "$verified" = true
           unzip -q "$archive" -d "$RUNNER_TEMP/gradle-release"
           echo "GRADLE_CMD=$RUNNER_TEMP/gradle-release/gradle-8.7/bin/gradle" >> "$GITHUB_ENV"
-      - name: Build signed release APK
+      - name: Build signed Android and Android TV APKs
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -142,6 +142,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ST_VERSION_NAME: ${{ needs.metadata.outputs.version }}
           ST_VERSION_CODE: ${{ github.run_number }}
+          ANDROID_APP_TARGET: both
         run: |
           test -n "$KEYSTORE_BASE64"
           export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/android-release.p12"
@@ -155,10 +156,17 @@ jobs:
           bash scripts/build-android.sh
           mkdir -p artifacts/release
           cp artifacts/android/SecretTunnel-release.apk "artifacts/release/SecretTunnel-$ST_VERSION_NAME-android.apk"
+          cp artifacts/android/SecretTunnel-tv-release.apk "artifacts/release/SecretTunnel-$ST_VERSION_NAME-android-tv.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: release-android
-          path: artifacts/release/
+          path: artifacts/release/*-android.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android-tv
+          path: artifacts/release/*-android-tv.apk
+          if-no-files-found: error
   windows:
     needs: [metadata, agent]
     runs-on: windows-latest
@@ -287,6 +295,7 @@ jobs:
         run: |
           cd release-assets
           test -f "SecretTunnel-${TAG#v}-android.apk"
+          test -f "SecretTunnel-${TAG#v}-android-tv.apk"
           test -f "SecretTunnel-${TAG#v}-windows-x64-portable.zip"
           test -f "SecretTunnel-${TAG#v}-windows-x64-setup.exe"
           test -f "SecretTunnel-${TAG#v}-macos-universal.zip"

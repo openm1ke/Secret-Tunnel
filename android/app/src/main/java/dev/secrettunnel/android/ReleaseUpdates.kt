@@ -41,7 +41,7 @@ internal fun compareReleaseVersions(first: String, second: String): Int {
     return a.indices.firstNotNullOfOrNull { index -> a[index].compareTo(b[index]).takeIf { it != 0 } } ?: 0
 }
 
-internal fun parseAppRelease(json: JSONObject, expected: String? = null): AppRelease {
+internal fun parseAppRelease(json: JSONObject, expected: String? = null, tv: Boolean = false): AppRelease {
     val tag = json.optString("tag_name")
     val version = tag.removePrefix("v")
     require(tag.startsWith("v") && !json.optBoolean("draft") && !json.optBoolean("prerelease") &&
@@ -54,7 +54,8 @@ internal fun parseAppRelease(json: JSONObject, expected: String? = null): AppRel
             .firstOrNull { it.optString("name") == name && it.optString("browser_download_url") == url }
             ?.optLong("size")?.takeIf { it in 1..limit }?.let { ReleaseAsset(name, url, it) }
     }
-    return AppRelease(version, asset("SecretTunnel-$version-android.apk", MAX_APK),
+    val apkPlatform = if (tv) "android-tv" else "android"
+    return AppRelease(version, asset("SecretTunnel-$version-$apkPlatform.apk", MAX_APK),
         asset("SecretTunnel-$version-server-linux-x86_64.tar.gz", MAX_AGENT),
         asset("SHA256SUMS.txt", MAX_METADATA), json.optString("body").take(24_000),
         json.optString("published_at").take(10))
@@ -69,15 +70,15 @@ internal fun releaseChecksum(contents: String, name: String): String {
 
 /** Uses the same TLS/SOCKS implementation as the tunnel checks. Each retry writes a fresh file. */
 internal object ReleaseUpdates {
-    fun latest(proxy: Int?): AppRelease = release("latest", null, proxy)
+    fun latest(proxy: Int?, tv: Boolean = false): AppRelease = release("latest", null, proxy, tv)
 
     fun exact(version: String, proxy: Int?): AppRelease {
         releaseVersion(version)
         return release("tags/v$version", version, proxy)
     }
 
-    private fun release(path: String, expected: String?, proxy: Int?): AppRelease =
-        routes(proxy) { route -> parseAppRelease(JSONObject(text("$RELEASES_API/$path", route, MAX_METADATA)), expected) }
+    private fun release(path: String, expected: String?, proxy: Int?, tv: Boolean = false): AppRelease =
+        routes(proxy) { route -> parseAppRelease(JSONObject(text("$RELEASES_API/$path", route, MAX_METADATA)), expected, tv) }
 
     fun download(release: AppRelease, asset: ReleaseAsset, file: File, proxy: Int?, progress: (Long) -> Unit = {}) {
         val sums = release.checksums ?: error("В релизе нет файла SHA256SUMS.txt")

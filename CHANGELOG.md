@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.29 — 2026-11-15
+
+- Desktop: server checks return a result or a timeout without blocking tunnel controls. Fixed a crash in the embedded SSH check that left the button waiting.
+- Android: verify a saved SSH server, its fingerprint, and the server agent while the VPN stays connected. The server screen shows the result and lets you retry after a failure.
+
 ## 0.3.28 — 2026-11-14
 
 - Android: disable automatic darkening only on API 29 and later. Android 8 and 9 keep the built-in appearance options, and both APK variants pass Android Lint.

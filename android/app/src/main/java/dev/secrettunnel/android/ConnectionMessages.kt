@@ -9,6 +9,7 @@ object ConnectionMessages {
             "authentication failed" in text -> "Сервер не принял SSH-ключ. Проверьте пользователя и ключ на экране «Серверы»."
             "address already in use" in text || "os error 98" in text -> "Локальный порт занят. Выберите другой на экране «Прокси»."
             "unknown server key" in text || "rejected the server host key" in text -> "Проверьте и подтвердите ключ сервера в его настройках."
+            "connection refused" in text -> "Сервер отклонил TCP-соединение. Проверьте порт SSH."
             "timed out" in text || "timeout" in text -> "Сервер не ответил. Проверьте адрес, порт и подключение к интернету."
             else -> raw.take(240)
         }

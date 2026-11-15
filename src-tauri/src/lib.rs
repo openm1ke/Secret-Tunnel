@@ -2,7 +2,7 @@ use secret_tunnel_session_control::{Controller, Phase};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1349,57 +1349,56 @@ fn reset_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     save_config(config)
 }
 
-#[tauri::command(async)]
-fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<String, String> {
-    // Every failure reaches the journal, including ones before the connection starts.
-    let result = check_server(&server, &state);
+#[tauri::command]
+async fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Result<String, String> {
+    let name = server.name.clone();
+    let logs = Arc::clone(&state.logs);
+    // The embedded diagnostic owns its own Tokio runtime, and OpenSSH blocks on a child.
+    let result = tauri::async_runtime::spawn_blocking(move || check_server(&server, &logs))
+        .await
+        .map_err(|error| format!("Проверка SSH прервалась. {error}"))
+        .and_then(|result| result);
     if let Err(error) = &result {
-        log_line(&state.logs, format!("Проверка сервера «{}» не прошла: {error}", server.name));
+        log_line(&state.logs, format!("Проверка сервера «{name}» не прошла: {error}"));
     }
     result
 }
 
-fn check_server(server: &ServerProfile, state: &State<'_, AppState>) -> Result<String, String> {
-    let server = server.clone();
-    validate_server(&server)?;
+fn check_server(server: &ServerProfile, logs: &Arc<Mutex<Vec<String>>>) -> Result<String, String> {
+    validate_server(server)?;
     let config = load_config()?;
     if server.jump_server_id.is_some() || config.settings.ssh_engine == "embedded" {
         #[cfg(feature = "embedded-ssh")]
         {
             log_line(
-                &state.logs,
+                logs,
                 "Проверяем SSH, ключ и совместимость агента встроенным движком…",
             );
             let is_relay = config.servers.iter().any(|profile| profile.jump_server_id.as_deref() == Some(server.id.as_str()));
             let result = embedded_ssh::diagnose_server_with_options(
-                embedded_server(&server), embedded_route(&config, &server)?, !is_relay,
+                embedded_server(server), embedded_route(&config, server)?, !is_relay,
             );
             if let Ok(message) = &result {
-                log_line(&state.logs, message);
+                log_line(logs, message);
             }
             return result;
         }
         #[cfg(not(feature = "embedded-ssh"))]
         return Err("Встроенный SSH недоступен в этой сборке".into());
     }
-    log_line(
-        &state.logs,
-        format!(
-            "Testing TCP reachability for '{}:{}'...",
-            server.name, server.port
-        ),
-    );
-    if !tcp_connects(&server.host, server.port, Duration::from_secs(3)) {
-        return Err(format!("Нет TCP-соединения с {}:{} — сервер выключен, порт закрыт или адрес неверный", server.host, server.port));
-    }
-    log_line(&state.logs, "TCP reachability OK");
-
     let key_path = expand_home(&server.key_path);
     let destination = format!("{}@{}", server.user, server.host);
-    log_line(&state.logs, "Testing SSH key authentication...");
-    let output = background_command("ssh")
+    log_line(logs, "Testing SSH key authentication...");
+    // A file also works when ProxyCommand or another child inherits stderr.
+    let mut stderr = tempfile::tempfile().map_err(|error| error.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(u64::from(server.connect_timeout) + 5);
+    let child = background_command("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-o")
+        .arg("ControlPath=none")
         .arg("-o")
         .arg("PasswordAuthentication=no")
         .arg("-o")
@@ -1418,18 +1417,37 @@ fn check_server(server: &ServerProfile, state: &State<'_, AppState>) -> Result<S
         .arg("--")
         .arg(destination)
         .arg("exit")
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr.try_clone().map_err(|error| error.to_string())?)
+        .spawn()
         .map_err(|error| error.to_string())?;
+    let mut child = SshChildGuard(Some(child));
+    let exit_status = loop {
+        if let Some(status) = child.0.as_mut().unwrap().try_wait().map_err(|error| error.to_string())? {
+            child.0.take();
+            break status;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("OpenSSH не завершил проверку за {} с.", server.connect_timeout + 5));
+        }
+        thread::sleep(remaining.min(Duration::from_millis(50)));
+    };
 
-    if output.status.success() {
-        log_line(&state.logs, "SSH key authentication OK");
+    if exit_status.success() {
+        log_line(logs, "SSH key authentication OK");
         Ok("TCP and SSH key authentication OK".to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        stderr.rewind().map_err(|error| error.to_string())?;
+        let mut output = Vec::new();
+        stderr.take(16 * 1024).read_to_end(&mut output).map_err(|error| error.to_string())?;
+        let stderr = String::from_utf8_lossy(&output);
+        let stderr = stderr.trim();
         let message = if stderr.is_empty() {
-            format!("SSH test exited with {}", output.status)
+            format!("OpenSSH завершил проверку с ошибкой ({exit_status}).")
         } else {
-            stderr
+            stderr.to_string()
         };
         Err(message)
     }
@@ -1462,9 +1480,9 @@ fn start_tunnel(state: State<'_, AppState>) -> Result<String, String> {
     Ok("Tunnel startup requested".into())
 }
 
-// OpenSSH must not outlive a failed/cancelled startup attempt.
-struct StartupChild(Option<Child>);
-impl Drop for StartupChild {
+// OpenSSH must not outlive a failed or cancelled start or check.
+struct SshChildGuard(Option<Child>);
+impl Drop for SshChildGuard {
     fn drop(&mut self) {
         if let Some(child) = self.0.as_mut() {
             let _ = child.kill();
@@ -1862,7 +1880,7 @@ fn start_system_ssh_tunnel(
         .take()
         .map(|reader| attach_log_reader("ssh stderr", reader, Arc::clone(&state.logs)));
 
-    let mut startup = StartupChild(Some(child));
+    let mut startup = SshChildGuard(Some(child));
     let child = startup.0.as_mut().unwrap();
     let pid = child.id();
     for _ in 0..120 {

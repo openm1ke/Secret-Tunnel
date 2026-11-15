@@ -9,9 +9,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import android.content.Intent
+import android.net.VpnService
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.TextView
 
 /** Explicit fixture for emulator integration; not included in the shipping APK. */
 @RunWith(AndroidJUnit4::class)
@@ -42,6 +45,99 @@ class VpnFixtureTest {
             assertEquals("emulator-test",store.snapshot().route.last().profile.id)
             assertFalse(store.prefs.all.values.any { it is String && it.contains("PRIVATE KEY") })
         } finally { key.delete(); fixture.delete() }
+    }
+
+    @Test fun checkSavedServerBeforeAndDuringVpn() {
+        val instrumentation=InstrumentationRegistry.getInstrumentation()
+        assumeTrue("Run against an isolated Android emulator", android.os.Build.MODEL.contains("sdk", ignoreCase=true))
+        val store=SettingsStore(context)
+        val server=store.server("emulator-test")
+        assumeTrue("Install the verified SSH fixture first",server!=null)
+        requireNotNull(server)
+        assertEquals(server.id,store.snapshot().route.last().profile.id)
+        assertNull("Grant VPN permission in the test emulator first",VpnService.prepare(context))
+
+        val failed=ServerProfile("qa-refused","Закрытый SSH-порт","127.0.0.1",1,server.user)
+        val source=SettingsStore(context,server.id)
+        val fingerprint=source.fingerprint
+        store.saveServer(failed)
+        val bad=SettingsStore(context,failed.id)
+        val key=source.decryptKey()
+        try { bad.importKey(key) } finally { key.fill(0) }
+        bad.fingerprint=fingerprint
+
+        val activity=instrumentation.startActivitySync(Intent(context,MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        fun views(root:View):List<View> = listOf(root) +
+            if(root is ViewGroup)(0 until root.childCount).flatMap{views(root.getChildAt(it))}else emptyList()
+        fun ui(action:(List<View>)->Unit) {
+            instrumentation.runOnMainSync { action(views(activity.window.decorView)) }
+        }
+        fun tab(name:String) = ui { nodes ->
+            assertTrue(nodes.last{it.isClickable&&it.contentDescription?.toString()==name}.performClick())
+        }
+        fun click(text:String) = ui { nodes ->
+            assertTrue(nodes.filterIsInstance<Button>().first{it.text.toString()==text&&it.isEnabled}.performClick())
+        }
+        fun waitUntil(description:String, timeout:Long=45_000, ready:()->Boolean) {
+            val deadline=SystemClock.elapsedRealtime()+timeout
+            while(SystemClock.elapsedRealtime()<deadline) {
+                if(ready())return
+                Thread.sleep(100)
+            }
+            fail(description)
+        }
+        fun openServer(name:String) {
+            tab("Ещё")
+            tab("Серверы")
+            ui { nodes ->
+                val title=nodes.filterIsInstance<TextView>().first{it.text.toString()==name}
+                assertTrue(views(title.parent as View).filterIsInstance<Button>()
+                    .first{it.text.toString()=="Настроить"}.performClick())
+            }
+        }
+        fun checkResult(expected:String) {
+            waitUntil("No result or check button stayed disabled: $expected") {
+                var ready=false
+                ui { nodes ->
+                    ready=nodes.filterIsInstance<TextView>().any{it.text.contains(expected)} &&
+                        nodes.filterIsInstance<Button>().any{it.text.toString()=="Проверить SSH и агент"&&it.isEnabled}
+                }
+                ready
+            }
+        }
+        try {
+            openServer(server.name)
+            click("Проверить SSH и агент")
+            checkResult("Проверка STMUX003: OK.")
+            tab("Главная")
+            click("Подключить")
+            waitUntil("VPN did not connect"){TunnelVpnService.phase=="Работает"}
+
+            openServer(server.name)
+            click("Проверить отпечаток")
+            checkResult("Отпечаток сервера подтверждён.")
+            click("Проверить SSH и агент")
+            checkResult("Проверка STMUX003: OK.")
+
+            openServer(failed.name)
+            repeat(2) {
+                click("Проверить SSH и агент")
+                checkResult("Сервер отклонил TCP-соединение")
+            }
+            assertTrue(TunnelVpnService.active)
+            assertEquals("Работает",TunnelVpnService.phase)
+            assertTrue(JSONObject(NativeBridge.status()).optBoolean("running"))
+            assertEquals(server,store.server(server.id))
+            assertEquals(fingerprint,SettingsStore(context,server.id).fingerprint)
+        } finally {
+            if(TunnelVpnService.active) {
+                context.startService(Intent(context,TunnelVpnService::class.java).setAction("STOP"))
+                waitUntil("VPN did not stop",15_000){!TunnelVpnService.active}
+            }
+            store.deleteServer(failed.id)
+            instrumentation.runOnMainSync { activity.finish() }
+        }
     }
 
     @Test fun runVpnTrafficSession() {

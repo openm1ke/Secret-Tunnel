@@ -31,6 +31,13 @@ class MainActivity:Activity() {
     private var checking=false
     private var checkingDetail="Проверяем доступ к серверу…"
     private var pendingTrust=false
+    private enum class CheckState { RUNNING, PASSED, FAILED }
+    private data class ServerCheck(val id:String, val state:CheckState, val text:String)
+    private var serverCheck:ServerCheck?=null
+    private var sshCheckButton:Button?=null
+    private var fingerprintCheckButton:Button?=null
+    private var serverCheckView:TextView?=null
+    private var fingerprintView:TextView?=null
     private var nameField:EditText?=null
     private var hostField:EditText?=null
     private var portField:EditText?=null
@@ -114,6 +121,7 @@ class MainActivity:Activity() {
                 update(heroTitle,when{checking->"Проверяем сервер";pendingTrust->"Подтвердите ключ сервера";phase=="Работает"->"Туннель работает";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Не удалось подключиться";store.activeProxy==null->"Добавьте подключение";else->if(readinessAction()=="Подключить")"Готов к подключению" else "Настройте подключение"})
                 update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->activeTunnelDetails();TunnelVpnService.active->TunnelVpnService.detail;phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
                 listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=!checking&&!pendingTrust&&!TunnelVpnService.active}
+                refreshServerCheck()
                 connectButton?.apply{val value=if(TunnelVpnService.active)"Остановить" else readinessAction();if(text.toString()!=value)text=value;isEnabled=!checking&&!pendingTrust&&phase!="Остановка";alpha=if(isEnabled)1f else .45f}
                 update(downSpeed,TrafficMeter.bytes(rate.down)+"/с");update(upSpeed,TrafficMeter.bytes(rate.up)+"/с")
                 update(downTotal,"Всего: "+TrafficMeter.bytes(rx.toDouble()));update(upTotal,"Всего: "+TrafficMeter.bytes(tx.toDouble()))
@@ -213,6 +221,7 @@ class MainActivity:Activity() {
         connectionLayers=null;connectionProbes=null;checkConnectionButton=null
         chartPeaks=null;appTrafficList=null;appTrafficEmpty=null;appTrafficTitle=null;appTrafficRows.clear()
         nameField=null;hostField=null;portField=null;userField=null;serverSpinner=null;exitView=null;speedViews=null
+        sshCheckButton=null;fingerprintCheckButton=null;serverCheckView=null;fingerprintView=null
         aboutUpdate=null;shownUpdate=null;updateNotice=null
         main.removeCallbacks(speedTick)
         proxyUdpReceive=null;proxyUdpAgentReceive=null
@@ -395,7 +404,7 @@ class MainActivity:Activity() {
             if (server.jumpServerId != null) card.addView(label(routeLabel(server.id),13,false,palette.muted),spaced(6))
             card.addView(label(if(scoped.hasKey())"✓  Ключ доступа добавлен" else "○  Добавьте SSH-ключ",12,false,if(scoped.hasKey())palette.accent else palette.warning),spaced(12))
             card.addView(label(if(isTrustedSshPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,palette.muted),spaced(6))
-            card.addView(button("Настроить"){unlocked();editingId=server.id;navigate("serverEditor")},spaced(14));body.addView(card,spaced(12))
+            card.addView(button("Настроить"){editingId=server.id;navigate("serverEditor")},spaced(14));body.addView(card,spaced(12))
         }
         if(store.servers().isEmpty())emptyState("Пока нет серверов","Добавьте SSH-сервер, чтобы создать подключение.")
     }
@@ -448,17 +457,23 @@ class MainActivity:Activity() {
             unlocked();saveServerForm();require(scoped.hasKey()){"Сначала импортируйте уже разрешённый SSH-ключ"};verifyServer(editingId){enrollDevice(editingId)}
         },spaced(8));body.addView(keyCard,spaced(20))
         val trust=card();trust.addView(label("Подлинность сервера",17,true))
-        trust.addView(label(if(isTrustedSshPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,palette.muted).apply{setTextIsSelectable(true)},spaced(10))
-        trust.addView(button("Проверить отпечаток"){unlocked();saveServerForm();verifyServer(editingId){toast("Сервер доступен, ключ сохранён");render()}},spaced(14))
+        fingerprintView=label(if(isTrustedSshPin(scoped.fingerprint))scoped.fingerprint else "Отпечаток будет получен автоматически",12,false,palette.muted)
+            .apply{setTextIsSelectable(true)}
+        trust.addView(fingerprintView,spaced(10))
+        fingerprintCheckButton=button("Проверить отпечаток"){startServerCheck(null)}
+        trust.addView(fingerprintCheckButton,spaced(14))
         val isRelay = store.servers().any { it.jumpServerId == editingId }
-        trust.addView(button(if(isRelay) "Проверить SSH" else "Проверить SSH и агент"){
-            unlocked();saveServerForm();val id=editingId
-            require(SettingsStore(this,id).hasKey()){"Сначала импортируйте SSH-ключ"}
-            verifyServer(id){checkServerAgent(id, !isRelay)}
-        },spaced(8));body.addView(trust,spaced(12))
+        sshCheckButton=button(if(isRelay) "Проверить SSH" else "Проверить SSH и агент"){startServerCheck(!isRelay)}
+        trust.addView(sshCheckButton,spaced(8))
+        serverCheckView=label("",13,false,palette.muted).apply {
+            accessibilityLiveRegion=View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
+        trust.addView(serverCheckView,spaced(10));body.addView(trust,spaced(12))
         body.addView(button("Сохранить сервер",true){unlocked();saveServerForm();navigate("servers")},spaced(20))
         if(server!=null)body.addView(button("Удалить сервер",danger=true){unlocked();confirmDelete("Удалить сервер ${server.name}?"){store.deleteServer(server.id);navigate("servers")}},spaced(8))
         formSnapshot=originalSignature
+        if(TunnelVpnService.active) listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=false}
+        refreshServerCheck()
     }
     private fun proxyEditor(){
         val proxy=store.proxies().firstOrNull{it.id==editingId};val servers=store.servers()
@@ -1327,54 +1342,131 @@ class MainActivity:Activity() {
         else verifyServer(server.id) { prepareVpn() }
     }
     private fun startTunnel(){require(pendingProxy==store.activeProxyId){"Профиль изменился. Подключитесь заново."};startForegroundService(Intent(this,TunnelVpnService::class.java))}
-    private fun verifyServer(id:String,after:()->Unit){
-        unlocked();require(!pendingTrust){"Проверка уже выполняется"}
+    private fun refreshServerCheck() {
+        val status=serverCheck
+        val running=status?.state==CheckState.RUNNING
+        val visible=status?.takeIf{it.id==editingId}
+        val enabled=!running&&!checking&&!pendingTrust
+        listOf(sshCheckButton,fingerprintCheckButton).forEach {
+            it?.isEnabled=enabled
+            it?.alpha=if(enabled)1f else .45f
+        }
+        serverCheckView?.apply {
+            visibility=if(visible==null)View.GONE else View.VISIBLE
+            update(this,visible?.text.orEmpty())
+            setTextColor(when(visible?.state) {
+                CheckState.PASSED -> palette.accent
+                CheckState.FAILED -> palette.error
+                else -> palette.muted
+            })
+        }
+    }
+
+    // A diagnostic can use an active VPN's saved profile without editing it.
+    private fun startServerCheck(checkAgent:Boolean?) {
+        val id=editingId
+        val readOnly=TunnelVpnService.active
+        fun complete(state:CheckState,text:String) {
+            serverCheck=ServerCheck(id,state,text)
+            if(page=="serverEditor"&&editingId==id) {
+                val pin=SettingsStore(this,id).fingerprint
+                update(fingerprintView,if(isTrustedSshPin(pin))pin else "Отпечаток будет получен автоматически")
+            }
+            refreshServerCheck()
+        }
+        if(checking||pendingTrust||serverCheck?.state==CheckState.RUNNING)return
+        try {
+            if(!readOnly)saveServerForm()
+            val route=store.route(id)
+            val fail:(String)->Unit={complete(CheckState.FAILED,it)}
+            val progress=when(checkAgent) {
+                true -> "Проверяем SSH, ключ и серверный агент…"
+                false -> "Проверяем SSH и ключ…"
+                null -> "Проверяем отпечаток SSH-сервера…"
+            }
+            complete(CheckState.RUNNING,progress)
+            if(checkAgent!=null)require(SettingsStore(this,id).hasKey()){"Сначала импортируйте SSH-ключ"}
+            fun verifyLogin(agent:Boolean) {
+                checkServerAgent(store.route(id),agent){ok,result->
+                    complete(if(ok)CheckState.PASSED else CheckState.FAILED,result)
+                }
+            }
+            if(checkAgent!=null&&route.all{isTrustedSshPin(it.fingerprint)}) {
+                verifyLogin(checkAgent)
+            } else {
+                verifyServer(id,readOnly=readOnly,onFailure=fail,onCancel={fail("Проверка отменена.")}) {
+                    if(checkAgent==null)complete(CheckState.PASSED,"Отпечаток сервера подтверждён.")
+                    else verifyLogin(checkAgent)
+                }
+            }
+        }catch(error:Exception){
+            complete(CheckState.FAILED,error.message?:"Не удалось проверить SSH")
+        }
+    }
+
+    private fun verifyServer(
+        id:String,
+        readOnly:Boolean=false,
+        onFailure:(String)->Unit=::message,
+        onCancel:()->Unit={},
+        after:()->Unit,
+    ){
+        if(!readOnly)unlocked()
+        require(!pendingTrust){"Проверка уже выполняется"}
         fun verifyNext(index: Int) {
             val route = store.route(id)
             if (index == route.size) { after(); return }
             if (index < route.lastIndex && isTrustedSshPin(route[index].fingerprint)) verifyNext(index + 1)
-            else verifyHost(route.take(index + 1)) { verifyNext(index + 1) }
+            else verifyHost(route.take(index + 1),readOnly,onFailure,onCancel) { verifyNext(index + 1) }
         }
         verifyNext(0)
     }
-    private fun verifyHost(route: List<SshEndpoint>, after: () -> Unit) {
+    private fun verifyHost(route:List<SshEndpoint>,readOnly:Boolean,onFailure:(String)->Unit,onCancel:()->Unit,after:()->Unit) {
         val endpoint = route.last()
         val server = endpoint.profile
         val scoped=SettingsStore(this,server.id);val saved=endpoint.fingerprint
-        checkingDetail="Получаем ключ SSH-сервера «${server.name}»…";checking=true
+        if(!readOnly){checkingDetail="Получаем ключ SSH-сервера «${server.name}»…";checking=true}
         Thread{
             val result=try{store.withSshConfig(route, includeTargetKey=false) { JSONObject(NativeBridge.probe(it.toString())) }}
                 catch(e:Exception){JSONObject().put("error",e.message)}
             runOnUiThread{
-                checking=false;if(isFinishing||isDestroyed)return@runOnUiThread
-                if(store.server(server.id)!=server)return@runOnUiThread
+                if(!readOnly)checking=false
+                if(isFinishing||isDestroyed)return@runOnUiThread
+                if(store.server(server.id)!=server){onFailure("Профиль сервера изменился. Повторите проверку.");return@runOnUiThread}
                 val pin=result.optString("fingerprint")
-                if(!isTrustedSshPin(pin)){message("Не удалось проверить сервер «${server.name}»: "+result.optString("error"));return@runOnUiThread}
-                fun proceed(){scoped.fingerprint=pin;attempt(after)}
-                if(saved==pin)proceed()else{
+                if(!isTrustedSshPin(pin)){onFailure("Не удалось проверить сервер «${server.name}». "+friendlyError(result.optString("error")));return@runOnUiThread}
+                fun proceed(){
+                    try{if(!readOnly&&pin!=saved)scoped.fingerprint=pin;after()}
+                    catch(error:Exception){onFailure(error.message?:"Не удалось проверить SSH")}
+                }
+                if(saved==pin)proceed()
+                else if(readOnly)onFailure("Сверьте и подтвердите отпечаток сервера «${server.name}» после остановки VPN.")
+                else{
                     pendingTrust=true
+                    var accepted=false
                     AlertDialog.Builder(uiContext).setTitle(if(isTrustedSshPin(saved))"Ключ сервера изменился" else "Доверять серверу?")
                         .setMessage("${server.host}:${server.port}\n\n$pin\n\n"+if(isTrustedSshPin(saved))"Сохранён другой ключ. Сверьте замену у администратора перед подтверждением." else "Сверьте отпечаток у администратора. После подтверждения приложение запомнит этот сервер.")
                         .setNegativeButton("Отмена",null).setPositiveButton("Доверять"){dialog,_->
-                            dialog.dismiss();pendingTrust=false;proceed()
-                        }.setOnDismissListener{pendingTrust=false}.show()
+                            accepted=true;dialog.dismiss();pendingTrust=false;proceed()
+                        }.setOnDismissListener{
+                            pendingTrust=false
+                            if(!accepted)onCancel()
+                        }.show()
                 }
             }
         }.start()
     }
-    private fun checkServerAgent(id:String, checkAgent:Boolean){
-        val route = store.route(id)
-        checkingDetail=if(checkAgent)"Проверяем SSH, ключ и серверный агент…" else "Проверяем SSH и ключ…"
-        checking=true
+    private fun checkServerAgent(route:List<SshEndpoint>,checkAgent:Boolean,complete:(Boolean,String)->Unit){
         Thread{
             val result=try{
                 store.withSshConfig(route) { config ->
                     config.put("check_agent",checkAgent)
                     val response=JSONObject(NativeBridge.checkServer(config.toString()))
-                    if(response.optBoolean("ok"))response.getString("summary") else friendlyError(response.optString("error","Не удалось проверить SSH"))
+                    if(response.optBoolean("ok"))true to response.getString("summary")
+                    else false to friendlyError(response.optString("error","Не удалось проверить SSH"))
                 }
-            }catch(error:Exception){error.message?:"Не удалось проверить SSH"}
-            runOnUiThread{checking=false;if(!isFinishing&&!isDestroyed)message(result)}
+            }catch(error:Exception){false to (error.message?:"Не удалось проверить SSH")}
+            runOnUiThread{if(!isFinishing&&!isDestroyed)complete(result.first,result.second)}
         }.start()
     }
     private fun enrollDevice(id:String){

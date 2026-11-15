@@ -45,6 +45,7 @@ import {
   RouteRibbon,
   TrafficChart,
   TrafficPoint,
+  maskAddresses,
   countryName,
   formatBitRate,
   formatBytes,
@@ -170,7 +171,7 @@ const appAliases = (app: InstalledApp) => (app.source === "macos" ? app.patterns
  * such as Sparkle's or Mozilla's are shared by many applications, so only the
  * bundle's own identifier counts. */
 const appOwnKeys = (app: InstalledApp) => (app.source === "macos" && app.primary ? [normalizeAppPattern(app.primary)] : appAliases(app));
-type BusyAction = "connect" | "disconnect" | "restart" | "save" | "delete" | "test" | "logs" | null;
+type BusyAction = "connect" | "disconnect" | "restart" | "save" | "delete" | "logs" | null;
 type CopyField = "proxy-ip" | "server-host" | "ipinfo-token" | "logs" | null;
 type Phase = "up" | "busy" | "down" | "error";
 
@@ -198,6 +199,7 @@ const messageText: Record<string, string> = {
   "Tunnel startup requested": "Запускаем туннель…",
   "Tunnel stop requested": "Останавливаем туннель…",
   "Tunnel restart requested": "Перезапускаем туннель…",
+  "TCP and SSH key authentication OK": "SSH и ключ: OK.",
 };
 
 function SettingHint({ text }: { text: string }) {
@@ -703,23 +705,31 @@ function App() {
     });
   }
 
+  const usesEmbeddedCheck = (server: ServerProfile) => Boolean(server.jump_server_id) || config.settings.ssh_engine === "embedded";
   const checksAgent = (server: ServerProfile) =>
-    Boolean(server.jump_server_id || config.settings.ssh_engine === "embedded") && !config.servers.some((profile) => profile.jump_server_id === server.id);
+    usesEmbeddedCheck(server) && !config.servers.some((profile) => profile.jump_server_id === server.id);
+  const checkingServer = serverCheck?.state === "running";
 
-  /** The check shows its result under the buttons: it takes up to half a minute. */
   async function checkServer(server: ServerProfile) {
+    if (checkingServer) return;
     const started = Math.floor(Date.now() / 1000);
-    setBusy("test");
+    // Allow time for the backend's deadline and IPC to return the diagnostic.
+    const timeout = usesEmbeddedCheck(server) ? (server.jump_server_id ? 45 : 35) : server.connect_timeout + 10;
+    let timer: number | undefined;
     setServerCheck({ id: server.id, state: "running", at: started,
-      text: checksAgent(server) ? `Подключаемся к ${server.host}:${server.port}, проверяем ключ и агент. Это занимает до ${server.connect_timeout + 15} с.` : `Подключаемся к ${server.host}:${server.port} и проверяем ключ.` });
+      text: checksAgent(server) ? "Проверяем вход по ключу и совместимость агента." : "Проверяем вход на сервер по ключу." });
     try {
-      const output = await invoke<string>("test_server", { server });
+      const output = await Promise.race([
+        invoke<string>("test_server", { server }),
+        new Promise<never>((_, reject) => {
+          timer = window.setTimeout(() => reject("Проверка SSH не вернула ответ вовремя. Повторите проверку."), timeout * 1000);
+        }),
+      ]);
       setServerCheck({ id: server.id, state: "ok", at: Math.floor(Date.now() / 1000), text: messageText[output] ?? output });
     } catch (error) {
       setServerCheck({ id: server.id, state: "error", at: Math.floor(Date.now() / 1000), text: String(error) });
     } finally {
-      await refreshAll();
-      setBusy(null);
+      window.clearTimeout(timer);
     }
   }
 
@@ -1166,9 +1176,9 @@ function App() {
                     setServerDraft(saved);
                     return `Сервер «${saved.name}» сохранён`;
                   })}><Save size={15} />Сохранить</button>
-                  <button disabled={busy !== null || !serverDraft.id} onClick={() => checkServer(serverDraft)}>
+                  <button disabled={checkingServer || busy !== null || !serverDraft.id} onClick={() => checkServer(serverDraft)}>
                     <Terminal size={15} />
-                    {busy === "test" ? "Проверяем…" : checksAgent(serverDraft) ? "Проверить SSH и агент" : "Проверить SSH"}
+                    {checkingServer && serverCheck.id === serverDraft.id ? "Проверяем…" : checksAgent(serverDraft) ? "Проверить SSH и агент" : "Проверить SSH"}
                   </button>
                   <button className="quietDanger" disabled={busy !== null || !serverDraft.id || sessionActive} onClick={() => runAction("delete", async () => {
                     await invoke<AppConfig>("delete_server", { id: serverDraft.id });
@@ -1180,7 +1190,7 @@ function App() {
                 {serverCheck && serverCheck.id === serverDraft.id && (
                   <div className={`checkResult ${serverCheck.state}`} role={serverCheck.state === "error" ? "alert" : "status"}>
                     <strong>{serverCheck.state === "running" ? "Проверяем…" : serverCheck.state === "ok" ? "Проверка пройдена" : "Проверка не прошла"}</strong>
-                    <span>{serverCheck.text}</span>
+                    <span>{showSensitive || showServerHost ? serverCheck.text : maskAddresses(serverCheck.text)}</span>
                     {serverCheck.state !== "running" && <small>{new Date(serverCheck.at * 1000).toLocaleTimeString("ru-RU")} · подробности в журнале внизу</small>}
                   </div>
                 )}

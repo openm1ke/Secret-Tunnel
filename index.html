@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Secret Tunnel — нужные программы через свой сервер</title>
-  <meta name="description" content="Secret Tunnel ведёт трафик выбранных приложений через ваш SSH-сервер, при необходимости через промежуточный. macOS, Windows и Android.">
+  <meta name="description" content="Secret Tunnel ведёт трафик выбранных приложений через ваш SSH-сервер, при необходимости через промежуточный. macOS, Windows, Android и Android TV.">
   <meta property="og:title" content="Secret Tunnel">
-  <meta property="og:description" content="Нужные программы — через свой сервер. macOS, Windows и Android.">
+  <meta property="og:description" content="Нужные программы — через свой сервер. macOS, Windows, Android и Android TV.">
   <meta property="og:image" content="assets/icon-512.png">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
@@ -44,7 +44,7 @@
           <a class="button primary" href="releases.html">Скачать последнюю версию</a>
           <a class="button quiet" href="guide.html">Пошаговая установка</a>
         </div>
-        <p class="platforms">macOS, Windows и Android. Нужен свой сервер с SSH: подойдёт любой недорогой VPS на Linux.</p>
+        <p class="platforms">macOS, Windows, Android и Android TV. Нужен свой SSH-сервер. Подойдёт VPS на Linux.</p>
         <p class="use-notice" id="acceptable-use"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
 
         <figure class="route" aria-label="Тестовые приложения подключаются к внутреннему сервису через свой SSH-сервер. Остальной трафик идёт напрямую.">
@@ -197,6 +197,7 @@
           <tr><th>macOS</th><td>macOS 15 или новее. Для выбора программ — ProxyBridge 4.1.2 из официального релиза и разрешение системного расширения.</td></tr>
           <tr><th>Windows</th><td>Windows 10 или 11. Установщик уже содержит компонент перехвата; для выбора программ приложение запускается от имени администратора.</td></tr>
           <tr><th>Android</th><td>Android 8.0 или новее. Работает как VPN только для отмеченных приложений.</td></tr>
+          <tr><th>Android TV</th><td>Отдельный APK для телевизоров и приставок. Управление пультом, выбор приложений и подключение через SSH. <a href="knowledge.html#android-tv">Как установить</a></td></tr>
           <tr><th>Сервер</th><td>Linux x86_64 с доступом по SSH-ключу. Агент ставится в домашний каталог пользователя, без sudo и без открытия портов.</td></tr>
         </table>
       </div>

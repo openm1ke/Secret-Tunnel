@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Установка Secret Tunnel</title>
-  <meta name="description" content="Пошаговая установка Secret Tunnel для macOS, Windows и Linux: от сервера с паролем root до первого подключения. Команды, картинки и пояснения к каждой настройке.">
+  <meta name="description" content="Настройка SSH-сервера, подключение Secret Tunnel на macOS и Windows и установка отдельного APK для Android TV.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
   <script src="assets/appearance.js"></script>
@@ -68,6 +68,7 @@
         <li><a href="#connect">11. Подключиться</a></li>
         <li><a href="#apps">12. Выбрать программы</a></li>
         <li><a href="#settings">13. Настройки</a></li>
+        <li><a href="#android-tv">Установка на Android TV</a></li>
         <li class="group">Дополнительно</li>
         <li><a href="#chain">Цепочка серверов</a></li>
         <li><a href="#advanced">Проверка ключа хоста</a></li>
@@ -78,6 +79,7 @@
     <main id="main">
       <h1>Установка шаг за шагом</h1>
       <p class="intro">Настройте SSH на своём сервере и подключите к нему выбранные программы. <span class="site-only">Выберите свою систему и впишите адрес сервера в поле «Адрес сервера от хостера», чтобы подставить его в команды.</span><span class="app-only" hidden>В командах замените <code>203.0.113.10</code> на адрес своего сервера.</span></p>
+      <p class="site-only">Для телевизора или приставки используйте <a href="#android-tv">инструкцию по установке Android TV</a>.</p>
       <p class="use-notice"><strong>Условия использования.</strong> Используйте Secret Tunnel для подключения к серверам и ресурсам, к которым у вас есть право доступа. Соблюдайте применимое законодательство, в том числе установленные в России ограничения доступа к информации.</p>
 
       <article class="doc" id="ssh">
@@ -438,6 +440,12 @@ PASS STMUX003: TCP half-close; empty/voice/51200-byte UDP; 24 isolated associati
           <li><b>Сохранить настройки</b> — изменения применяются после сохранения, некоторые — при следующем подключении.</li>
           <li data-os="mac win"><b>Отдельный SSH для UDP</b> появляется в профиле «Голос» со встроенным SSH. Во вкладке «Приложения» добавьте нужную программу в перехват и отметьте «UDP через второй SSH». Сохраните выбор, переподключите туннель и снова включите перехват.</li>
         </ol>
+      </article>
+
+      <article class="doc" id="android-tv">
+        <h2><a href="#android-tv">Установка на Android TV</a></h2>
+        <p>Для приставки или телевизора предусмотрен отдельный APK с управлением пультом. Скачайте файл с окончанием <code>-android-tv.apk</code> в разделе Android TV. <a href="releases.html#android-tv">Релизы</a></p>
+        <p>Перенесите APK на флешку и откройте его в файловом менеджере приставки. Затем добавьте SSH-сервер в «Серверах» и выберите нужные программы в «Приложениях». <a href="knowledge.html#android-tv">Пошаговое подключение</a></p>
       </article>
 
       <p class="part">Дополнительно</p>

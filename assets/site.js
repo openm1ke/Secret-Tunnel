@@ -161,13 +161,14 @@
     const esc = (text) => String(text).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
     const platform = (name) => {
       const n = name.toLowerCase();
+      if (n.endsWith("-android-tv.apk")) return "Android TV";
       if (/\.apk$|android/.test(n)) return "Android";
       if (/\.dmg$|macos|darwin|\.app\.zip$/.test(n)) return "macOS";
       if (/\.exe$|\.msi$|windows/.test(n)) return "Windows";
       if (/server|agent|linux/.test(n)) return "Сервер";
       return "Прочее";
     };
-    const order = ["macOS", "Windows", "Android", "Сервер", "Прочее"];
+    const order = ["macOS", "Windows", "Android", "Android TV", "Сервер", "Прочее"];
     const label = (name) => {
       const n = name.toLowerCase();
       if (n.endsWith(".dmg")) return "Образ DMG";

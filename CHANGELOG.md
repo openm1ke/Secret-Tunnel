@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.31 — 2026-11-16
+
+- Android and Android TV refresh the app list after installs, removals and updates, and when returning to the app. The list keeps the search and selected apps.
+- Desktop refreshes the app list on opening its tab, returning to the window and every 15 seconds while the tab is focused. Manually added executables stay in the list.
+- The Android and Android TV header displays the tunnel animation from the desktop tray and shows the tunnel state with its arches and exit light.
+- Android keeps older process exits in the journal and shows a startup warning once when Android confirms that the last tunnel startup was interrupted.
+
 ## 0.3.30 — 2026-11-16
 
 - Android TV gets a separate signed APK and a scrollable vertical menu with every section accessible from the remote.

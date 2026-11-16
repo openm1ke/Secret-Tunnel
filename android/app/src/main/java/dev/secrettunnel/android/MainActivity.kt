@@ -28,6 +28,7 @@ class MainActivity:Activity() {
     private lateinit var body:LinearLayout
     private var pageScroll: ScrollView? = null
     private lateinit var badge:TextView
+    private lateinit var tunnelLogo: TunnelLogo
     private val isTv by lazy {
         packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) ||
             resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION
@@ -114,15 +115,25 @@ class MainActivity:Activity() {
     private val main=Handler(Looper.getMainLooper())
     private val meter=TrafficMeter()
     private var lastStatus=JSONObject()
-    private var previousConnectionFailure: String? = null
+    private var previousConnectionFailure: PreviousConnectionFailure? = null
     private var startupFailed = false
     private var catalog=listOf<AppEntry>()
     private var catalogLoaded=false
     private var catalogError: String? = null
+    private var watchingPackages = false
+    private var scanningApps = false
+    private var rescanApps = false
+    private val packageChanges = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_PACKAGE_REMOVED &&
+                intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) return
+            scanApps()
+        }
+    }
     private val selected=mutableSetOf<String>()
     private val protectedApps = mutableSetOf<String>()
-    private val iconCache=android.util.LruCache<String,Drawable>(32)
-    private data class AppEntry(val pkg:String,val label:String)
+    private val iconCache=android.util.LruCache<AppEntry,Drawable>(32)
+    private data class AppEntry(val pkg:String,val label:String,val sourceDir:String)
     private val poll=object:Runnable {
         override fun run(){
             try{
@@ -132,8 +143,7 @@ class MainActivity:Activity() {
                 val rx=lastStatus.optLong("rx");val tx=lastStatus.optLong("tx")
                 val rate=meter.sample(SystemClock.elapsedRealtime(),rx,tx)
                 val phase=TunnelVpnService.phase
-                val state=when{checking->"Проверка";pendingTrust->"Подтверждение";phase=="Работает"->"Подключено";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Ошибка";else->"Остановлен"}
-                update(badge,state);badge.setTextColor(when{state=="Подключено"->palette.accent;state=="Ошибка"->palette.error;TunnelVpnService.active||checking->palette.warning;else->palette.muted})
+                refreshHeader(phase)
                 update(heroTitle,when{checking->"Проверяем сервер";pendingTrust->"Подтвердите ключ сервера";phase=="Работает"->"Туннель работает";TunnelVpnService.active->phase;phase.contains("Ошибка")->"Не удалось подключиться";store.activeProxy==null->"Добавьте подключение";else->if(readinessAction()=="Подключить")"Готов к подключению" else "Настройте подключение"})
                 update(heroDetail,when{checking->checkingDetail;pendingTrust->"Сверьте отпечаток в открытом диалоге";phase=="Работает"->activeTunnelDetails();TunnelVpnService.active->TunnelVpnService.detail;phase.contains("Ошибка")->friendlyError(TunnelVpnService.detail);else->"Выберите профиль и приложения. Остальной трафик идёт напрямую."})
                 listOf(nameField,hostField,portField,userField,serverSpinner).forEach{it?.isEnabled=!checking&&!pendingTrust&&!TunnelVpnService.active}
@@ -181,11 +191,13 @@ class MainActivity:Activity() {
         speedDirect=savedInstanceState?.getBoolean("speedDirect")?:false;speedProvider=savedInstanceState?.getString("speedProvider")?:"cloudflare"
         listOf("enrollment-key.runtime","device-key.runtime").forEach{java.io.File(filesDir,it).delete()}
         if(Build.VERSION.SDK_INT>=33)onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT){handleBack()}
-        render();scanApps()
         previousConnectionFailure = ConnectionAttempt.previousFailure(this)
+        render()
         if (savedInstanceState == null) previousConnectionFailure?.let { failure ->
-            AlertDialog.Builder(uiContext).setTitle("Предыдущее завершение приложения")
-                .setMessage(failure).setPositiveButton("Понятно", null).show()
+            ConnectionAttempt.consumeStartupWarning(this, failure, TunnelVpnService.active)?.let { warning ->
+                AlertDialog.Builder(uiContext).setTitle("Предыдущий запуск туннеля прервался")
+                    .setMessage(warning).setPositiveButton("Понятно", null).show()
+            }
         }
         if (store.checkUpdates) MobileUpdates.check(automatic = true)
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission("android.permission.POST_NOTIFICATIONS")!=PackageManager.PERMISSION_GRANTED)requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"),101)
@@ -205,6 +217,27 @@ class MainActivity:Activity() {
                 setPadding(dp(32), dp(24), dp(32), dp(24))
             })
         })
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (startupFailed) return
+        registerReceiver(packageChanges, IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_CHANGED)
+            addDataScheme("package")
+        })
+        watchingPackages = true
+        scanApps()
+    }
+
+    override fun onStop() {
+        if (watchingPackages) {
+            unregisterReceiver(packageChanges)
+            watchingPackages = false
+        }
+        super.onStop()
     }
 
     override fun onResume(){super.onResume();if(startupFailed)return;main.removeCallbacks(poll);main.post(poll);if(page=="speed"){main.removeCallbacks(speedTick);main.post(speedTick)}}
@@ -275,7 +308,36 @@ class MainActivity:Activity() {
             .setNegativeButton("Остаться",null).setNeutralButton("Не сохранять"){_,_->navigate(destination)}.setPositiveButton("Сохранить"){_,_->attempt{saveEditor();navigate(destination)}}.show()
         else navigate(destination)
     }
-    private fun navigate(destination:String){page=destination;formDraft=null;render()}
+    private fun navigate(destination:String){
+        val enteringApps = destination == "apps" && page != destination
+        page=destination;formDraft=null;render()
+        if (enteringApps) scanApps()
+    }
+
+    private fun refreshHeader(phase: String) {
+        val active = TunnelVpnService.active
+        val state = when {
+            checking -> "Проверка"
+            pendingTrust -> "Подтверждение"
+            phase == "Работает" -> "Подключено"
+            active -> phase
+            phase.contains("Ошибка") -> "Ошибка"
+            else -> "Остановлен"
+        }
+        update(badge, state)
+        badge.setTextColor(when {
+            state == "Подключено" -> palette.accent
+            state == "Ошибка" -> palette.error
+            active || checking -> palette.warning
+            else -> palette.muted
+        })
+        tunnelLogo.show(when (phase) {
+            "Работает" -> TunnelLogo.State.ON
+            "Подключение", "Переподключение", "Смена сети", "Восстановление", "Ожидание сети" -> TunnelLogo.State.CONNECTING
+            else -> TunnelLogo.State.OFF
+        })
+    }
+
     private fun render(keepTvPosition: Boolean = false){
         val oldScroll = pageScroll?.takeIf { isTv && keepTvPosition }
         val oldOffset = oldScroll?.scrollY
@@ -297,8 +359,13 @@ class MainActivity:Activity() {
             if(isTv)setPadding(dp(32),dp(18),dp(32),dp(18))
         }
         val header=row().apply{setPadding(dp(pageInset),dp(15),dp(pageInset),dp(12));gravity=Gravity.CENTER_VERTICAL}
+        val logoSize = dp(if (isTv) 36 else 30)
+        tunnelLogo = TunnelLogo(this).also {
+            header.addView(it, LinearLayout.LayoutParams(logoSize, logoSize).apply { marginEnd = dp(10) })
+        }
         header.addView(label("Secret Tunnel",21,true),LinearLayout.LayoutParams(0,-2,1f))
         badge=label("Остановлен",11).apply{setPadding(dp(12),dp(7),dp(12),dp(7));background=palette.panel(palette.raised,dp(20).toFloat())};header.addView(badge);root.addView(header)
+        refreshHeader(TunnelVpnService.phase)
         content=FrameLayout(this)
         val nav=(if(isTv)column() else row()).apply{
             setPadding(dp(8),dp(8),dp(8),dp(9))
@@ -1170,7 +1237,7 @@ class MainActivity:Activity() {
         val peak=(sorted.maxOfOrNull{it.rx+it.tx}?:1L).coerceAtLeast(1L)
         for(app in sorted){
             val line=row().apply{gravity=Gravity.CENTER_VERTICAL}
-            val icon=ImageView(this);catalog.firstOrNull{it.label==app.name}?.let{entry->icon.setImageDrawable(iconCache.get(entry.pkg)?:runCatching{packageManager.getApplicationIcon(entry.pkg)}.getOrNull())}
+            val icon=ImageView(this);catalog.firstOrNull{it.label==app.name}?.let{icon.setImageDrawable(applicationIcon(it))}
             line.addView(icon,LinearLayout.LayoutParams(dp(32),dp(32)).apply{marginEnd=dp(12)})
             val texts=column();texts.addView(label(app.name,14,true))
             if(app.name==VIA_PROXY)texts.addView(label("тесты скорости, проверки и приложения с прокси 127.0.0.1 в своих настройках",11,false,palette.muted),spaced(2))
@@ -1352,24 +1419,51 @@ class MainActivity:Activity() {
         update(appCount, if (catalogLoaded) "Через туннель: ${selected.size}  ·  С защитой: ${selected.count(protectedApps::contains)}"
             else "Ищем установленные приложения…")
     }
-    private fun scanApps(){Thread{
-        val found = try {
-            val categories=if(isTv)listOf(Intent.CATEGORY_LEANBACK_LAUNCHER,Intent.CATEGORY_LAUNCHER) else listOf(Intent.CATEGORY_LAUNCHER)
-            categories.flatMap{category->packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category),0)}
-                .map{AppEntry(it.activityInfo.packageName,it.loadLabel(packageManager).toString())}
-                .filter{it.pkg!=packageName&&packageManager.checkPermission("android.permission.INTERNET",it.pkg)==PackageManager.PERMISSION_GRANTED}
-                .distinctBy{it.pkg}.sortedBy{it.label.lowercase()}
-        } catch (error: Exception) {
-            android.util.Log.e("SecretTunnelStartup", "Не удалось прочитать список приложений", error)
-            runOnUiThread {
-                catalogError = "Не удалось прочитать список приложений.\n${error.javaClass.simpleName}"
-                catalogLoaded = true
-                refreshApps()
-            }
-            return@Thread
+    private fun scanApps() {
+        if (!watchingPackages) return
+        if (scanningApps) {
+            rescanApps = true
+            return
         }
-        runOnUiThread { catalog=found; catalogLoaded=true; refreshApps() }
-    }.start()}
+        scanningApps = true
+        rescanApps = false
+        Thread {
+            var scanError: String? = null
+            val found = try {
+                val categories = if (isTv) listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)
+                    else listOf(Intent.CATEGORY_LAUNCHER)
+                categories.flatMap { category ->
+                    packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(category), 0)
+                }.distinctBy { it.activityInfo.packageName }
+                    .filter {
+                        val pkg = it.activityInfo.packageName
+                        pkg != packageName && packageManager.checkPermission("android.permission.INTERNET", pkg) == PackageManager.PERMISSION_GRANTED
+                    }.map {
+                        AppEntry(it.activityInfo.packageName, it.loadLabel(packageManager).toString(), it.activityInfo.applicationInfo.sourceDir)
+                    }.sortedWith(compareBy({ it.label.lowercase() }, { it.pkg }))
+            } catch (error: Exception) {
+                android.util.Log.e("SecretTunnelApps", "Не удалось прочитать список приложений", error)
+                scanError = "Не удалось прочитать список приложений.\n${error.javaClass.simpleName}"
+                null
+            }
+            runOnUiThread {
+                scanningApps = false
+                if (!watchingPackages) return@runOnUiThread
+                if (!catalogLoaded || catalogError != scanError || (found != null && catalog != found)) {
+                    if (found != null) catalog = found
+                    catalogError = scanError
+                    catalogLoaded = true
+                    refreshApps()
+                }
+                if (rescanApps) scanApps()
+            }
+        }.start()
+    }
+
+    private fun applicationIcon(entry: AppEntry): Drawable? = iconCache.get(entry) ?: runCatching {
+        packageManager.getApplicationIcon(entry.pkg).also { iconCache.put(entry, it) }
+    }.getOrNull()
+
     private class AppHolder(val icon:ImageView,val name:TextView,val pkg:TextView,val toggle:Switch,val guard:CheckBox,val priority:CheckBox)
     private inner class ApplicationAdapter(private val priorityAvailable: Boolean):BaseAdapter(){
         private val priorityPackages = store.priorityUdpPackages.toMutableSet()
@@ -1378,6 +1472,7 @@ class MainActivity:Activity() {
         override fun getCount()=visible.size
         override fun getItem(position:Int)=visible[position]
         override fun getItemId(position:Int)=visible[position].pkg.hashCode().toLong()
+        override fun hasStableIds() = true
         override fun getView(position:Int,convertView:View?,parent:ViewGroup):View{
             val container = convertView as? LinearLayout ?: column().apply {
                 setPadding(0, dp(6), 0, dp(6))
@@ -1405,7 +1500,7 @@ class MainActivity:Activity() {
                 tag = AppHolder(icon, name, pkg, toggle, guard, priority)
             }
             val item=visible[position];val holder=container.tag as AppHolder;holder.name.text=item.label;holder.pkg.text=item.pkg
-            holder.icon.setImageDrawable(iconCache.get(item.pkg)?:try{packageManager.getApplicationIcon(item.pkg).also{iconCache.put(item.pkg,it)}}catch(_:Exception){null})
+            holder.icon.setImageDrawable(applicationIcon(item))
             holder.toggle.setOnCheckedChangeListener(null);holder.toggle.isChecked=item.pkg in selected;holder.toggle.contentDescription="Через туннель: ${item.label}"
             holder.priority.setOnCheckedChangeListener(null)
             holder.priority.visibility = if (priorityAvailable && item.pkg in selected) View.VISIBLE else View.GONE
@@ -1494,8 +1589,8 @@ class MainActivity:Activity() {
         return listOfNotNull(status,windows,latency).joinToString("\n")
     }
     private fun diagnostics():String=buildString{
-        previousConnectionFailure?.let { append("Предыдущее завершение\n$it\n\n") }
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
+        previousConnectionFailure?.let { append("История завершений Android\n${it.message}\n\n") }
         lastStatus.optString("agent").takeIf{it.isNotBlank()&&it!="null"}?.let{append(it+"\n\n")}
         lastStatus.optJSONObject("transport")?.let { t->
             append("Транспорт v3 · SSH-каналов: ${t.optInt("ssh_channels")}\n")

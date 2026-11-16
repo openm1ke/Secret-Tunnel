@@ -3,7 +3,7 @@ import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import AboutPanel, { Release } from "./AboutPanel";
 import ConnectionHealth, { ConnectionChecks } from "./ConnectionHealth";
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -387,9 +387,9 @@ function App() {
   const [traffic, setTraffic] = useState<TrafficPoint[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [redirect, setRedirect] = useState<RedirectStatus>({ running: false, starting: false, platform: "unknown", requires_administrator: true, supports_system_ssh: false, supports_domains: false, setup_message: "", pid: null, administrator: false, component_available: false, last_error: "" });
-  const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
+  const [scannedApps, setScannedApps] = useState<InstalledApp[]>([]);
+  const [addedApps, setAddedApps] = useState<InstalledApp[]>([]);
   const [appIcons, setAppIcons] = useState<Record<string, string>>({});
-  const [appsLoaded, setAppsLoaded] = useState(false);
   const [appsScanning, setAppsScanning] = useState(false);
   const [appsError, setAppsError] = useState("");
   const [appSearch, setAppSearch] = useState("");
@@ -419,8 +419,14 @@ function App() {
   const proxyDraftDirtyRef = useRef(false);
   const settingsDirtyRef = useRef(false);
   const refreshInFlightRef = useRef(false);
+  const appScanInFlightRef = useRef(false);
+  const appsLoadedRef = useRef(false);
   const iconRequestsRef = useRef(new Set<string>());
 
+  const installedApps = useMemo(() => {
+    const scannedIds = new Set(scannedApps.map((app) => app.id));
+    return [...scannedApps, ...addedApps.filter((app) => !scannedIds.has(app.id))];
+  }, [scannedApps, addedApps]);
   const currentServer = useMemo(() => selectedServer(config), [config]);
   const currentProxy = useMemo(() => selectedProxy(config), [config]);
   const phase = phaseOf(status);
@@ -511,18 +517,24 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [message]);
 
-  async function scanApplications() {
-    setAppsScanning(true);
-    setAppsError("");
+  const scanApplications = useCallback(async (manual = false) => {
+    if (appScanInFlightRef.current) {
+      if (manual) setAppsScanning(true);
+      return;
+    }
+    appScanInFlightRef.current = true;
+    if (manual || !appsLoadedRef.current) setAppsScanning(true);
     try {
-      setInstalledApps(await invoke<InstalledApp[]>("scan_installed_applications"));
+      setScannedApps(await invoke<InstalledApp[]>("scan_installed_applications"));
+      setAppsError("");
     } catch (error) {
       setAppsError(String(error));
     } finally {
+      appScanInFlightRef.current = false;
+      appsLoadedRef.current = true;
       setAppsScanning(false);
-      setAppsLoaded(true);
     }
-  }
+  }, []);
 
   // Icons load in the background for the apps on screen, a batch at a time:
   // .app bundles on macOS, programs and shortcuts by full path on Windows.
@@ -631,7 +643,7 @@ function App() {
       { label: "Трафик в статистике", run: () => setActiveTab("stats") },
       ...(app.source === "manual" ? ["-" as const, { label: "Убрать из списка", danger: true, run: () => {
         toggleApplication(app, false);
-        setInstalledApps((current) => current.filter((other) => other.id !== app.id));
+        setAddedApps((current) => current.filter((other) => other.id !== app.id));
       } }] : []),
     ];
   }
@@ -643,7 +655,7 @@ function App() {
       if (!paths.length) return;
       const entries = isMac ? await invoke<InstalledApp[]>("resolve_application_paths", { paths }) : paths.map((path) => installedApps.find((app) => normalizeAppPattern(app.executable) === normalizeAppPattern(path)) ||
         ({ id: normalizeAppPattern(path), name: path.split(/[\\/]/).pop()?.replace(/\.exe$/i, "") || path, executable: path, patterns: [path], source: "manual" }));
-      setInstalledApps((current) => [...current.filter((app) => !entries.some((entry) => entry.id === app.id)), ...entries]);
+      setAddedApps((current) => [...current.filter((app) => !entries.some((entry) => entry.id === app.id)), ...entries]);
       updateSettings("redirect_processes", [...new Set([...settingsDraft.redirect_processes, ...entries.flatMap((app) => app.patterns)])]);
       const now = Math.floor(Date.now() / 1000);
       updateSettings("app_added_at", { ...(settingsDraft.app_added_at ?? {}), ...Object.fromEntries(entries.map((app) => [app.id, now])) });
@@ -809,14 +821,27 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if ((activeTab === "applications" || activeTab === "stats") && !appsLoaded && !appsScanning) scanApplications();
-  }, [activeTab]);
+    if (activeTab !== "applications") return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") void scanApplications();
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    const timer = window.setInterval(() => {
+      if (document.hasFocus()) refresh();
+    }, 15000);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.clearInterval(timer);
+    };
+  }, [activeTab, scanApplications]);
 
-  // The sidebar counts selected applications, not their rules, so the list
-  // is needed as soon as interception runs.
+  // Stats and the sidebar need program names and icons as soon as interception runs.
   useEffect(() => {
-    if (redirect.running && !appsLoaded && !appsScanning) scanApplications();
-  }, [redirect.running]);
+    if ((activeTab === "stats" || redirect.running) && !appsLoadedRef.current) void scanApplications();
+  }, [activeTab, redirect.running, scanApplications]);
 
   // Programs the selected applications start under their own signing
   // identifier go direct until they have a rule of their own.
@@ -1330,7 +1355,7 @@ function App() {
                   <button className={!selectedAppsOnly ? "on" : ""} onClick={() => setSelectedAppsOnly(false)}>Все · {appChoices.length}</button>
                   <button className={selectedAppsOnly ? "on" : ""} onClick={() => setSelectedAppsOnly(true)}>Выбранные · {selectedApps.length}</button>
                 </div>
-                <button className="ghost" disabled={appsScanning} onClick={scanApplications} title="Найти установленные программы заново"><RefreshCcw size={15} />{appsScanning ? "Ищем…" : "Обновить"}</button>
+                <button className="ghost" disabled={appsScanning} onClick={() => scanApplications(true)} title="Найти установленные программы заново"><RefreshCcw size={15} />{appsScanning ? "Ищем…" : "Обновить"}</button>
                 <button className="ghost" disabled={busy !== null} onClick={addApplicationFile}><Plus size={15} />Добавить {isMac ? ".app" : ".exe"}</button>
                 <div className="segmented viewSwitch" role="group" aria-label="Вид списка">
                   {appViews.map((view) => (

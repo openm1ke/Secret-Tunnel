@@ -9,8 +9,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 33000
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.30"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 33100
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.31"
         manifestPlaceholders["appLabel"] = "Secret Tunnel"
         ndk { abiFilters += supportedAbis }
     }

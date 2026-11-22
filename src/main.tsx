@@ -1,4 +1,5 @@
 import DomainsPanel from "./DomainsPanel";
+import SetupWizard from "./SetupWizard";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import AboutPanel, { Release } from "./AboutPanel";
@@ -70,6 +71,7 @@ type ServerProfile = {
   port: number;
   user: string;
   key_path: string;
+  host_key_sha256?: string | null;
   jump_server_id: string | null;
   compression: boolean;
   strict_host_key_checking: string;
@@ -412,6 +414,7 @@ function App() {
   const [serverCheck, setServerCheck] = useState<{ id: string; state: "running" | "ok" | "error"; text: string; at: number } | null>(null);
   const [busy, setBusy] = useState<BusyAction>(null);
   const [showServerHost, setShowServerHost] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
   const [showIpinfoToken, setShowIpinfoToken] = useState(false);
   const [copiedField, setCopiedField] = useState<CopyField>(null);
   const [now, setNow] = useState(Date.now());
@@ -761,7 +764,9 @@ function App() {
 
   function updateServer<K extends keyof ServerProfile>(key: K, value: ServerProfile[K]) {
     serverDraftDirtyRef.current = true;
-    setServerDraft((current) => ({ ...current, [key]: value, id: nextId(key, value, current, config.servers) }));
+    setServerDraft((current) => ({ ...current, [key]: value,
+      host_key_sha256: key === "host" || key === "port" ? null : current.host_key_sha256,
+      id: nextId(key, value, current, config.servers) }));
   }
 
   function updateProxy<K extends keyof ProxyProfile>(key: K, value: ProxyProfile[K]) {
@@ -1006,6 +1011,7 @@ function App() {
                   <RouteRibbon nodes={routeNodes} state={phase} />
                 </div>
                 <div className="heroActions">
+                  {!sessionActive && <button className="ghost" onClick={() => setSetupOpen(true)}>Настроить подключение</button>}
                   {!sessionActive ? (
                     <button className="primary big" disabled={busy !== null || !currentServer.id || !currentProxy.id}
                       onClick={() => runAction("connect", () => invoke<string>("start_tunnel"))}>
@@ -1112,6 +1118,7 @@ function App() {
               <section className="panel listPanel">
                 <header className="panelHead">
                   <h2>Серверы</h2>
+                  <button className="primary" onClick={() => setSetupOpen(true)}>Мастер настройки</button>
                   <button className="ghost" onClick={() => { serverDraftDirtyRef.current = true; setServerDraft(emptyServer); }}><Plus size={15} />Добавить</button>
                 </header>
                 <div className="profileList" role="listbox" aria-label="SSH-серверы">
@@ -1692,6 +1699,14 @@ function App() {
             </div>
           </div>
         )}
+        {setupOpen && <SetupWizard onClose={() => setSetupOpen(false)} onSaved={id => {
+          void invoke<AppConfig>("get_config").then(next => {
+            setConfig(next);
+            const saved = next.servers.find(server => server.id === id);
+            if (saved) { setServerDraft(saved); serverDraftDirtyRef.current = true; }
+          });
+          setActiveTab("servers");
+        }}/>}
         {/* Messages sit above the journal, clear of the buttons at the top right. */}
         <div className="toastLane">
           {message && (

@@ -3626,11 +3626,12 @@ dependencies = [
 
 [[package]]
 name = "secret-tunnel"
-version = "0.3.31"
+version = "0.3.32"
 dependencies = [
  "base64 0.22.1",
  "libc",
  "plist",
+ "rand",
  "russh",
  "secret-tunnel-mux",
  "secret-tunnel-routing",

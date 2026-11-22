@@ -569,6 +569,28 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_generateKey(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_enrollPassword(
+    mut env: JNIEnv,
+    _: JObject,
+    config: JString,
+    password: JString,
+) -> jstring {
+    let result = (|| -> Result<(), String> {
+        let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();
+        let cfg: Config = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        let password: String = env.get_string(&password).map_err(|e| e.to_string())?.into();
+        if cfg.host.trim().is_empty() || cfg.user.trim().is_empty() || cfg.port == 0 || !cfg.ssh_jumps.is_empty() {
+            return Err("Укажите адрес, SSH-порт и пользователя для прямого подключения".into());
+        }
+        embedded_ssh::setup::enroll_password(EmbeddedServer {
+            name: cfg.name, host: cfg.host, port: cfg.port, user: cfg.user,
+            key_path: cfg.key_path, strict_host_key_checking: "yes".into(),
+        }, cfg.host_key_sha256, password, false)
+    })();
+    output(&mut env, result.err().map(|e| embedded_ssh::setup::friendly_error(&e)).unwrap_or_default())
+}
+
+#[no_mangle]
 pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_registerKey(
     mut env: JNIEnv,
     _: JObject,

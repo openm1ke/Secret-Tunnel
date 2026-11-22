@@ -21,6 +21,8 @@ mod agent_preflight_tests;
 mod tls_target;
 #[path = "ssh_transport.rs"]
 mod ssh_transport;
+#[path = "ssh_setup.rs"]
+pub mod setup;
 pub use ssh_transport::{CipherPolicy, SshSnapshot, SshTuning};
 use ssh_transport::{ObservedStream, TcpObserver};
 

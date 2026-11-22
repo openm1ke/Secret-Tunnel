@@ -20,6 +20,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Подключение к вашему SSH-серверу в локальной сети.</string>
 	<key>STAppGroup</key>
 	<string>$(ST_APP_GROUP)</string>
 	<key>STTunnelBundleID</key>

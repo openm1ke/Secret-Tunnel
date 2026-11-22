@@ -43,11 +43,16 @@ enum Shared {
         return url
     }
 
-    static var keyURL: URL { container.appendingPathComponent("ssh_key") }
+    static var keyURL: URL { keyURL(for: selectedProfile) }
     static var settingsURL: URL { container.appendingPathComponent("settings.json") }
     static var hevLogURL: URL { container.appendingPathComponent("tun.log") }
 
     static func loadSettings() -> TunnelSettings {
+        if let profile = selectedProfile { return profile.settings }
+        return legacySettings()
+    }
+
+    static func legacySettings() -> TunnelSettings {
         guard let data = try? Data(contentsOf: settingsURL),
               let value = try? JSONDecoder().decode(TunnelSettings.self, from: data)
         else { return TunnelSettings() }
@@ -55,19 +60,29 @@ enum Shared {
     }
 
     static func save(_ settings: TunnelSettings) throws {
+        var catalog = try profileCatalog()
+        if let index = catalog.profiles.firstIndex(where: { $0.id == catalog.selectedID }) {
+            catalog.profiles[index].settings = settings
+            try saveCatalog(catalog)
+            return
+        }
         let data = try JSONEncoder().encode(settings)
         try data.write(to: settingsURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     static func storeKey(from source: URL) throws {
         let data = try Data(contentsOf: source)
-        guard String(decoding: data, as: UTF8.self).contains("PRIVATE KEY") else {
+        guard data.count <= 1_048_576, String(decoding: data, as: UTF8.self).contains("PRIVATE KEY") else {
             throw NSError(domain: "SecretTunnel", code: 1, userInfo: [NSLocalizedDescriptionKey: "Файл не похож на приватный SSH-ключ"])
         }
         try data.write(to: keyURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     static var hasKey: Bool { FileManager.default.fileExists(atPath: keyURL.path) }
+
+    static func saveSetup(_ settings: TunnelSettings, key: Data, name: String = "Мой сервер") throws {
+        try addProfile(settings, key: key, name: name)
+    }
 }
 
 /// Swift wrappers for the Rust C API (`secret_tunnel_ios.h`).
@@ -83,6 +98,13 @@ enum RustCore {
     static func status() -> String { take(st_ios_status()) }
     static func probe(_ json: String) -> String { take(json.withCString { st_ios_probe($0) }) }
     static func check(_ json: String) -> String { take(json.withCString { st_ios_check($0) }) }
+    static func generateKey() -> String { take(st_ios_generate_key()) }
+    static func enroll(_ json: String, password: String) -> String {
+        take(json.withCString { config in password.withCString { st_ios_enroll_password(config, $0) } })
+    }
+    static func installAgent(_ json: String, version: String, archive: String) -> String {
+        take(json.withCString { config in version.withCString { version in archive.withCString { st_ios_install_agent(config, version, $0) } } })
+    }
 }
 
 func jsonObject(_ text: String) -> [String: Any] {

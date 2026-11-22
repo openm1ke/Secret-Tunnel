@@ -29,8 +29,16 @@ final class TunnelController: ObservableObject {
     }
 
     init() {
+        #if DEBUG
+        importLocalDeviceProfiles()
+        #endif
         #if !targetEnvironment(simulator)
-        Task { await loadManager() }
+        Task {
+            await loadManager()
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--check-saved-servers") { await runLocalDeviceChecks() }
+            #endif
+        }
         #endif
     }
 
@@ -52,6 +60,17 @@ final class TunnelController: ObservableObject {
     }
     var isConfigured: Bool { hasEndpoint && hasKey && !settings.hostKeySHA256.isEmpty }
     var connectionError: String { vpnError.isEmpty ? tunnelError : vpnError }
+
+    func selectServer(_ id: String) {
+        guard canEditServer else { return }
+        do {
+            try Shared.selectProfile(id)
+            settings = Shared.loadSettings()
+            hasKey = Shared.hasKey
+            pendingFingerprint = ""
+            vpnError = ""; tunnelError = ""; message = ""
+        } catch { message = error.localizedDescription }
+    }
 
     func editServer(host: String, port: Int, user: String) -> Bool {
         guard canEditServer else { return false }

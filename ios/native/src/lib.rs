@@ -324,7 +324,7 @@ pub extern "C" fn st_ios_probe(config_json: *const c_char) -> *mut c_char {
         })();
         match result {
             Ok(pin) => json!({"fingerprint": pin}).to_string(),
-            Err(e) => json!({"error": e}).to_string(),
+            Err(e) => json!({"error": embedded_ssh::setup::friendly_error(&e)}).to_string(),
         }
     })
 }
@@ -352,7 +352,75 @@ pub extern "C" fn st_ios_check(config_json: *const c_char) -> *mut c_char {
         })();
         match result {
             Ok(summary) => json!({"ok": true, "summary": summary}).to_string(),
-            Err(error) => json!({"ok": false, "error": error}).to_string(),
+            Err(error) => json!({"ok": false, "error": embedded_ssh::setup::friendly_error(&error)}).to_string(),
+        }
+    })
+}
+
+/// Generates a separate device key without persisting it.
+#[no_mangle]
+pub extern "C" fn st_ios_generate_key() -> *mut c_char {
+    guarded(|| match embedded_ssh::setup::generate_key() {
+        Ok(key) => json!({"private": key}).to_string(),
+        Err(error) => json!({"error": error}).to_string(),
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn st_ios_enroll_password(config_json: *const c_char, password: *const c_char) -> *mut c_char {
+    let raw = input(config_json);
+    let password = input(password);
+    guarded(|| {
+        let result = (|| -> Result<(), String> {
+            let cfg: Config = serde_json::from_str(&raw?).map_err(|e| e.to_string())?;
+            if cfg.host.trim().is_empty() || cfg.user.trim().is_empty() || cfg.port == 0 || !cfg.ssh_jumps.is_empty() {
+                return Err("Укажите адрес, SSH-порт и пользователя для прямого подключения".into());
+            }
+            embedded_ssh::setup::enroll_password(
+                server(cfg.name, cfg.host, cfg.port, cfg.user, cfg.key_path),
+                cfg.host_key_sha256, password?, false,
+            )
+        })();
+        match result {
+            Ok(()) => json!({"ok": true}).to_string(),
+            Err(error) => json!({"error": embedded_ssh::setup::friendly_error(&error)}).to_string(),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn st_ios_install_agent(config_json: *const c_char, version: *const c_char, archive_path: *const c_char) -> *mut c_char {
+    let raw = input(config_json);
+    let version = input(version);
+    let archive = input(archive_path);
+    guarded(|| {
+        let result = (|| -> Result<(), String> {
+            use secret_tunnel_core::agent_update;
+            use std::io::Read;
+            let cfg: Config = serde_json::from_str(&raw?).map_err(|e| e.to_string())?;
+            let version = version?;
+            if !agent_update::valid_version(&version) || cfg.host_key_sha256.is_empty() {
+                return Err("Укажите версию агента и подтверждённый отпечаток сервера".into());
+            }
+            let mut bytes = Vec::new();
+            std::fs::File::open(archive?).map_err(|e| e.to_string())?
+                .take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            if bytes.is_empty() || bytes.len() > 32 * 1024 * 1024 {
+                return Err("Некорректный размер архива агента".into());
+            }
+            let (status, stdout, _) = embedded_ssh::run_on_server_blocking(
+                server(cfg.name, cfg.host, cfg.port, cfg.user, cfg.key_path),
+                EmbeddedOptions { host_key_sha256: Some(cfg.host_key_sha256), jumps: ssh_jumps(cfg.ssh_jumps)?, ..Default::default() },
+                &agent_update::agent_install_command(&version), bytes, std::time::Duration::from_secs(90),
+            )?;
+            if status != 0 || agent_update::agent_version_from_output(&stdout)? != Some(version.as_str()) {
+                return Err("Не удалось установить агент. Требуется Linux x86_64 и доступ на запись в домашнюю папку.".into());
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => json!({"ok": true}).to_string(),
+            Err(error) => json!({"error": embedded_ssh::setup::friendly_error(&error)}).to_string(),
         }
     })
 }

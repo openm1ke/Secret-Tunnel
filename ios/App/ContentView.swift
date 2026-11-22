@@ -54,6 +54,7 @@ struct ContentView: View {
     @State private var importingKey = false
     @State private var showAddress = false
     @State private var editingPort = false
+    @State private var setupOpen = false
 
     private var palette: MobilePalette { colorScheme == .dark ? .dark : .light }
 
@@ -86,6 +87,9 @@ struct ContentView: View {
         .sheet(isPresented: $editingPort) {
             ProxyEditor(port: c.settings.socksPort, palette: palette)
                 .environmentObject(c)
+        }
+        .sheet(isPresented: $setupOpen) {
+            SetupWizard(palette: palette).environmentObject(c)
         }
     }
 
@@ -223,7 +227,8 @@ struct ContentView: View {
         if c.isActive {
             action("Остановить", primary: true, c.toggle)
         } else if !c.isConfigured {
-            action("Настроить сервер", primary: true) { go(.servers) }
+            action("Настроить подключение", primary: true) { setupOpen = true }
+                .disabled(!c.canEditServer || speedCheck.running)
         } else if c.simulator {
             action("Проверить вход и агент", primary: true, c.checkServer)
                 .disabled(c.busy || speedCheck.running)
@@ -311,6 +316,17 @@ struct ContentView: View {
 
     private var servers: some View {
         Group {
+            ForEach(Shared.profiles) { profile in
+                card {
+                    Text(profile.name).font(.headline)
+                    if Shared.selectedProfile?.id == profile.id {
+                        Label("Выбран для подключения", systemImage: "checkmark.circle.fill").foregroundColor(palette.accent)
+                    } else {
+                        action("Использовать") { c.selectServer(profile.id) }
+                            .disabled(!c.canEditServer || speedCheck.running)
+                    }
+                }
+            }
             card {
                 Text("Сервер SSH").font(.headline)
                 valueRow("Адрес", addressSummary)
@@ -318,7 +334,9 @@ struct ContentView: View {
                 if c.hasEndpoint && hideSensitive {
                     action(showAddress ? "Скрыть адрес" : "Показать адрес") { showAddress.toggle() }
                 }
-                action(c.hasEndpoint ? "Изменить сервер" : "Добавить сервер", primary: !c.hasEndpoint) {
+                action("Мастер настройки", primary: !c.hasEndpoint) { setupOpen = true }
+                    .disabled(!c.canEditServer || speedCheck.running)
+                action(c.hasEndpoint ? "Изменить сервер" : "Добавить сервер") {
                     editingServer = true
                 }
                 .disabled(!c.canEditServer || speedCheck.running)

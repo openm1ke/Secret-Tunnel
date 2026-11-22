@@ -710,3 +710,13 @@ input.switch:checked::after { transform: translateX(14px); }
 .modal { width: min(460px, 100%); display: grid; gap: 12px; padding: 20px 22px; border-radius: var(--radius); background: var(--panel); box-shadow: 0 24px 60px rgba(15, 28, 36, 0.35); }
 .modal h2 { font-size: 18px; }
 .modal p { color: var(--ink-soft); font-size: 13.5px; }
+
+.setupWizard { width: min(560px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; gap: 16px; }
+.setupWizard h3 { font-size: 20px; }
+.setupForm { display: grid; gap: 16px; }
+.setupChoices { display: grid; gap: 8px; }
+.setupChoices button { justify-content: flex-start; min-height: 56px; white-space: normal; text-align: left; padding: 12px 16px; }
+.setupChoices button[aria-pressed="true"] { border-color: var(--teal); background: var(--teal-wash); color: var(--teal-strong); }
+.setupNote { padding: 16px; background: var(--panel-sunk); border-radius: var(--radius); }
+.setupLog { max-height: 144px; overflow: auto; background: var(--panel-sunk); border: 1px solid var(--line); border-radius: var(--radius-small); padding: 12px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+.setupFingerprint { padding: 16px; background: var(--panel-sunk); border: 1px solid var(--line); border-radius: var(--radius-small); overflow-wrap: anywhere; user-select: text; }

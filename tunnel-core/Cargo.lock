@@ -1296,6 +1296,7 @@ name = "secret-tunnel-core"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rand",
  "russh",
  "secret-tunnel-mux",
  "serde",

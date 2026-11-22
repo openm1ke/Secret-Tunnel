@@ -8,7 +8,7 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: 0.3.31
+    MARKETING_VERSION: 0.3.32
     CURRENT_PROJECT_VERSION: 1
     DEVELOPMENT_TEAM: ${ST_DEVELOPMENT_TEAM}
     CODE_SIGN_STYLE: Automatic
@@ -49,6 +49,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         STAppGroup: $(ST_APP_GROUP)
         STTunnelBundleID: $(ST_TUNNEL_BUNDLE_ID)
+        NSLocalNetworkUsageDescription: Подключение к вашему SSH-серверу в локальной сети.
     entitlements:
       path: App/SecretTunnel.entitlements
       properties:
@@ -95,3 +96,22 @@ targets:
         OTHER_LDFLAGS: -lsecret_tunnel_ios -lhev-socks5-tunnel -lresolv
     dependencies:
       - sdk: NetworkExtension.framework
+  SecretTunnelTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: SecretTunnel
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(ST_BUNDLE_PREFIX).ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  SecretTunnel:
+    build:
+      targets:
+        SecretTunnel: all
+    test:
+      targets: [SecretTunnelTests]
+      environmentVariables:
+        WIZARD_TEST_FIXTURE: $(WIZARD_TEST_FIXTURE)

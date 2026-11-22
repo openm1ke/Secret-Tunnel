@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.32 — 2026-11-22
+
+- Desktop, Android and the experimental iOS client have a step-by-step SSH setup wizard. Use an existing private key or sign in with a server password to generate and register a separate Ed25519 key, then verify a fresh key-based login. The password is not saved.
+- Confirm the SSH host fingerprint before sending credentials. The wizard keeps a progress log, explains common connection errors and supports retries without duplicating a generated public key on the server.
+- Check the server agent and install the matching Linux x86_64 build after verifying its SHA-256 checksum.
+- iOS stores multiple server profiles with separate keys and preserves the previous single-server configuration. Switching profiles requires stopping the VPN.
+- Validated password enrollment and existing-key setup against Ubuntu, Android 14 instrumentation and iOS simulator tests. Two server profiles were also checked on iPadOS 15.8.8 with system VPN, HTTPS and matching exit addresses.
+
 ## 0.3.31 — 2026-11-16
 
 - Android and Android TV refresh the app list after installs, removals and updates, and when returning to the app. The list keeps the search and selected apps.

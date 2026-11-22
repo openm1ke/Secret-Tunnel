@@ -62,6 +62,7 @@ pub fn application_catalog() -> Result<Vec<InstalledApp>, String> {
 mod traffic_relay;
 
 mod udp_protocol;
+mod setup_wizard;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ServerProfile {
@@ -71,6 +72,8 @@ struct ServerProfile {
     port: u16,
     user: String,
     key_path: String,
+    #[serde(default)]
+    host_key_sha256: Option<String>,
     #[serde(default)]
     jump_server_id: Option<String>,
     #[serde(default)]
@@ -510,6 +513,12 @@ fn log_line(logs: &Arc<Mutex<Vec<String>>>, message: impl Into<String>) {
 
 #[cfg(target_os = "windows")]
 fn app_config_dir(app_name: &str) -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    if app_name == "secret-tunnel" {
+        if let Some(path) = std::env::var_os("SECRET_TUNNEL_TEST_CONFIG_DIR") {
+            return Ok(PathBuf::from(path));
+        }
+    }
     if let Ok(appdata) = std::env::var("APPDATA") {
         return Ok(Path::new(&appdata).join(app_name));
     }
@@ -524,6 +533,12 @@ fn app_config_dir(app_name: &str) -> Result<PathBuf, String> {
 
 #[cfg(not(target_os = "windows"))]
 fn app_config_dir(app_name: &str) -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    if app_name == "secret-tunnel" {
+        if let Some(path) = std::env::var_os("SECRET_TUNNEL_TEST_CONFIG_DIR") {
+            return Ok(PathBuf::from(path));
+        }
+    }
     let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
     Ok(Path::new(&home).join(".config").join(app_name))
 }
@@ -543,6 +558,7 @@ fn default_config() -> AppConfig {
             port: 22,
             user: "user".to_string(),
             key_path: "~/.ssh/id_ed25519".to_string(),
+            host_key_sha256: None,
             jump_server_id: None,
             compression: false,
             strict_host_key_checking: default_strict_host_key_checking(),
@@ -761,13 +777,14 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
     }
     let jumps = profiles.into_iter().map(|hop| {
         validate_server(hop)?;
-        Ok(embedded_ssh::EmbeddedJump { server: embedded_server(hop), host_key_sha256: None })
+        Ok(embedded_ssh::EmbeddedJump { server: embedded_server(hop), host_key_sha256: hop.host_key_sha256.clone() })
     }).collect::<Result<Vec<_>, String>>()?;
     let ssh_tuning = config.settings.ssh_tuning.as_ref()
         .map(|value| serde_json::from_value::<embedded_ssh::SshTuning>(value.clone()).map_err(|e| e.to_string()))
         .transpose()?.unwrap_or_default();
     ssh_tuning.validate()?;
     Ok(embedded_ssh::EmbeddedOptions {
+        host_key_sha256: destination.host_key_sha256.clone(),
         jumps,
         ssh_tuning,
         // QUIC downloads need room for bursts: 128 datagrams per flow capped one
@@ -1147,6 +1164,7 @@ fn build_status(
             port: 22,
             user: String::new(),
             key_path: String::new(),
+            host_key_sha256: None,
             jump_server_id: None,
             compression: false,
             strict_host_key_checking: default_strict_host_key_checking(),
@@ -2518,6 +2536,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            setup_wizard::wizard_probe,
+            setup_wizard::wizard_access,
+            setup_wizard::wizard_finish,
             get_config,
             redirect_status,
             discord_redirect_processes,

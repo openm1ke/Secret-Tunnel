@@ -446,6 +446,8 @@ class MainActivity:Activity() {
         val hero=card(palette.raised)
         heroTitle=label("Готов к подключению",23,true).also{hero.addView(it)}
         heroDetail=label("Выберите профиль и приложения",14,false,palette.muted).also{hero.addView(it,spaced(8))}
+        if(store.servers().none{it.host.isNotBlank()&&SettingsStore(this,it.id).hasKey()})
+            hero.addView(button("Настроить подключение",true){startActivityForResult(Intent(this,SetupActivity::class.java),105)},spaced(12))
         connectButton=button("Подключить",true){connectOrStop()};hero.addView(connectButton,spaced(18));body.addView(hero,spaced(12))
         updateNotice = button("Обновления") { go("about") }.apply {
             visibility = View.GONE
@@ -589,6 +591,7 @@ class MainActivity:Activity() {
 
     private fun serversPage(){
         heading("Серверы","SSH-серверы, ключи доступа и доверие")
+        body.addView(button("Мастер настройки",true){startActivityForResult(Intent(this,SetupActivity::class.java),105)},spaced(16))
         body.addView(button("+  Добавить сервер",true){unlocked();editingId=UUID.randomUUID().toString();navigate("serverEditor")},spaced(16))
         for(server in store.servers()){
             val scoped=SettingsStore(this,server.id);val card=card();card.addView(label(server.name,18,true))
@@ -1824,6 +1827,7 @@ class MainActivity:Activity() {
     @Deprecated("Platform activity result")
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
         super.onActivityResult(requestCode,resultCode,data)
+        if(requestCode==105){if(resultCode==RESULT_OK)navigate("home");return}
         if (requestCode == UPDATE_INSTALL_REQUEST) {
             if (resultCode == RESULT_FIRST_USER) message("Android не смог установить обновление. Можно повторить установку из «О программе».")
             return

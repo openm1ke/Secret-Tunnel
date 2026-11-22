@@ -14,27 +14,91 @@ final class TunnelController: ObservableObject {
     @Published var tx: Int64 = 0
     @Published var logs: [String] = []
     @Published var tunnelError = ""
+    @Published private(set) var vpnError = ""
+    @Published private(set) var startingVPN = false
+    @Published private(set) var traffic = [TrafficSample]()
+    @Published private(set) var currentTraffic: TrafficSample?
 
     private var manager: NETunnelProviderManager?
     private var statusObserver: NSObjectProtocol?
     private var pollTimer: Timer?
+    private var lastCounters: (time: TimeInterval, rx: Int64, tx: Int64)?
 
     private var tunnelBundleID: String {
         Bundle.main.object(forInfoDictionaryKey: "STTunnelBundleID") as? String ?? "dev.secrettunnel.ios.PacketTunnel"
     }
 
     init() {
+        #if !targetEnvironment(simulator)
         Task { await loadManager() }
+        #endif
+    }
+
+    var simulator: Bool {
+        #if targetEnvironment(simulator)
+        true
+        #else
+        false
+        #endif
     }
 
     var isConnected: Bool { vpnStatus == .connected }
     var isActive: Bool { [.connecting, .connected, .reasserting].contains(vpnStatus) }
+    var canEditServer: Bool { !busy && !startingVPN && !isActive && vpnStatus != .disconnecting }
+    var hasEndpoint: Bool {
+        !settings.host.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !settings.user.trimmingCharacters(in: .whitespaces).isEmpty &&
+        (1...65535).contains(settings.port)
+    }
+    var isConfigured: Bool { hasEndpoint && hasKey && !settings.hostKeySHA256.isEmpty }
+    var connectionError: String { vpnError.isEmpty ? tunnelError : vpnError }
 
-    func saveSettings() {
-        do { try Shared.save(settings) } catch { message = error.localizedDescription }
+    func editServer(host: String, port: Int, user: String) -> Bool {
+        guard canEditServer else { return false }
+        let host = host.trimmingCharacters(in: .whitespaces)
+        let user = user.trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty, !user.isEmpty, (1...65535).contains(port) else {
+            message = "Укажите адрес, пользователя и порт от 1 до 65535."
+            return false
+        }
+        var updated = settings
+        if updated.host != host || updated.port != port {
+            updated.hostKeySHA256 = ""
+            pendingFingerprint = ""
+        }
+        updated.host = host
+        updated.port = port
+        updated.user = user
+        guard saveSettings(updated) else { return false }
+        if updated != settings {
+            settings = updated
+            vpnError = ""
+            message = ""
+        }
+        return true
+    }
+
+    private func saveSettings(_ value: TunnelSettings) -> Bool {
+        do {
+            try Shared.save(value)
+            return true
+        } catch {
+            message = error.localizedDescription
+            return false
+        }
+    }
+
+    func setSocksPort(_ port: Int) -> Bool {
+        guard canEditServer, (1024...65535).contains(port) else { return false }
+        var updated = settings
+        updated.socksPort = port
+        guard saveSettings(updated) else { return false }
+        settings = updated
+        return true
     }
 
     func importKey(_ url: URL) {
+        guard canEditServer else { return }
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
@@ -48,7 +112,8 @@ final class TunnelController: ObservableObject {
 
     /// Fetches the server host key so the user can compare it before trusting.
     func probeServer() {
-        saveSettings()
+        guard canEditServer, hasEndpoint else { return }
+        pendingFingerprint = ""
         let config = settings.rustConfig(keyPath: Shared.keyURL.path)
         busy = true
         message = "Получаем ключ сервера…"
@@ -67,15 +132,18 @@ final class TunnelController: ObservableObject {
     }
 
     func trustFingerprint() {
-        settings.hostKeySHA256 = pendingFingerprint
+        guard canEditServer, !pendingFingerprint.isEmpty else { return }
+        var confirmed = settings
+        confirmed.hostKeySHA256 = pendingFingerprint
+        guard saveSettings(confirmed) else { return }
+        settings = confirmed
         pendingFingerprint = ""
-        saveSettings()
         message = "Отпечаток сохранён"
     }
 
     /// Logs in from the app (not through the VPN) and checks the server agent.
     func checkServer() {
-        saveSettings()
+        guard isConfigured, !busy else { return }
         let config = settings.rustConfig(keyPath: Shared.keyURL.path)
         busy = true
         message = "Проверяем вход по ключу и агент…"
@@ -97,18 +165,30 @@ final class TunnelController: ObservableObject {
     }
 
     private func connect() async {
-        saveSettings()
-        guard hasKey, !settings.hostKeySHA256.isEmpty else {
+        guard !startingVPN, !busy, vpnStatus != .disconnecting else { return }
+        guard isConfigured else {
             message = "Импортируйте ключ и подтвердите отпечаток сервера"
             return
         }
+        #if targetEnvironment(simulator)
+        vpnError = "VPN доступен на iPhone и iPad. В симуляторе можно проверить SSH и агент."
+        #else
+        guard Shared.groupContainer != nil else {
+            vpnError = "Недоступна общая папка VPN. Проверьте App Group и подпись сборки."
+            return
+        }
+        vpnError = ""
+        tunnelError = ""
+        startingVPN = true
+        defer { startingVPN = false }
         do {
             let manager = try await preparedManager()
             try manager.connection.startVPNTunnel()
-            message = "Подключаемся…"
+            statusChanged()
         } catch {
-            message = "Не удалось запустить VPN: \(error.localizedDescription)"
+            vpnError = error.localizedDescription
         }
+        #endif
     }
 
     private func loadManager() async {
@@ -126,9 +206,13 @@ final class TunnelController: ObservableObject {
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Secret Tunnel"
         manager.isEnabled = true
-        try await manager.saveToPreferences()
-        // Reload so the system-backed connection object is current after the first save.
-        try await manager.loadFromPreferences()
+        do {
+            try await manager.saveToPreferences()
+            // Reload so the system-backed connection object is current after the first save.
+            try await manager.loadFromPreferences()
+        } catch {
+            throw VPNProfileError(underlying: error)
+        }
         self.manager = manager
         observe()
         return manager
@@ -155,10 +239,18 @@ final class TunnelController: ObservableObject {
                 Task { @MainActor in self?.poll() }
             }
             poll()
-        } else if vpnStatus == .disconnected, #available(iOS 16.0, *) {
-            manager.connection.fetchLastDisconnectError { error in
-                guard let error else { return }
-                Task { @MainActor in self.message = error.localizedDescription }
+        } else {
+            currentTraffic = nil
+            lastCounters = nil
+            if vpnStatus == .disconnected, #available(iOS 16.0, *) {
+                manager.connection.fetchLastDisconnectError { error in
+                    guard let error else { return }
+                    Task { @MainActor in
+                        if self.vpnStatus == .disconnected {
+                            self.vpnError = error.localizedDescription
+                        }
+                    }
+                }
             }
         }
     }
@@ -168,11 +260,49 @@ final class TunnelController: ObservableObject {
         try? session.sendProviderMessage(Data("status".utf8)) { data in
             guard let data, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             Task { @MainActor in
-                self.rx = (value["rx"] as? NSNumber)?.int64Value ?? 0
-                self.tx = (value["tx"] as? NSNumber)?.int64Value ?? 0
+                guard self.isActive else { return }
+                self.sampleTraffic(
+                    rx: (value["rx"] as? NSNumber)?.int64Value ?? 0,
+                    tx: (value["tx"] as? NSNumber)?.int64Value ?? 0
+                )
                 self.logs = value["logs"] as? [String] ?? []
                 self.tunnelError = value["error"] as? String ?? ""
             }
         }
     }
+
+    private func sampleTraffic(rx: Int64, tx: Int64) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let previous = lastCounters
+        lastCounters = (now, rx, tx)
+        self.rx = rx
+        self.tx = tx
+        guard let previous else {
+            traffic.removeAll()
+            return
+        }
+        let elapsed = now - previous.time
+        guard elapsed > 0, rx >= previous.rx, tx >= previous.tx else { return }
+        let sample = TrafficSample(
+            time: now,
+            down: Double(rx - previous.rx) / elapsed,
+            up: Double(tx - previous.tx) / elapsed
+        )
+        currentTraffic = sample
+        traffic.removeAll { $0.time < now - 60 }
+        traffic.append(sample)
+    }
+}
+
+private struct VPNProfileError: LocalizedError {
+    let underlying: Error
+    var errorDescription: String? {
+        "Не удалось настроить профиль VPN. \(underlying.localizedDescription)"
+    }
+}
+
+struct TrafficSample {
+    let time: TimeInterval
+    let down: Double
+    let up: Double
 }

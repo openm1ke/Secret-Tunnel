@@ -60,7 +60,7 @@ targets:
         PRODUCT_NAME: SecretTunnel
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_OBJC_BRIDGING_HEADER: App/SecretTunnel-Bridging-Header.h
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - target: PacketTunnel
         embed: true

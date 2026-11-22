@@ -31,11 +31,13 @@ enum Shared {
         Bundle.main.object(forInfoDictionaryKey: "STAppGroup") as? String ?? "group.dev.secrettunnel.ios"
     }
 
+    static var groupContainer: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+    }
+
     /// App Group container; falls back to Application Support (e.g. unsigned simulator builds).
     static var container: URL {
-        if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) {
-            return url
-        }
+        if let groupContainer { return groupContainer }
         let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url

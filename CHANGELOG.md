@@ -3,6 +3,7 @@
 ## 0.3.34 — 2026-11-23
 
 - Windows: confirm that the update helper is ready before quitting the app. Keep a separately verified installer copy, show installation progress, preserve the existing install directory and reopen the app after installer failures. Startup failures leave the app open; persistent diagnostics appear after restart.
+- Windows: load the helper's modules from the native Windows PowerShell directory so launching from PowerShell 7 or CI does not hide required commands.
 
 ## 0.3.33 — 2026-11-23
 

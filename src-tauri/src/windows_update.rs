@@ -70,6 +70,10 @@ fn prepare(
         process::{Command, Stdio},
     };
     let program = powershell()?;
+    let modules = program
+        .parent()
+        .ok_or("Не найдена папка Windows PowerShell")?
+        .join("Modules");
     let updates = config.join("updates");
     std::fs::create_dir_all(&updates)
         .map_err(|e| format!("Не удалось подготовить обновление: {e}"))?;
@@ -98,6 +102,8 @@ fn prepare(
             &STANDARD.encode(script),
         ])
         .current_dir(stage.path())
+        // PowerShell 7 callers (including CI) export a module path incompatible with Windows PowerShell 5.1.
+        .env("PSModulePath", modules)
         .env("ST_UPDATE_PID", parent_pid.to_string())
         .env("ST_UPDATE_INSTALLER", &copied)
         .env("ST_UPDATE_SHA256", digest)
@@ -217,6 +223,22 @@ mod tests {
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_does_not_inherit_an_incompatible_powershell_module_path() {
+        let modules = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "windows_update::tests::windows_helper_waits_installs_restarts_and_recovers_without_losing_settings", "--nocapture"])
+            .env("PSModulePath", modules.path())
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[cfg(windows)]

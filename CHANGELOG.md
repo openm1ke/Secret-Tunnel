@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.34 — 2026-11-23
+
+- Windows: confirm that the update helper is ready before quitting the app. Keep a separately verified installer copy, show installation progress, preserve the existing install directory and reopen the app after installer failures. Startup failures leave the app open; persistent diagnostics appear after restart.
+
 ## 0.3.33 — 2026-11-23
 
 - Share saved SSH servers by QR code, encrypted link or `.stprofile` file. Transfer a server with its SSH jump chain, or all configured servers, from «Серверы» → «Поделиться».

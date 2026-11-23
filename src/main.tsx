@@ -3,7 +3,7 @@ import SetupWizard from "./SetupWizard";
 import ProfileTransfer from "./ProfileTransfer";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
-import AboutPanel, { Release } from "./AboutPanel";
+import AboutPanel, { Release, UpdateDownload } from "./AboutPanel";
 import ConnectionHealth, { ConnectionChecks } from "./ConnectionHealth";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
@@ -913,6 +913,15 @@ function App() {
     window.addEventListener("keydown", escape);
     return () => { window.removeEventListener("mousedown", close); window.removeEventListener("scroll", close, true); window.removeEventListener("keydown", escape); };
   }, [appMenu]);
+
+  const updateFailureChecked = useRef(false);
+  useEffect(() => {
+    if (updateFailureChecked.current || redirect.platform !== "windows") return;
+    updateFailureChecked.current = true;
+    invoke<UpdateDownload>("update_status").then((state) => {
+      if (state.error) notify(state.error, true);
+    }).catch(() => undefined);
+  }, [redirect.platform]);
 
   // Once per launch: a newer release is offered unless the user skipped it.
   const updateChecked = useRef(false);

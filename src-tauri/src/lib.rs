@@ -30,6 +30,8 @@ mod embedded_ssh;
 mod connection_checks;
 mod speedtest;
 mod updater;
+#[cfg(any(windows, test))]
+mod windows_update;
 #[cfg_attr(not(feature = "embedded-ssh"), allow(dead_code))]
 mod agent_update;
 mod icon_png;

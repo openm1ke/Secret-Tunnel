@@ -46,6 +46,7 @@ tunnel-core/target/
 stream-mux/target/
 artifacts/
 output/playwright/
+output/windows-update-qa/
 .playwright-cli/
 src-tauri/resources/
 *.jks

@@ -80,7 +80,15 @@ fn download() -> &'static Mutex<Download> {
 }
 
 pub fn status() -> Download {
-    download().lock().map(|d| d.clone()).unwrap_or_default()
+    #[allow(unused_mut)]
+    let mut state = download().lock().map(|d| d.clone()).unwrap_or_default();
+    #[cfg(windows)]
+    if !state.running && !state.ready && state.error.is_empty() {
+        if let Ok(config) = crate::app_config_dir("secret-tunnel") {
+            state.error = crate::windows_update::last_error(&config).unwrap_or_default();
+        }
+    }
+    state
 }
 
 /// `a` is a later version than `b`: numeric parts compared in order.
@@ -584,37 +592,23 @@ fn prepare_install() -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        use std::os::windows::process::CommandExt;
         if !installed_with_installer() {
             return Err(format!(
                 "Это портативная версия: скачайте новый архив со страницы {RELEASES_PAGE}"
             ));
         }
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        let script: Vec<u8> = include_str!("update-windows.ps1")
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect();
-        std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                &STANDARD.encode(script),
-            ])
-            .env("ST_UPDATE_PID", std::process::id().to_string())
-            .env("ST_UPDATE_INSTALLER", asset.path())
-            .env("ST_UPDATE_APP", exe)
-            .env("ST_UPDATE_LOG", asset.path().with_file_name("update.log"))
-            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        crate::windows_update::launch(
+            asset.path(),
+            &asset.digest,
+            &exe,
+            std::process::id(),
+            &crate::app_config_dir("secret-tunnel")?,
+        )?;
+        if let Ok(mut state) = download().lock() {
+            state.asset = None;
+            state.ready = false;
+        }
         return Ok(());
     }
     #[allow(unreachable_code)]

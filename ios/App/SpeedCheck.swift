@@ -22,7 +22,9 @@ final class SpeedCheck: ObservableObject {
         running = true
         result = nil
         error = ""
-        let config = settings.rustConfig(keyPath: Shared.keyURL.path, newSession: simulator)
+        let config: String
+        do { config = try settings.rustConfig(keyPath: Shared.keyURL.path, newSession: simulator) }
+        catch { self.error = error.localizedDescription; running = false; return }
         let port = settings.socksPort
         Task {
             defer { running = false }

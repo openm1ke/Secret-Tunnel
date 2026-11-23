@@ -4,6 +4,7 @@ use jni::{
     JNIEnv,
 };
 use secret_tunnel_core::agent_update;
+use secret_tunnel_core::profile_exchange;
 use secret_tunnel_core::embedded_ssh::{
     self, PriorityUdpRouter, EmbeddedJump, EmbeddedOptions, EmbeddedProxy, EmbeddedServer,
     EmbeddedTunnelHandle, FlowWindow,
@@ -138,6 +139,25 @@ fn output(env: &mut JNIEnv, value: String) -> jstring {
     env.new_string(value)
         .map(JString::into_raw)
         .unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_transferExport(mut env: JNIEnv, _: JObject, document: JString) -> jstring {
+    let result = (|| -> Result<String, String> {
+        let raw: String = env.get_string(&document).map_err(|e| e.to_string())?.into();
+        profile_exchange::export(&raw)
+    })();
+    output(&mut env, result.unwrap_or_else(|error| json!({"error":error}).to_string()))
+}
+
+#[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_transferUnlock(mut env: JNIEnv, _: JObject, payload: JString, code: JString, preview: jni::sys::jboolean) -> jstring {
+    let result = (|| -> Result<String, String> {
+        let payload: String = env.get_string(&payload).map_err(|e| e.to_string())?.into();
+        let code: String = env.get_string(&code).map_err(|e| e.to_string())?.into();
+        profile_exchange::open(&payload, &code, preview != 0)
+    })();
+    output(&mut env, result.unwrap_or_else(|error| json!({"error":error}).to_string()))
 }
 fn start(env: &mut JNIEnv, config: JString, service: JObject) -> Result<(), String> {
     let raw: String = env.get_string(&config).map_err(|e| e.to_string())?.into();

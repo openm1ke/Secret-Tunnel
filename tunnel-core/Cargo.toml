@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+secret-tunnel-profile-transfer = { path = "../profile-transfer" }
 secret-tunnel-mux = { path = "../stream-mux" }
 russh = { version = "=0.61.2", default-features = false, features = ["ring", "rsa"] }
 serde = { version = "1", features = ["derive"] }

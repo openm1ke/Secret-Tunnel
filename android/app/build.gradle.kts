@@ -9,8 +9,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 33200
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.32"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 33300
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.33"
         manifestPlaceholders["appLabel"] = "Secret Tunnel"
         ndk { abiFilters += supportedAbis }
     }
@@ -34,6 +34,7 @@ android {
         getByName("debug") {
             if (System.getenv("ST_ANDROID_LOCAL_TEST") == "1") {
                 applicationIdSuffix = ".testbuild"
+                manifestPlaceholders["appLabel"] = "Secret Tunnel Test"
             }
         }
         getByName("release") {
@@ -45,11 +46,13 @@ android {
 }
 dependencies {
     implementation("androidx.core:core:1.13.1")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
+android.sourceSets.getByName("main").assets.srcDir(rootProject.file("third-party-notices"))
 val copyHelpAssets by tasks.registering(Copy::class) {
     from(rootProject.file("../docs/help/knowledge.md"))
     into(layout.buildDirectory.dir("generated/help-assets"))

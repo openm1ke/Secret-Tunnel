@@ -14,6 +14,8 @@ char *st_ios_generate_key(void);
 char *st_ios_enroll_password(const char *config_json, const char *password);
 char *st_ios_install_agent(const char *config_json, const char *version, const char *archive_path);
 char *st_ios_check(const char *config_json);
+char *st_ios_transfer_export(const char *document_json);
+char *st_ios_transfer_unlock(const char *payload, const char *code, int preview);
 void st_ios_free(char *value);
 
 #ifdef __cplusplus

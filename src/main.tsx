@@ -1,5 +1,6 @@
 import DomainsPanel from "./DomainsPanel";
 import SetupWizard from "./SetupWizard";
+import ProfileTransfer from "./ProfileTransfer";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
 import AboutPanel, { Release } from "./AboutPanel";
@@ -415,6 +416,7 @@ function App() {
   const [busy, setBusy] = useState<BusyAction>(null);
   const [showServerHost, setShowServerHost] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [transfer, setTransfer] = useState<{ serverId: string | null } | null>(null);
   const [showIpinfoToken, setShowIpinfoToken] = useState(false);
   const [copiedField, setCopiedField] = useState<CopyField>(null);
   const [now, setNow] = useState(Date.now());
@@ -1118,6 +1120,7 @@ function App() {
               <section className="panel listPanel">
                 <header className="panelHead">
                   <h2>Серверы</h2>
+                  <button className="ghost" onClick={() => setTransfer({ serverId: null })}>Импортировать</button>
                   <button className="primary" onClick={() => setSetupOpen(true)}>Мастер настройки</button>
                   <button className="ghost" onClick={() => { serverDraftDirtyRef.current = true; setServerDraft(emptyServer); }}><Plus size={15} />Добавить</button>
                 </header>
@@ -1208,6 +1211,7 @@ function App() {
                     setServerDraft(saved);
                     return `Сервер «${saved.name}» сохранён`;
                   })}><Save size={15} />Сохранить</button>
+                  {config.servers.some(server => server.id === serverDraft.id) && <button onClick={() => setTransfer({ serverId: serverDraft.id })}>Поделиться</button>}
                   <button disabled={checkingServer || busy !== null || !serverDraft.id} onClick={() => checkServer(serverDraft)}>
                     <Terminal size={15} />
                     {checkingServer && serverCheck.id === serverDraft.id ? "Проверяем…" : checksAgent(serverDraft) ? "Проверить SSH и агент" : "Проверить SSH"}
@@ -1704,6 +1708,14 @@ function App() {
             setConfig(next);
             const saved = next.servers.find(server => server.id === id);
             if (saved) { setServerDraft(saved); serverDraftDirtyRef.current = true; }
+          });
+          setActiveTab("servers");
+        }}/>}
+        {transfer && <ProfileTransfer serverId={transfer.serverId} servers={config.servers} onClose={() => setTransfer(null)} onImported={ids => {
+          void invoke<AppConfig>("get_config").then(next => {
+            setConfig(next);
+            const imported = next.servers.find(server => server.id === ids[0]);
+            if (imported) { setServerDraft(imported); serverDraftDirtyRef.current = true; }
           });
           setActiveTab("servers");
         }}/>}

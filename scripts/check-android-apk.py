@@ -32,7 +32,7 @@ with zipfile.ZipFile(sys.argv[1]) as apk:
                 for method in (b'TProxySetAccounting\0', b'TProxyDrainTraffic\0', b'isPriorityUdp\0'):
                     assert method in data, f'Missing packet engine JNI method {method!r}: {name}'
             else:
-                for method in ('start', 'probe', 'generateKey', 'registerKey'):
+                for method in ('start', 'probe', 'generateKey', 'registerKey', 'transferExport', 'transferUnlock'):
                     assert ('Java_dev_secrettunnel_android_NativeBridge_' + method).encode() in data, f'Missing SSH JNI export: {method}'
     assert 'assets/licenses/hev-socks5-tunnel.txt' in names
     assert 'assets/licenses/rust-dependencies.json' in names

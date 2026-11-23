@@ -72,7 +72,7 @@ final class TunnelController: ObservableObject {
         } catch { message = error.localizedDescription }
     }
 
-    func editServer(host: String, port: Int, user: String) -> Bool {
+    func editServer(host: String, port: Int, user: String, jumpID: String? = nil) -> Bool {
         guard canEditServer else { return false }
         let host = host.trimmingCharacters(in: .whitespaces)
         let user = user.trimmingCharacters(in: .whitespaces)
@@ -88,6 +88,7 @@ final class TunnelController: ObservableObject {
         updated.host = host
         updated.port = port
         updated.user = user
+        updated.jumpProfileID = jumpID
         guard saveSettings(updated) else { return false }
         if updated != settings {
             settings = updated
@@ -133,7 +134,7 @@ final class TunnelController: ObservableObject {
     func probeServer() {
         guard canEditServer, hasEndpoint else { return }
         pendingFingerprint = ""
-        let config = settings.rustConfig(keyPath: Shared.keyURL.path)
+        guard let config = checkedRuntimeConfig() else { return }
         busy = true
         message = "Получаем ключ сервера…"
         Task.detached {
@@ -163,7 +164,7 @@ final class TunnelController: ObservableObject {
     /// Logs in from the app (not through the VPN) and checks the server agent.
     func checkServer() {
         guard isConfigured, !busy else { return }
-        let config = settings.rustConfig(keyPath: Shared.keyURL.path)
+        guard let config = checkedRuntimeConfig() else { return }
         busy = true
         message = "Проверяем вход по ключу и агент…"
         Task.detached {
@@ -181,6 +182,11 @@ final class TunnelController: ObservableObject {
 
     func toggle() {
         if isActive { manager?.connection.stopVPNTunnel() } else { Task { await connect() } }
+    }
+
+    private func checkedRuntimeConfig() -> String? {
+        do { return try settings.rustConfig(keyPath: Shared.keyURL.path) }
+        catch { message = error.localizedDescription; return nil }
     }
 
     private func connect() async {

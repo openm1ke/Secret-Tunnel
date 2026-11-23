@@ -64,8 +64,8 @@ final class SSHSetupModel: ObservableObject {
         log("Подключаемся к SSH-серверу…")
         var settings = TunnelSettings()
         settings.host = host; settings.port = Int(port)!; settings.user = user
-        let config = settings.rustConfig(keyPath: "")
         do {
+            let config = try settings.rustConfig(keyPath: "")
             let raw = await Task.detached { RustCore.probe(config) }.value
             let value = try result(raw)
             guard let pin = value["fingerprint"] as? String, pin.hasPrefix("SHA256:"), pin.count == 50 else {
@@ -97,7 +97,8 @@ final class SSHSetupModel: ObservableObject {
                 settings.port = Int(port) ?? 0
                 settings.user = user.trimmingCharacters(in: .whitespacesAndNewlines)
                 settings.hostKeySHA256 = fingerprint
-                var config = jsonObject(settings.rustConfig(keyPath: temporary.path))
+                settings.jumpProfileID = nil
+                var config = jsonObject(try settings.rustConfig(keyPath: temporary.path))
                 config["check_agent"] = false
                 let json = String(decoding: try JSONSerialization.data(withJSONObject: config), as: UTF8.self)
                 if useKey {
@@ -113,7 +114,7 @@ final class SSHSetupModel: ObservableObject {
                 try Shared.saveSetup(settings, key: key, name: name)
                 saved = true; clear()
             }
-            let config = Shared.loadSettings().rustConfig(keyPath: Shared.keyURL.path)
+            let config = try Shared.loadSettings().rustConfig(keyPath: Shared.keyURL.path)
             if install {
                 log("Скачиваем агент и сверяем SHA-256…")
                 let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""

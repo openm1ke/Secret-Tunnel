@@ -1,0 +1,15 @@
+[package]
+name = "secret-tunnel-profile-transfer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = { version = "0.10.3", features = ["zeroize"] }
+argon2 = { version = "0.5.3", features = ["zeroize"] }
+base64 = "0.22"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = "1"

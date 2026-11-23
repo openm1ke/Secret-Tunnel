@@ -720,3 +720,13 @@ input.switch:checked::after { transform: translateX(14px); }
 .setupNote { padding: 16px; background: var(--panel-sunk); border-radius: var(--radius); }
 .setupLog { max-height: 144px; overflow: auto; background: var(--panel-sunk); border: 1px solid var(--line); border-radius: var(--radius-small); padding: 12px; font-size: 12px; color: var(--muted); line-height: 1.7; }
 .setupFingerprint { padding: 16px; background: var(--panel-sunk); border: 1px solid var(--line); border-radius: var(--radius-small); overflow-wrap: anywhere; user-select: text; }
+.transferTabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.transferTabs [aria-selected="true"] { color: var(--teal-strong); border-color: var(--teal); background: var(--teal-wash); }
+.transferQr { display: grid; justify-items: center; gap: 12px; }
+.transferQr img { max-width: 100%; height: auto; padding: 12px; background: white; border-radius: 12px; }
+.transferPayload { width: 100%; padding: 12px; resize: vertical; min-height: 80px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-sunk); color: var(--ink); overflow-wrap: anywhere; }
+.transferCode { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-small); }
+.transferCodeInput { font-family: monospace; text-transform: uppercase; }
+.transferPreview { display: grid; gap: 12px; max-height: 280px; overflow: auto; }
+.transferPreview > div { padding: 14px; background: var(--panel-sunk); border-radius: var(--radius-small); }
+.transferPreview code { overflow-wrap: anywhere; font-size: 12px; }

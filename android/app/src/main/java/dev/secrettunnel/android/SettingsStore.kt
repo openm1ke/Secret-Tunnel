@@ -199,7 +199,7 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
                 o.optJSONObject("ssh")?.let { SshSettings.fromJson(it) }?:SshSettings())
         }
     }
-    fun saveServer(profile:ServerProfile) {
+    fun saveServer(profile:ServerProfile):Unit = synchronized(SettingsStore::class.java) {
         require(profile.name.isNotBlank()&&profile.name.length<=64){"Укажите название до 64 символов"}
         require(profile.host.isNotBlank()&&!Regex("[\\s/@?#]").containsMatchIn(profile.host)){"Укажите имя хоста или IP без схемы и пробелов"}
         require(profile.port in 1..65535){"SSH-порт должен быть от 1 до 65535"}
@@ -223,18 +223,18 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
         }
         check(prefs.edit().putString("proxy_profiles",a.toString()).commit()) {"Не удалось сохранить прокси"}
     }
-    fun saveProxy(profile:ProxyProfile) {
+    fun saveProxy(profile:ProxyProfile):Unit = synchronized(SettingsStore::class.java) {
         require(profile.name.isNotBlank()&&profile.name.length<=64){"Укажите название до 64 символов"}
         require(profile.port in 1024..65535){"Локальный порт должен быть от 1024 до 65535"}
         require(server(profile.serverId)!=null){"Выберите существующий сервер"}
         writeProxies(proxies().filterNot{it.id==profile.id}+profile)
         if(activeProxy==null) activeProxyId=profile.id
     }
-    fun deleteProxy(id:String) {
+    fun deleteProxy(id:String):Unit = synchronized(SettingsStore::class.java) {
         val remaining=proxies().filterNot{it.id==id};writeProxies(remaining)
         if(activeProxy==null) prefs.edit().putString("active_proxy",remaining.firstOrNull()?.id.orEmpty()).apply()
     }
-    fun deleteServer(id:String) {
+    fun deleteServer(id:String):Unit = synchronized(SettingsStore::class.java) {
         require(proxies().none{it.serverId==id}) {"Сервер используется в прокси. Сначала измените или удалите этот прокси."}
         require(servers().none { it.jumpServerId == id }) { "Сервер используется в цепочке SSH. Сначала измените её." }
         val editor=prefs.edit().putString("server_ids",org.json.JSONArray(ids().filterNot{it==id}).toString())
@@ -258,11 +258,13 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
     }
     fun hasKey()=prefs.contains(scoped("key_cipher"))
     private fun key(): SecretKey {
+        return synchronized(SettingsStore::class.java) {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        return (store.getKey("secret-tunnel-key", null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
+        (store.getKey("secret-tunnel-key", null) as? SecretKey) ?: KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
             init(KeyGenParameterSpec.Builder("secret-tunnel-key", KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
             generateKey()
+        }
         }
     }
     fun importKey(bytes: ByteArray) {
@@ -278,5 +280,70 @@ class SettingsStore(private val context:Context, private val profileId:String?=n
             init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(prefs.getString(scoped("key_iv"), ""), Base64.NO_WRAP)))
         }
         return cipher.doFinal(Base64.decode(prefs.getString(scoped("key_cipher"), ""), Base64.NO_WRAP))
+    }
+
+    internal fun transferDocument(selectedIds: List<String>): JSONObject {
+        require(selectedIds.isNotEmpty() && selectedIds.size<=32) { "Выберите от 1 до 32 серверов" }
+        val selected = linkedMapOf<String,ServerProfile>()
+        selectedIds.forEach { id -> resolveServerRoute(id,servers()).forEach { selected[it.id]=it } }
+        val profiles = JSONArray()
+        selected.values.forEach { server ->
+            val scoped=SettingsStore(context,server.id)
+            require(isTrustedSshPin(scoped.fingerprint)) { "Сначала подтвердите отпечаток сервера «${server.name}»" }
+            require(scoped.hasKey()) { "Добавьте ключ сервера «${server.name}»" }
+            val bytes=scoped.decryptKey()
+            try {
+                require(bytes.size<=16*1024) { "Ключ сервера «${server.name}» слишком велик для переноса" }
+                profiles.put(JSONObject().put("id",server.id).put("name",server.name).put("host",server.host)
+                    .put("port",server.port).put("user",server.user).put("host_key_sha256",scoped.fingerprint)
+                    .put("private_key",bytes.toString(Charsets.UTF_8)).put("jump_id",server.jumpServerId ?: JSONObject.NULL))
+            } finally { bytes.fill(0) }
+        }
+        return JSONObject().put("version",1).put("roots",JSONArray(selectedIds)).put("servers",profiles)
+    }
+
+    /** One preferences commit: existing profiles and the running session stay intact. */
+    internal fun importTransferred(document: JSONObject): List<String> = synchronized(SettingsStore::class.java) {
+        require(!TunnelVpnService.active) { "Сначала остановите туннель, чтобы добавить серверы" }
+        val incoming=document.getJSONArray("servers")
+        require(incoming.length() in 1..32) { "Некорректное число серверов" }
+        val remap=(0 until incoming.length()).associate { incoming.getJSONObject(it).getString("id") to java.util.UUID.randomUUID().toString() }
+        val roots=document.getJSONArray("roots").let { array -> (0 until array.length()).map { remap.getValue(array.getString(it)) } }
+        val added=(0 until incoming.length()).map { index ->
+            val item=incoming.getJSONObject(index)
+            ServerProfile(remap.getValue(item.getString("id")),item.getString("name"),item.getString("host"),item.getInt("port"),item.getString("user"),
+                if(item.isNull("jump_id"))null else remap.getValue(item.getString("jump_id")))
+        }
+        val all=servers()+added
+        all.forEach { resolveServerRoute(it.id,all) }
+        val editor=prefs.edit()
+        for((index,server) in added.withIndex()) {
+            val item=incoming.getJSONObject(index);val prefix="server.${server.id}."
+            require(isTrustedSshPin(item.getString("host_key_sha256"))) { "Отсутствует подтверждённый отпечаток" }
+            val bytes=item.getString("private_key").toByteArray(Charsets.UTF_8)
+            try {
+                val cipher=Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE,key()) }
+                editor.putString(prefix+"key_iv",Base64.encodeToString(cipher.iv,Base64.NO_WRAP))
+                    .putString(prefix+"key_cipher",Base64.encodeToString(cipher.doFinal(bytes),Base64.NO_WRAP))
+            } finally { bytes.fill(0) }
+            editor.putString(prefix+"name",server.name).putString(prefix+"host",server.host).putInt(prefix+"port",server.port)
+                .putString(prefix+"user",server.user).putString(prefix+"jumpServerId",server.jumpServerId).putString(prefix+"fingerprint",item.getString("host_key_sha256"))
+        }
+        editor.putString("server_ids",JSONArray(ids()+added.map{it.id}).toString())
+        val proxyProfiles=proxies().toMutableList();val ports=proxyProfiles.map{it.port}.toMutableSet()
+        val firstNew=proxyProfiles.size
+        for(id in roots) {
+            val server=added.first{it.id==id};val port=(1080..65535).first{it !in ports};ports.add(port)
+            proxyProfiles.add(ProxyProfile(java.util.UUID.randomUUID().toString(),server.name,id,port))
+        }
+        val encoded=JSONArray()
+        proxyProfiles.forEach { encoded.put(JSONObject().put("id",it.id).put("name",it.name).put("serverId",it.serverId).put("port",it.port)
+            .put("udpReceive",it.udpReceive?.toJson()).put("udpAgentReceive",it.udpAgentReceive?.toJson()).put("ssh",it.ssh.toJson())) }
+        editor.putString("proxy_profiles",encoded.toString())
+        val activeReady=activeProxy?.let{proxy->server(proxy.serverId)?.let{it.host.isNotBlank()&&it.user.isNotBlank()&&SettingsStore(context,it.id).hasKey()}}?:false
+        if(!activeReady) editor.putString("active_proxy",proxyProfiles[firstNew].id)
+        require(!TunnelVpnService.active) { "Туннель запущен. Повторите импорт после его остановки" }
+        check(editor.commit()) { "Не удалось сохранить серверы" }
+        roots
     }
 }

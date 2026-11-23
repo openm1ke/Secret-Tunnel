@@ -19,6 +19,8 @@ object NativeBridge {
     external fun generateKey(): String
     external fun registerKey(config: String, publicKey: String): String
     external fun enrollPassword(config: String, password: String): String
+    external fun transferExport(document: String): String
+    external fun transferUnlock(payload: String, code: String, preview: Boolean): String
     external fun cancel()
     external fun stop()
     external fun status(): String

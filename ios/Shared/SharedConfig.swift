@@ -8,9 +8,10 @@ struct TunnelSettings: Codable, Equatable {
     /// SHA256 host key fingerprint confirmed by the user.
     var hostKeySHA256 = ""
     var socksPort = 10808
+    var jumpProfileID: String?
 
     /// JSON for the Rust core (`ios/native`).
-    func rustConfig(keyPath: String, newSession: Bool = false) -> String {
+    func rustConfig(keyPath: String, newSession: Bool = false) throws -> String {
         let value: [String: Any] = [
             "name": "iOS",
             "host": host.trimmingCharacters(in: .whitespaces),
@@ -20,8 +21,9 @@ struct TunnelSettings: Codable, Equatable {
             "host_key_sha256": hostKeySHA256,
             "socks_port": socksPort,
             "new_session": newSession,
+            "ssh_jumps": try Shared.sshJumps(for: self),
         ]
-        let data = (try? JSONSerialization.data(withJSONObject: value)) ?? Data("{}".utf8)
+        let data = try JSONSerialization.data(withJSONObject: value)
         return String(decoding: data, as: UTF8.self)
     }
 }
@@ -98,6 +100,10 @@ enum RustCore {
     static func status() -> String { take(st_ios_status()) }
     static func probe(_ json: String) -> String { take(json.withCString { st_ios_probe($0) }) }
     static func check(_ json: String) -> String { take(json.withCString { st_ios_check($0) }) }
+    static func transferExport(_ json: String) -> String { take(json.withCString { st_ios_transfer_export($0) }) }
+    static func transferUnlock(_ payload: String, code: String, preview: Bool) -> String {
+        take(payload.withCString { payload in code.withCString { st_ios_transfer_unlock(payload, $0, preview ? 1 : 0) } })
+    }
     static func generateKey() -> String { take(st_ios_generate_key()) }
     static func enroll(_ json: String, password: String) -> String {
         take(json.withCString { config in password.withCString { st_ios_enroll_password(config, $0) } })

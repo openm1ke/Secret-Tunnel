@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.33 — 2026-11-23
+
+- Share saved SSH servers by QR code, encrypted link or `.stprofile` file. Transfer a server with its SSH jump chain, or all configured servers, from «Серверы» → «Поделиться».
+- Android and the experimental iOS client scan transfer QR codes. Android TV imports files through the system document picker, including USB drives exposed by its file provider; file-manager fallback is available when the document picker is missing.
+- AES-256-GCM protects the connection settings and private keys, with an independently generated 100-bit transfer code and Argon2id key derivation. The code is never included in the QR, link or file. Imports validate the data, show a preview and create new profiles without replacing existing settings.
+- Preserve SSH host fingerprints and enforce them with the embedded SSH engine. iOS now also resolves and validates imported SSH jump chains.
+- Validated desktop export/import, cross-platform QR decoding, Android mobile and TV imports without network access, wrong-code rejection, bounded decompression and preservation of keys, routes and existing profiles. Physical camera scanning and USB import on a real television still require device testing.
+
 ## 0.3.32 — 2026-11-22
 
 - Desktop, Android and the experimental iOS client have a step-by-step SSH setup wizard. Use an existing private key or sign in with a server password to generate and register a separate Ed25519 key, then verify a fresh key-based login. The password is not saved.

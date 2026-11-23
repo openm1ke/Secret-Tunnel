@@ -6,6 +6,7 @@ struct ServerEditor: View {
     @State private var host: String
     @State private var port: String
     @State private var user: String
+    @State private var jumpID: String
     let palette: MobilePalette
 
     init(settings: TunnelSettings, palette: MobilePalette) {
@@ -13,6 +14,7 @@ struct ServerEditor: View {
         _host = State(initialValue: settings.host)
         _port = State(initialValue: String(settings.port))
         _user = State(initialValue: settings.user)
+        _jumpID = State(initialValue: settings.jumpProfileID ?? "")
     }
 
     private var isValid: Bool {
@@ -28,11 +30,15 @@ struct ServerEditor: View {
                 field("Адрес", text: $host, keyboard: .URL)
                 field("Порт", text: $port, keyboard: .numberPad)
                 field("Пользователь", text: $user)
+                Picker("Подключаться через", selection: $jumpID) {
+                    Text("Напрямую").tag("")
+                    ForEach(Shared.profiles.filter { $0.id != Shared.selectedProfile?.id }) { profile in Text(profile.name).tag(profile.id) }
+                }
                 if !controller.message.isEmpty {
                     Text(controller.message).font(.footnote).foregroundColor(palette.muted)
                 }
                 Button("Сохранить") {
-                    if let port = Int(port), controller.editServer(host: host, port: port, user: user) {
+                    if let port = Int(port), controller.editServer(host: host, port: port, user: user, jumpID: jumpID.isEmpty ? nil : jumpID) {
                         dismiss()
                     }
                 }

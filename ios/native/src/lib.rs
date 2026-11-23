@@ -359,6 +359,25 @@ pub extern "C" fn st_ios_check(config_json: *const c_char) -> *mut c_char {
 
 /// Generates a separate device key without persisting it.
 #[no_mangle]
+pub extern "C" fn st_ios_transfer_export(document_json: *const c_char) -> *mut c_char {
+    let raw = input(document_json);
+    guarded(|| match raw.and_then(|raw| secret_tunnel_core::profile_exchange::export(&raw)) {
+        Ok(value) => value,
+        Err(error) => json!({"error":error}).to_string(),
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn st_ios_transfer_unlock(payload: *const c_char, code: *const c_char, preview: i32) -> *mut c_char {
+    let payload = input(payload); let code = input(code);
+    guarded(|| match payload.and_then(|payload| code.and_then(|code| secret_tunnel_core::profile_exchange::open(&payload, &code, preview != 0))) {
+        Ok(value) => value,
+        Err(error) => json!({"error":error}).to_string(),
+    })
+}
+
+/// Generates a separate device key without persisting it.
+#[no_mangle]
 pub extern "C" fn st_ios_generate_key() -> *mut c_char {
     guarded(|| match embedded_ssh::setup::generate_key() {
         Ok(key) => json!({"private": key}).to_string(),

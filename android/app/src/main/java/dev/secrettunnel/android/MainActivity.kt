@@ -592,6 +592,11 @@ class MainActivity:Activity() {
     private fun serversPage(){
         heading("Серверы","SSH-серверы, ключи доступа и доверие")
         body.addView(button("Мастер настройки",true){startActivityForResult(Intent(this,SetupActivity::class.java),105)},spaced(16))
+        body.addView(button("Импортировать"){unlocked();startActivityForResult(Intent(this,ProfileTransferActivity::class.java),107)},spaced(12))
+        val transferable=store.servers().filter{it.host.isNotBlank()&&it.user.isNotBlank()&&SettingsStore(this,it.id).hasKey()&&isTrustedSshPin(SettingsStore(this,it.id).fingerprint)}
+        if(transferable.size>1)body.addView(button("Поделиться всеми настроенными серверами"){
+            startActivity(Intent(this,ProfileTransferActivity::class.java).putStringArrayListExtra("server_ids",ArrayList(transferable.map{it.id})))
+        },spaced(12))
         body.addView(button("+  Добавить сервер",true){unlocked();editingId=UUID.randomUUID().toString();navigate("serverEditor")},spaced(16))
         for(server in store.servers()){
             val scoped=SettingsStore(this,server.id);val card=card();card.addView(label(server.name,18,true))
@@ -599,7 +604,11 @@ class MainActivity:Activity() {
             if (server.jumpServerId != null) card.addView(label(routeLabel(server.id),13,false,palette.muted),spaced(6))
             card.addView(label(if(scoped.hasKey())"✓  Ключ доступа добавлен" else "○  Добавьте SSH-ключ",12,false,if(scoped.hasKey())palette.accent else palette.warning),spaced(12))
             card.addView(label(if(isTrustedSshPin(scoped.fingerprint))"✓  Ключ сервера сохранён" else "○  Сервер ещё не проверен",12,false,palette.muted),spaced(6))
-            card.addView(button("Настроить"){editingId=server.id;navigate("serverEditor")},spaced(14));body.addView(card,spaced(12))
+            card.addView(button("Настроить"){editingId=server.id;navigate("serverEditor")},spaced(14))
+            if(scoped.hasKey())card.addView(button("Поделиться"){
+                startActivity(Intent(this,ProfileTransferActivity::class.java).putStringArrayListExtra("server_ids",arrayListOf(server.id)))
+            },spaced(8))
+            body.addView(card,spaced(12))
         }
         if(store.servers().isEmpty())emptyState("Пока нет серверов","Добавьте SSH-сервер, чтобы создать подключение.")
     }
@@ -1828,6 +1837,7 @@ class MainActivity:Activity() {
     override fun onActivityResult(requestCode:Int,resultCode:Int,data:Intent?){
         super.onActivityResult(requestCode,resultCode,data)
         if(requestCode==105){if(resultCode==RESULT_OK)navigate("home");return}
+        if(requestCode==107){if(resultCode==RESULT_OK)navigate("servers");return}
         if (requestCode == UPDATE_INSTALL_REQUEST) {
             if (resultCode == RESULT_FIRST_USER) message("Android не смог установить обновление. Можно повторить установку из «О программе».")
             return

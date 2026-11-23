@@ -48,7 +48,7 @@ extension TunnelController {
                 try? await Task.sleep(nanoseconds: 300_000_000)
             }
             selectServer(profile.id)
-            let config = profile.settings.rustConfig(keyPath: Shared.keyURL(for: profile).path)
+            guard let config = try? profile.settings.rustConfig(keyPath: Shared.keyURL(for: profile).path) else { continue }
             let checked = jsonObject(await Task.detached { RustCore.check(config) }.value)
             var report: [String: Any] = ["server": profile.name, "ssh_agent_ok": checked["ok"] as? Bool == true]
             NSLog("ST_DEVICE_QA %@ SSH/agent %@", profile.name, checked["ok"] as? Bool == true ? "OK" : "FAILED")

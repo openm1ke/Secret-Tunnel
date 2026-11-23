@@ -1,4 +1,6 @@
 //! Desktop and Android compile the same SSH/SOCKS/UDP implementation.
+pub use secret_tunnel_profile_transfer as profile_transfer;
+pub mod profile_exchange;
 #[path = "../../src-tauri/src/embedded_ssh.rs"]
 pub mod embedded_ssh;
 #[path = "../../src-tauri/src/udp_protocol.rs"]

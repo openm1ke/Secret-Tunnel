@@ -8,7 +8,7 @@ options:
   createIntermediateGroups: true
 settings:
   base:
-    MARKETING_VERSION: 0.3.32
+    MARKETING_VERSION: 0.3.33
     CURRENT_PROJECT_VERSION: 1
     DEVELOPMENT_TEAM: ${ST_DEVELOPMENT_TEAM}
     CODE_SIGN_STYLE: Automatic
@@ -50,6 +50,17 @@ targets:
         STAppGroup: $(ST_APP_GROUP)
         STTunnelBundleID: $(ST_TUNNEL_BUNDLE_ID)
         NSLocalNetworkUsageDescription: Подключение к вашему SSH-серверу в локальной сети.
+        NSCameraUsageDescription: Сканирование QR-кода с зашифрованными настройками вашего SSH-сервера.
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.secrettunnel.import
+            CFBundleURLSchemes: [secrettunnel]
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: dev.secrettunnel.profile
+            UTTypeDescription: Серверы Secret Tunnel
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [stprofile]
+              public.mime-type: application/vnd.secrettunnel.profile
     entitlements:
       path: App/SecretTunnel.entitlements
       properties:
@@ -115,3 +126,4 @@ schemes:
       targets: [SecretTunnelTests]
       environmentVariables:
         WIZARD_TEST_FIXTURE: $(WIZARD_TEST_FIXTURE)
+        PROFILE_TRANSFER_FIXTURE: $(PROFILE_TRANSFER_FIXTURE)

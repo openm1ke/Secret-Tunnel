@@ -63,6 +63,7 @@ mod traffic_relay;
 
 mod udp_protocol;
 mod setup_wizard;
+mod profile_transfer;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ServerProfile {
@@ -1204,7 +1205,7 @@ fn build_status(
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         ssh_engine: runtime
             .map(TunnelRuntime::ssh_engine)
-            .unwrap_or_else(|| if ssh_route.is_empty() { config.settings.ssh_engine.clone() } else { "embedded".into() }),
+            .unwrap_or_else(|| if requires_embedded_ssh(&server) { "embedded".into() } else { config.settings.ssh_engine.clone() }),
         server_id: server.id,
         server_name: server.name,
         ssh_route,
@@ -1385,7 +1386,7 @@ async fn test_server(server: ServerProfile, state: State<'_, AppState>) -> Resul
 fn check_server(server: &ServerProfile, logs: &Arc<Mutex<Vec<String>>>) -> Result<String, String> {
     validate_server(server)?;
     let config = load_config()?;
-    if server.jump_server_id.is_some() || config.settings.ssh_engine == "embedded" {
+    if requires_embedded_ssh(server) || config.settings.ssh_engine == "embedded" {
         #[cfg(feature = "embedded-ssh")]
         {
             log_line(
@@ -1469,6 +1470,11 @@ fn check_server(server: &ServerProfile, logs: &Arc<Mutex<Vec<String>>>) -> Resul
         };
         Err(message)
     }
+}
+
+fn requires_embedded_ssh(server: &ServerProfile) -> bool {
+    // OpenSSH's known_hosts does not enforce the fingerprint carried by a profile.
+    server.jump_server_id.is_some() || server.host_key_sha256.is_some()
 }
 
 #[tauri::command(async)]
@@ -1640,7 +1646,7 @@ fn start_session_workers(app: tauri::AppHandle) {
                 let result = (|| {
                     let server = selected_server(&plan)?;
                     let proxy = selected_proxy(&plan)?;
-                    let engine = if server.jump_server_id.is_some() { "embedded" } else { plan.settings.ssh_engine.as_str() };
+                    let engine = if requires_embedded_ssh(&server) { "embedded" } else { plan.settings.ssh_engine.as_str() };
                     match engine {
                         "system" => {
                             start_system_ssh_tunnel(&state, server, proxy, generation)
@@ -2537,6 +2543,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             setup_wizard::wizard_probe,
+            profile_transfer::transfer_export,
+            profile_transfer::transfer_preview,
+            profile_transfer::transfer_import,
+            profile_transfer::transfer_read_file,
+            profile_transfer::transfer_write_file,
             setup_wizard::wizard_access,
             setup_wizard::wizard_finish,
             get_config,

@@ -13,7 +13,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return completionHandler(fail("Импортируйте приватный SSH-ключ в приложении"))
         }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let error = RustCore.start(settings.rustConfig(keyPath: Shared.keyURL.path, newSession: true))
+            let config: String
+            do { config = try settings.rustConfig(keyPath: Shared.keyURL.path, newSession: true) }
+            catch { return completionHandler(fail(error.localizedDescription)) }
+            let error = RustCore.start(config)
             if !error.isEmpty {
                 os_log("SSH start failed: %{public}@", log: log, type: .error, error)
                 return completionHandler(fail(error))

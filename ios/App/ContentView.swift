@@ -55,6 +55,9 @@ struct ContentView: View {
     @State private var showAddress = false
     @State private var editingPort = false
     @State private var setupOpen = false
+    @State private var transferOpen = false
+    @State private var transferServerID: String?
+    @State private var transferPayload = ""
 
     private var palette: MobilePalette { colorScheme == .dark ? .dark : .light }
 
@@ -90,6 +93,14 @@ struct ContentView: View {
         }
         .sheet(isPresented: $setupOpen) {
             SetupWizard(palette: palette).environmentObject(c)
+        }
+        .sheet(isPresented: $transferOpen) {
+            ProfileTransferView(serverID: transferServerID, initialPayload: transferPayload, palette: palette).environmentObject(c)
+        }
+        .onOpenURL { url in
+            guard url.scheme == "secrettunnel", url.host == "import", !transferOpen else { return }
+            guard url.absoluteString.utf8.count <= 1_048_576 else { c.message = "Ссылка переноса больше 1 МБ."; return }
+            transferServerID = nil; transferPayload = url.absoluteString; transferOpen = true
         }
     }
 
@@ -319,12 +330,17 @@ struct ContentView: View {
             ForEach(Shared.profiles) { profile in
                 card {
                     Text(profile.name).font(.headline)
+                    if let jump = profile.settings.jumpProfileID, let parent = Shared.profiles.first(where: { $0.id == jump }) {
+                        Text("Через \(parent.name)").font(.footnote).foregroundColor(palette.muted)
+                    }
                     if Shared.selectedProfile?.id == profile.id {
                         Label("Выбран для подключения", systemImage: "checkmark.circle.fill").foregroundColor(palette.accent)
                     } else {
                         action("Использовать") { c.selectServer(profile.id) }
                             .disabled(!c.canEditServer || speedCheck.running)
                     }
+                    action("Поделиться") { transferServerID = profile.id; transferPayload = ""; transferOpen = true }
+                        .disabled(c.busy || speedCheck.running)
                 }
             }
             card {
@@ -335,6 +351,8 @@ struct ContentView: View {
                     action(showAddress ? "Скрыть адрес" : "Показать адрес") { showAddress.toggle() }
                 }
                 action("Мастер настройки", primary: !c.hasEndpoint) { setupOpen = true }
+                    .disabled(!c.canEditServer || speedCheck.running)
+                action("Импортировать") { transferServerID = nil; transferPayload = ""; transferOpen = true }
                     .disabled(!c.canEditServer || speedCheck.running)
                 action(c.hasEndpoint ? "Изменить сервер" : "Добавить сервер") {
                     editingServer = true

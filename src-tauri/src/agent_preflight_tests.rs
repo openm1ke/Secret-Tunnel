@@ -252,6 +252,13 @@ async fn fixture(mode: Mode) -> Fixture {
     fixture_with_cipher(mode, None).await
 }
 async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) -> Fixture {
+    fixture_with_limits(mode, cipher, None).await
+}
+async fn fixture_with_limits(
+    mode: Mode,
+    cipher: Option<russh::cipher::Name>,
+    limits: Option<russh::Limits>,
+) -> Fixture {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     // Public fixed seeds are used only by this loopback fixture.
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -293,6 +300,9 @@ async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) ->
     if let Some(cipher) = cipher {
         config.preferred.cipher = std::borrow::Cow::Owned(vec![cipher]);
     }
+    if let Some(limits) = limits {
+        config.limits = limits;
+    }
     let config = Arc::new(config);
     let commands = Arc::new(Mutex::new(Vec::new()));
     let captured = commands.clone();
@@ -332,6 +342,93 @@ async fn fixture_with_cipher(mode: Mode, cipher: Option<russh::cipher::Name>) ->
         path,
         commands,
     }
+}
+
+#[tokio::test]
+async fn repeated_ssh_rekeys_and_flow_churn_leave_capacity_and_credit_reusable() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        // Exercise the hourly/byte-triggered transition without an hour-long wait.
+        let fixture = fixture_with_limits(
+            Mode::ElasticTcp,
+            None,
+            Some(russh::Limits::new(
+                256 * 1024,
+                256 * 1024,
+                Duration::from_secs(2),
+            )),
+        )
+        .await;
+        let session = connect_ssh(
+            &fixture.server,
+            (&*fixture.server.host, fixture.server.port),
+            fixture.options.clone(),
+        )
+        .await
+        .unwrap();
+        let (transport, _) = start_agent_transport_qos(
+            &session,
+            64,
+            Some(secret_tunnel_mux::UDP_WINDOW),
+            None,
+            false,
+            Some(96 * 1024),
+            secret_tunnel_mux::TCP_RECEIVE_WINDOW,
+        )
+        .await
+        .unwrap();
+        let mut udp = transport.open(FlowKind::Udp, vec![]).await.unwrap();
+        for cycle in 0..100u8 {
+            if cycle % 5 == 0 {
+                session.rekey_soon().await.unwrap();
+            }
+            let mut tasks = tokio::task::JoinSet::new();
+            for _ in 0..8 {
+                let transport = transport.clone();
+                tasks.spawn(async move {
+                    let mut flow = transport.open(FlowKind::Tcp, vec![]).await.unwrap();
+                    let sender = flow.sender();
+                    let upload = tokio::spawn(async move {
+                        for _ in 0..8 {
+                            sender
+                                .send(vec![cycle; secret_tunnel_mux::TCP_CHUNK])
+                                .await
+                                .unwrap();
+                        }
+                        sender.eof().await.unwrap();
+                    });
+                    let mut bytes = 0;
+                    while let Some(packet) = flow.recv().await.unwrap() {
+                        assert!(packet.iter().all(|byte| *byte == cycle));
+                        bytes += packet.len();
+                    }
+                    upload.await.unwrap();
+                    assert_eq!(bytes, 8 * secret_tunnel_mux::TCP_CHUNK);
+                    flow.finish().await.unwrap();
+                });
+            }
+            udp.sender().send(vec![cycle; 1200]).await.unwrap();
+            assert_eq!(&*udp.recv().await.unwrap().unwrap(), vec![cycle; 1200]);
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+            assert_eq!(transport.snapshot().active, 1);
+            assert_eq!(transport.snapshot().protocol_errors, 0);
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while transport.snapshot().diagnostics.tcp_flight.held_bytes != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(transport.snapshot().receive_queue_bytes, 0);
+        transport.shutdown();
+        let _ = session
+            .disconnect(russh::Disconnect::ByApplication, "", "English")
+            .await;
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

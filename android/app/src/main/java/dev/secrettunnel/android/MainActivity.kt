@@ -1601,6 +1601,8 @@ class MainActivity:Activity() {
         return listOfNotNull(status,windows,latency).joinToString("\n")
     }
     private fun diagnostics():String=buildString{
+        append("Secret Tunnel ${BuildConfig.VERSION_NAME} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
+        append("Устройство: ${Build.MANUFACTURER} ${Build.MODEL}\n\n")
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
         previousConnectionFailure?.let { append("История завершений Android\n${it.message}\n\n") }
         lastStatus.optString("agent").takeIf{it.isNotBlank()&&it!="null"}?.let{append(it+"\n\n")}

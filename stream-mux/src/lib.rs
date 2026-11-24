@@ -13,7 +13,7 @@ pub use diagnostics::{is_flow_cancellation, unix_millis, Diagnostics, TcpStage};
 pub use heartbeat::HeartbeatSnapshot;
 pub use tcp_flight::TcpFlightSnapshot;
 mod relay;
-pub use datagrams::DatagramBuffers;
+pub use datagrams::{send_datagram, DatagramBuffers};
 #[cfg(test)]
 mod tests;
 mod wire;
@@ -1146,13 +1146,13 @@ impl Sender {
     pub fn note_udp_failure(&self, failure: UdpFailure, reason: &str) {
         if let Some(inner) = self.state.inner.upgrade() {
             let metrics = &inner.counters.diagnostics;
-            Self::note_udp_drop(
-                &inner,
-                match failure {
-                    UdpFailure::Dns => &metrics.udp_dns,
-                    UdpFailure::Send => &metrics.udp_send,
-                },
-            );
+            match failure {
+                // A receive task failure does not tell us how many datagrams
+                // were lost; count the failure without inventing packet drops.
+                UdpFailure::Receive => { metrics.udp_receive.fetch_add(1, Ordering::Relaxed); }
+                UdpFailure::Dns => Self::note_udp_drop(&inner, &metrics.udp_dns),
+                UdpFailure::Send => Self::note_udp_drop(&inner, &metrics.udp_send),
+            }
             *inner.udp_error.lock().unwrap() = reason.chars().take(256).collect();
         }
     }
@@ -1279,6 +1279,7 @@ impl Sender {
 pub enum UdpFailure {
     Dns,
     Send,
+    Receive,
 }
 
 async fn read_loop<R: AsyncRead + Unpin>(reader: R, inner: Arc<Inner>) {

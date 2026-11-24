@@ -190,7 +190,9 @@ class VpnFixtureTest {
             }
             val before = JSONObject(NativeBridge.status())
             ready.writeText(snapshot().toString())
-            val deadline = System.currentTimeMillis() + 180_000
+            val sessionSeconds = InstrumentationRegistry.getArguments().getString("sessionSeconds")
+                ?.toLongOrNull()?.coerceIn(30, 7200) ?: 180
+            val deadline = System.currentTimeMillis() + sessionSeconds * 1000
             var nextSnapshot=0L
             while (!finish.isFile && System.currentTimeMillis() < deadline) {
                 if(System.currentTimeMillis()>=nextSnapshot){File(context.filesDir,"integration-live.json").writeText(snapshot().toString());nextSnapshot=System.currentTimeMillis()+1000}

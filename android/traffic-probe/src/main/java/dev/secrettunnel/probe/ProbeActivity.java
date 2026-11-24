@@ -78,6 +78,10 @@ public class ProbeActivity extends Activity {
         super.onCreate(state);
         TextView output = new TextView(this); output.setPadding(24, 48, 24, 24);
         output.setText("Checking raw TCP, UDP and DNS…"); setContentView(output);
+        if (getIntent().hasExtra("soak_seconds")) {
+            new Thread(() -> LongSessionProbe.run(this, output), "long-session-probe").start();
+            return;
+        }
         new Thread(() -> {
             JSONObject result = new JSONObject();
             try {

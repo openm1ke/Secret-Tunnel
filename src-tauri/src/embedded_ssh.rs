@@ -2087,7 +2087,10 @@ async fn relay_udp_association(
             // Returning closes the control connection, which ends the association (RFC 1928).
             _ = tokio::time::sleep_until(dns_deadline), if dns_only && sent => return Ok(()),
             received = buffers.recv(&socket) => {
-                let (packet, source) = received.map_err(|e| e.to_string())?;
+                let (packet, source) = received.map_err(|error| {
+                    sender.note_udp_failure(secret_tunnel_mux::UdpFailure::Receive, &format!("UDP local receive: {error}"));
+                    error.to_string()
+                })?;
                 if source.ip() != peer.ip() || endpoint.is_some_and(|expected| expected != source) { continue; }
                 let (payload, port) = match udp_protocol::parse_packet(&packet) {
                     Ok(parsed) => {
@@ -2123,7 +2126,13 @@ async fn relay_udp_association(
                 let restored = dns_server.and_then(|original| restore_dns_source(&packet, original));
                 let datagram: &[u8] = restored.as_deref().unwrap_or(&packet);
                 if let Some(endpoint) = endpoint {
-                    socket.send_to(datagram, endpoint).await.map_err(|e| e.to_string())?;
+                    secret_tunnel_mux::send_datagram(&sender, &socket, datagram, endpoint)
+                        .await.map_err(|error| {
+                            if !sender.is_closed() {
+                                sender.note_udp_failure(secret_tunnel_mux::UdpFailure::Send, &format!("UDP local send: {error}"));
+                            }
+                            error.to_string()
+                        })?;
                     let parsed = udp_protocol::parse_packet(datagram).map_err(|e| e.to_string())?;
                     if parsed.address.port() == 53 {
                         dns_names::learn(parsed.payload);

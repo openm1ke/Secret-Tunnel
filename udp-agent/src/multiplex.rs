@@ -313,7 +313,7 @@ struct Relay {
     activity: Arc<Mutex<Instant>>,
     v4: Option<Arc<UdpSocket>>,
     v6: Option<Arc<UdpSocket>>,
-    readers: JoinSet<()>,
+    readers: JoinSet<io::Result<()>>,
 }
 
 impl Relay {
@@ -339,13 +339,12 @@ impl Relay {
                 self.readers.spawn(async move {
                     let mut processed=0u32;
                     loop {
-                        let result=tokio::select! {packet=buffers.recv(&receive)=>packet,_=sender.closed()=>break};
-                        let Ok((packet,source))=result else {break};
+                        let (packet,source)=tokio::select! {packet=buffers.recv(&receive)=>packet?,_=sender.closed()=>return Ok(())};
                         let known=allowed.lock().unwrap().get_mut(&source).is_some_and(|last|{if last.elapsed()<Duration::from_secs(120){*last=Instant::now();true}else{false}});
                         if !known{continue;}
                         *activity.lock().unwrap()=Instant::now();
                         let packet=match udp_protocol::encode_packet(source,&packet){Ok(packet)=>packet,Err(_)=>continue};
-                        if sender.try_send_datagram(packet).is_err(){break;}
+                        sender.try_send_datagram(packet).map_err(io::Error::other)?;
                         processed+=1;if processed%32==0{tokio::task::yield_now().await;}
                     }
                 });
@@ -362,8 +361,9 @@ impl Relay {
                 }
                 destinations.insert(destination, Instant::now());
             }
-            match slot.as_ref().unwrap().send_to(payload, destination).await {
+            match secret_tunnel_mux::send_datagram(&self.sender, slot.as_ref().unwrap(), payload, destination).await {
                 Ok(_) => return,
+                Err(_) if self.sender.is_closed() => return,
                 Err(error) => send_error = error.to_string(),
             }
         }
@@ -380,14 +380,14 @@ async fn udp(flow: Flow, buffers: DatagramBuffers) -> secret_tunnel_mux::Result<
 /// longer holds back unrelated datagrams of the association. Nothing queued
 /// is sent once the flow has been closed or aborted.
 pub(crate) async fn udp_with(
-    mut flow: Flow,
+    flow: Flow,
     buffers: DatagramBuffers,
     resolver: Resolver,
 ) -> secret_tunnel_mux::Result<()> {
     flow.accept()?;
     let sender = flow.sender();
     let activity = Arc::new(Mutex::new(Instant::now()));
-    let mut relay = Relay {
+    let relay = Relay {
         sender: sender.clone(),
         buffers,
         allowed: Default::default(),
@@ -396,6 +396,16 @@ pub(crate) async fn udp_with(
         v6: None,
         readers: JoinSet::new(),
     };
+    udp_association(flow, relay, resolver).await
+}
+
+async fn udp_association(
+    mut flow: Flow,
+    mut relay: Relay,
+    resolver: Resolver,
+) -> secret_tunnel_mux::Result<()> {
+    let sender = flow.sender();
+    let activity = relay.activity.clone();
     let mut cleanup = tokio::time::interval(Duration::from_secs(30));
     let mut cache: HashMap<(String, u16), (Vec<SocketAddr>, Instant)> = HashMap::new();
     let mut pending: HashMap<(String, u16), VecDeque<secret_tunnel_mux::Received>> = HashMap::new();
@@ -403,6 +413,20 @@ pub(crate) async fn udp_with(
     let mut lookups: JoinSet<((String, u16), io::Result<Vec<SocketAddr>>)> = JoinSet::new();
     loop {
         tokio::select! {
+            Some(result) = relay.readers.join_next(), if !relay.readers.is_empty() => {
+                if !sender.is_closed() {
+                    let reason = match result {
+                        Ok(Err(error)) => format!("UDP receive: {error}"),
+                        Err(error) => format!("UDP receiver task: {error}"),
+                        Ok(Ok(())) => "UDP receiver stopped unexpectedly".into(),
+                    };
+                    sender.note_udp_failure(UdpFailure::Receive, &reason);
+                }
+                // Keeping the socket after its reader exits creates a write-only
+                // association. Outgoing retries reset the idle timer forever.
+                // Abort this flow so the SOCKS adapter can open a fresh mapping.
+                break;
+            }
             packet = flow.recv() => {
                 let Ok(Some(packet)) = packet else { break };
                 *activity.lock().unwrap() = Instant::now();
@@ -479,6 +503,91 @@ pub(crate) async fn udp_with(
 mod dns_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn a_failed_udp_reader_retires_its_flow_and_capacity_can_be_reused() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (a, b) = tokio::io::duplex(65536);
+            let config = Config {
+                max_flows: 1,
+                ..Default::default()
+            };
+            let (client, server) = tokio::join!(
+                Endpoint::start(a, Role::Client, config.clone()),
+                Endpoint::start(b, Role::Server, config),
+            );
+            let (client, server) = (client.unwrap(), server.unwrap());
+            for failed in [true, false] {
+                let (opened, accepted) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
+                    let flow = server.accept().await.unwrap().flow;
+                    flow.accept().unwrap();
+                    flow
+                });
+                let mut flow = opened.unwrap();
+                let mut readers = JoinSet::new();
+                readers.spawn(async move {
+                    if failed {
+                        Err(io::Error::new(
+                            io::ErrorKind::ConnectionReset,
+                            "injected UDP receive failure",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                });
+                let relay = Relay {
+                    sender: accepted.sender(),
+                    buffers: DatagramBuffers::default(),
+                    allowed: Default::default(),
+                    activity: Arc::new(Mutex::new(Instant::now())),
+                    v4: None,
+                    v6: None,
+                    readers,
+                };
+                let worker = tokio::spawn(udp_association(accepted, relay, system_resolver()));
+                // A dead receive task must not leave a write-only association
+                // alive until its idle timer, which outgoing QUIC keeps resetting.
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(500), flow.recv())
+                        .await
+                        .expect("UDP flow stayed open after its receiver exited")
+                        .is_err()
+                );
+                worker.await.unwrap().unwrap();
+                drop(flow);
+                assert_eq!(server.snapshot().active, 0);
+                assert_eq!(client.snapshot().active, 0);
+                assert!(client.error().is_none());
+            }
+            assert_eq!(server.snapshot().diagnostics.udp_receive, 2);
+            assert_eq!(server.snapshot().udp_drops, 0);
+            let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let destination = echo.local_addr().unwrap();
+            let (opened, worker) = tokio::join!(client.open(FlowKind::Udp, vec![]), async {
+                let flow = server.accept().await.unwrap().flow;
+                tokio::spawn(udp_with(
+                    flow,
+                    DatagramBuffers::default(),
+                    system_resolver(),
+                ))
+            });
+            let mut flow = opened.unwrap();
+            flow.sender()
+                .send(udp_protocol::encode_packet(destination, b"recovered").unwrap())
+                .await
+                .unwrap();
+            let mut data = [0; 64];
+            let (length, peer) = echo.recv_from(&mut data).await.unwrap();
+            echo.send_to(&data[..length], peer).await.unwrap();
+            assert!(flow.recv().await.unwrap().unwrap().ends_with(b"recovered"));
+            drop(flow);
+            worker.await.unwrap().unwrap();
+            assert_eq!(server.snapshot().active, 0);
+            assert_eq!(server.snapshot().diagnostics.udp_receive, 2);
+        })
+        .await
+        .unwrap();
+    }
 
     /// Agent side of one association with a resolver that answers `name`
     /// after `delay`, plus a loopback UDP echo that counts what reaches it.

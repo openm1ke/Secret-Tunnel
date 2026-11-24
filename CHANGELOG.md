@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.35 — 2026-11-24
+
+- Retire a UDP association when its server receive task exits, so the client can recreate the mapping instead of keeping a connection that sends requests but cannot receive replies.
+- Bound UDP socket sends to five seconds and interrupt them when their flow closes, releasing held receive credit on both the client and server.
+- Android: include UDP receive failures, app and Android versions, and the device model in copied diagnostics.
+- Validated 35 minutes of Android VPN traffic, SSH rekeys and recovery after injected UDP mapping failures and packet loss on Android 14 and 17. The reported Realme slowdown still needs a device log to establish its exact cause.
+
 ## 0.3.34 — 2026-11-23
 
 - Windows: confirm that the update helper is ready before quitting the app. Keep a separately verified installer copy, show installation progress, preserve the existing install directory and reopen the app after installer failures. Startup failures leave the app open; persistent diagnostics appear after restart.

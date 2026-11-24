@@ -48,7 +48,7 @@ internal object TransportDiagnostics {
             append("UDP: попыток отправки $attempts · принято ${metrics.optLong("udp_received")}\n")
             append("В окне UDP не хватило: байтов ${metrics.optLong("udp_credit_bytes")} · слотов ${metrics.optLong("udp_credit_slots")} · обоих ${metrics.optLong("udp_credit_both")}\n")
         }
-        append("UDP: ошибки DNS ${metrics.optLong("udp_dns")} · отправка ${metrics.optLong("udp_send")}\n")
+        append("UDP: ошибки DNS ${metrics.optLong("udp_dns")} · отправка ${metrics.optLong("udp_send")} · приём ${metrics.optLong("udp_receive")}\n")
         for ((key, label) in listOf(
             "tx_queue" to "Ожидание отправки",
             "rx_hold" to "Приём до освобождения буфера",

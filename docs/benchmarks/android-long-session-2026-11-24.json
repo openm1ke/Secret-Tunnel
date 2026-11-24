@@ -1,0 +1,114 @@
+{
+  "date": "2026-11-24",
+  "branch": "codex/android-long-session-stall",
+  "base_commit": "34bacc4a30ee729d9558419e2ec72075abaa5773",
+  "baseline": {
+    "android_release": "17",
+    "duration_seconds": 2100.207,
+    "cycles": 3030,
+    "tcp_ok": 21210,
+    "tcp_aborted": 3030,
+    "tcp_errors": 0,
+    "udp_ok": 24240,
+    "udp_errors": 0,
+    "client_rejected": 0,
+    "server_rejected": 0,
+    "client_protocol_errors": 0,
+    "android_rss_kib_min": 203504,
+    "android_rss_kib_max": 206080,
+    "agent_rss_kib_min": 1708,
+    "agent_rss_kib_max": 2552
+  },
+  "openssh_rekey_transfer": {
+    "passed": true,
+    "payload_bytes_each_direction": 1207959552,
+    "elapsed_seconds": 391.5974474159884
+  },
+  "loss_recovery": {
+    "android_17": {
+      "passed": true,
+      "checks": {
+        "workload_finished": true,
+        "tcp_resumed": true,
+        "udp_resumed": true,
+        "tcp_errors_stopped_after_recovery": true,
+        "udp_errors_stopped_after_recovery": true,
+        "vpn_working_after_recovery": true
+      },
+      "final_probe": {
+        "elapsed_ms": 420434,
+        "cycles": 538,
+        "tcp_ok": 3766,
+        "tcp_aborted": 538,
+        "tcp_errors": 0,
+        "udp_ok": 4300,
+        "udp_errors": 4,
+        "finished": true,
+        "passed": false
+      },
+      "samples": 203,
+      "ssh_agent_processes_observed": 1,
+      "no_payload_mismatch": true,
+      "no_protocol_errors": true,
+      "netem_packets_dropped": 195,
+      "blackhole_seconds_observed": 6.5
+    },
+    "android_14": {
+      "passed": true,
+      "checks": {
+        "workload_finished": true,
+        "tcp_resumed": true,
+        "udp_resumed": true,
+        "tcp_errors_stopped_after_recovery": true,
+        "udp_errors_stopped_after_recovery": true,
+        "vpn_working_after_recovery": true
+      },
+      "final_probe": {
+        "elapsed_ms": 300017,
+        "cycles": 400,
+        "tcp_ok": 2800,
+        "tcp_aborted": 400,
+        "tcp_errors": 0,
+        "udp_ok": 3198,
+        "udp_errors": 2,
+        "finished": true,
+        "passed": false
+      },
+      "samples": 145,
+      "ssh_agent_processes_observed": 1,
+      "no_payload_mismatch": true,
+      "no_protocol_errors": true,
+      "netem_packets_dropped": 124,
+      "blackhole_seconds_observed": 4.3
+    }
+  },
+  "validation": {
+    "mux_tests": 58,
+    "core_tests": 36,
+    "desktop_tests": 77,
+    "desktop_ignored": 5,
+    "agent_unit_tests": 7,
+    "agent_integration_tests": 6,
+    "windows_msvc_typecheck": true,
+    "android_abis": [
+      "armeabi-v7a",
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "android_unit_tests_and_lint": true
+  },
+  "limits": [
+    "No physical Realme trace at failure",
+    "Echo payloads do not implement Instagram HTTP3/QUIC",
+    "Packet loss applied to an internal TCP segment of the isolated SSH test path"
+  ],
+  "source_sha256": {
+    "src-tauri/src/embedded_ssh.rs": "a24235b09585e92a8d7c58c1b547c565cb6ec29a6756b95adc8e6e7ae0c9d7da",
+    "stream-mux/src/datagrams.rs": "f0ca5d5a29c51cd06b979935036d4e49ad21b51c6c410a5137ee463a4948a850",
+    "stream-mux/src/lib.rs": "942266aad90ab85d800d81eff37675f29e2003ee208cb2e50ff0ff6a8b158905",
+    "stream-mux/src/diagnostics.rs": "51a7c4d7f39f1d332275dd780f556118774170901ee2d605cd8d47e964248a97",
+    "udp-agent/src/multiplex.rs": "75ffd58e24d64f4755225cb0a635ef86e8a1fbaea97e9e99676c121b7e198fd5",
+    "android/app/src/main/java/dev/secrettunnel/android/MainActivity.kt": "aec616dacbeed2a1c51614e8fea8c5eccf42b52e0a394d66047699cee92d7d16",
+    "android/app/src/main/java/dev/secrettunnel/android/TransportDiagnostics.kt": "474ba548900ac0ca50059d73d6a531f2aff3f767dfbcb97a03f3fe73999b8b14"
+  }
+}

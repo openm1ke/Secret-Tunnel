@@ -37,6 +37,7 @@ final class TunnelController: ObservableObject {
             await loadManager()
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--check-saved-servers") { await runLocalDeviceChecks() }
+            if ProcessInfo.processInfo.arguments.contains("--ipv6-device-checks") { await runIPv6DeviceChecks() }
             #endif
         }
         #endif
@@ -226,8 +227,9 @@ final class TunnelController: ObservableObject {
         let manager = self.manager ?? NETunnelProviderManager()
         let proto = NETunnelProviderProtocol()
         proto.providerBundleIdentifier = tunnelBundleID
-        proto.serverAddress = settings.host
+        proto.serverAddress = TunnelNetworkPolicy.entryHost(target: settings.host, jumps: try Shared.sshJumps(for: settings))
         proto.disconnectOnSleep = false
+        TunnelNetworkPolicy.configure(proto)
         manager.protocolConfiguration = proto
         manager.localizedDescription = "Secret Tunnel"
         manager.isEnabled = true

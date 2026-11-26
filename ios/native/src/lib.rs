@@ -211,7 +211,7 @@ fn start(raw: String) -> Result<(), String> {
                 tcp_receive_window_bytes: cfg.ssh_tuning.tcp_receive_window_bytes.min(256 * 1024),
                 ..cfg.ssh_tuning
             },
-            probe_ipv6: false,
+            probe_ipv6: true,
             // Extension memory is tight, so UDP uses the TCP window size. Agents built
             // before the receive budget was sized for the largest window still reserve
             // 128 KiB per UDP flow out of `limit × 64 KiB`; see max_connections below.
@@ -303,6 +303,7 @@ pub extern "C" fn st_ios_status() -> *mut c_char {
             "rx": s.totals.0.saturating_add(current.0),
             "tx": s.totals.1.saturating_add(current.1),
             "agent": s.tunnel.as_ref().map(|t| t.agent_summary()),
+            "ipv6": s.tunnel.as_ref().and_then(|t| t.ipv6_status()),
             "observed_host_key": observed().lock().map(|o| o.clone()).unwrap_or_default(),
             "logs": tail,
         })

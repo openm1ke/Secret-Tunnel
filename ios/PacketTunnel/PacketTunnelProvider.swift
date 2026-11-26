@@ -21,7 +21,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 os_log("SSH start failed: %{public}@", log: log, type: .error, error)
                 return completionHandler(fail(error))
             }
-            setTunnelNetworkSettings(networkSettings(for: settings)) { [self] error in
+            let jumps = jsonObject(config)["ssh_jumps"] as? [[String: Any]] ?? []
+            let entry = TunnelNetworkPolicy.entryHost(target: settings.host, jumps: jumps)
+            setTunnelNetworkSettings(TunnelNetworkPolicy.networkSettings(server: entry)) { [self] error in
                 if let error {
                     RustCore.stop()
                     return completionHandler(error)
@@ -58,41 +60,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler?(try? JSONSerialization.data(withJSONObject: status))
     }
 
-    private func networkSettings(for settings: TunnelSettings) -> NEPacketTunnelNetworkSettings {
-        let network = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: settings.host)
-        let ipv4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.255.255.252"])
-        ipv4.includedRoutes = [NEIPv4Route.default()]
-        network.ipv4Settings = ipv4
-        // IPv4-only tunnel: the server has no IPv6 egress, and advertising IPv6 here made
-        // apps try IPv6 first and fail. Note: if the Wi-Fi itself provides IPv6, that
-        // traffic is not captured by this tunnel.
-        let dns = NEDNSSettings(servers: ["1.1.1.1"])
-        dns.matchDomains = [""]
-        network.dnsSettings = dns
-        network.mtu = 1500
-        return network
-    }
-
     private func startHev(fd: Int32, socksPort: Int) {
         try? Data().write(to: Shared.hevLogURL)
-        let config = """
-        tunnel:
-          mtu: 1500
-          ipv4: 198.18.0.1
-        socks5:
-          address: '::1'
-          port: \(socksPort)
-          udp: 'udp'
-        misc:
-          task-stack-size: 65536
-          tcp-buffer-size: 65536
-          max-session-count: 1024
-          connect-timeout: 14000
-          tcp-read-write-timeout: 60000
-          udp-read-write-timeout: 30000
-          log-file: '\(Shared.hevLogURL.path)'
-          log-level: info
-        """
+        let config = TunnelNetworkPolicy.hevConfiguration(socksPort: socksPort, logPath: Shared.hevLogURL.path)
         let thread = Thread { [log] in
             let bytes = Array(config.utf8)
             let code = bytes.withUnsafeBufferPointer {

@@ -247,9 +247,7 @@ fn dns_reply(proxy: SocketAddr, resolver: SocketAddr, deadline: Instant) -> io::
     let socket = UdpSocket::bind(SocketAddr::new(relay.ip(), 0))?;
     socket.connect(relay)?;
     let id = (epoch().subsec_nanos() as u16).to_be_bytes();
-    let mut query = Vec::from(id);
-    query.extend_from_slice(&[1, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-    query.extend_from_slice(QUESTION);
+    let query = dns_probe_query(id);
     socket.set_write_timeout(Some(remaining(deadline)?))?;
     socket.send(&udp_protocol::encode_packet(resolver, &query)?)?;
     let mut buffer = [0; 4096];
@@ -261,17 +259,33 @@ fn dns_reply(proxy: SocketAddr, resolver: SocketAddr, deadline: Instant) -> io::
         };
         let reply = packet.payload;
         if packet.address != PacketAddress::Socket(resolver)
-            || reply.get(..2) != Some(&id)
-            || reply.get(2).is_none_or(|flags| flags & 0xf8 != 0x80)
-            || reply.get(4..6) != Some(&[0, 1])
-            || !reply
-                .get(12..12 + QUESTION.len())
-                .is_some_and(|question| question.eq_ignore_ascii_case(QUESTION))
+            || !dns_probe_matches(reply, &query)
         {
             continue;
         }
         return Ok(reply[2] & 2 == 0 && reply[3] & 15 == 0 && has_ipv4_answer(reply));
     }
+}
+
+pub(crate) fn dns_probe_query(id: [u8; 2]) -> Vec<u8> {
+    let mut query = Vec::from(id);
+    query.extend_from_slice(&[1, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    query.extend_from_slice(QUESTION);
+    query
+}
+
+pub(crate) fn dns_probe_matches(reply: &[u8], query: &[u8]) -> bool {
+    reply.len() >= 12
+        && reply.get(..2) == query.get(..2)
+        && reply[2] & 0xf8 == 0x80
+        && reply[4..6] == [0, 1]
+        && reply.get(12..12 + QUESTION.len())
+            .is_some_and(|question| question.eq_ignore_ascii_case(QUESTION))
+}
+
+pub(crate) fn dns_probe_succeeded(reply: &[u8], query: &[u8]) -> bool {
+    dns_probe_matches(reply, query)
+        && reply[2] & 2 == 0 && reply[3] & 15 == 0 && has_ipv4_answer(reply)
 }
 
 // Skip each answer's name (uncompressed or a compression pointer). The probe

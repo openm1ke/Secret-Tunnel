@@ -23,6 +23,9 @@ mod tls_target;
 mod ssh_transport;
 #[path = "ssh_setup.rs"]
 pub mod setup;
+#[path = "ipv6.rs"]
+mod ipv6;
+pub use ipv6::Ipv6Support;
 pub use ssh_transport::{CipherPolicy, SshSnapshot, SshTuning};
 use ssh_transport::{ObservedStream, TcpObserver};
 
@@ -106,7 +109,7 @@ pub struct EmbeddedTunnelHandle {
     join: Option<JoinHandle<()>>,
     counters: Arc<TrafficCounters>,
     outcome: Receiver<Result<(), String>>,
-    ipv6_supported: Option<bool>,
+    ipv6: Option<Ipv6Support>,
     transport: Endpoint,
     agent: AgentCapabilities,
     outer_tcp: Arc<TcpObserver>,
@@ -126,7 +129,10 @@ impl EmbeddedTunnelHandle {
         SshSnapshot { tuning: self.ssh_tuning.clone(), outer_tcp: self.outer_tcp.snapshot() }
     }
     pub fn ipv6_supported(&self) -> Option<bool> {
-        self.ipv6_supported
+        self.ipv6.map(Ipv6Support::enabled)
+    }
+    pub fn ipv6_status(&self) -> Option<Ipv6Support> {
+        self.ipv6
     }
     pub fn try_wait(&self) -> Option<String> {
         match self.outcome.try_recv() {
@@ -929,13 +935,13 @@ fn start_embedded_worker(
             .unwrap_or_else(|| "Embedded SSH startup failed".into()));
     }
 
-    let (ipv6_supported, transport, agent, outer_tcp, ssh_tuning, _priority_udp_port) = readiness.unwrap();
+    let (ipv6, transport, agent, outer_tcp, ssh_tuning, _priority_udp_port) = readiness.unwrap();
     Ok(EmbeddedTunnelHandle {
         stop_tx,
         join: Some(join),
         counters,
         outcome,
-        ipv6_supported,
+        ipv6,
         transport,
         agent,
         outer_tcp,
@@ -945,7 +951,7 @@ fn start_embedded_worker(
     })
 }
 
-type WorkerReady = (Option<bool>, Endpoint, AgentCapabilities, Arc<TcpObserver>, SshTuning, Option<u16>);
+type WorkerReady = (Option<Ipv6Support>, Endpoint, AgentCapabilities, Arc<TcpObserver>, SshTuning, Option<u16>);
 
 async fn accept_socks(listener: Option<&tokio::net::TcpListener>) -> std::io::Result<(TcpStream, std::net::SocketAddr)> {
     match listener {
@@ -1031,41 +1037,19 @@ async fn run_embedded_tunnel(
             transport.snapshot().limit
         ),
     );
-    let ipv6_supported = if probe_ipv6 {
-        async fn reachable(transport: &Endpoint, host: &str) -> bool {
-            let Ok(target) = udp_protocol::encode_target(host, 443) else {
-                return false;
-            };
-            matches!(
-                tokio::time::timeout(
-                    Duration::from_secs(3),
-                transport.probe_tcp(target)
-                )
-                .await,
-                Ok(Ok(_))
-            )
-        }
-        let (cloudflare, google) = tokio::join!(
-            reachable(&transport, "2606:4700:4700::1111"),
-            reachable(&transport, "2001:4860:4860::8888")
-        );
-        let supported = cloudflare || google;
-        super::log_line(
-            &logs,
-            if supported {
-                "Android: server IPv6 egress available"
-            } else {
-                "Android: server IPv6 egress unavailable; using IPv4 compatibility mode"
-            },
-        );
-        Some(supported)
+    let ipv6 = if probe_ipv6 {
+        let support = ipv6::probe(&transport).await;
+        super::log_line(&logs, format!("IPv6 через SSH: TCP {} · UDP {}. Недоступный IPv6 не отправляется напрямую.",
+            if support.tcp { "доступен" } else { "недоступен" },
+            if support.udp { "доступен" } else { "недоступен" }));
+        Some(support)
     } else {
         None
     };
     let buffers = DatagramBuffers::default();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(transport.snapshot().limit + 32));
     let capacity = Arc::new(CapacityRejections::default());
-    let _ = ready.send((ipv6_supported, transport.clone(), agent, route.outer_tcp.clone(), ssh_tuning, priority_udp_port));
+    let _ = ready.send((ipv6, transport.clone(), agent, route.outer_tcp.clone(), ssh_tuning, priority_udp_port));
     let mut tcp_tick = tokio::time::interval(Duration::from_secs(5));
     tcp_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1112,7 +1096,7 @@ async fn run_embedded_tunnel(
                 let capacity = capacity.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers, udp_only).await {
+                    if let Err(error) = handle_socks_client(stream, originator_addr, transport, counters, &logs, buffers, udp_only, ipv6).await {
                         if CapacityRejections::is_capacity(&error) {
                             capacity.note(&logs, &error);
                         } else if !secret_tunnel_mux::is_flow_cancellation(&error) {
@@ -1787,6 +1771,7 @@ async fn handle_socks_client(
     logs: &Arc<std::sync::Mutex<Vec<String>>>,
     buffers: DatagramBuffers,
     udp_only: bool,
+    ipv6: Option<Ipv6Support>,
 ) -> Result<(), String> {
     let mut request =
         match tokio::time::timeout(Duration::from_secs(10), read_socks5_request(&mut stream))
@@ -1809,6 +1794,7 @@ async fn handle_socks_client(
             counters,
             buffers,
             DNS_IDLE,
+            ipv6,
         )
         .await;
     }
@@ -1820,6 +1806,12 @@ async fn handle_socks_client(
     // DNS over TCP goes to the same reachable resolver as DNS over UDP.
     if request.port == TUNNEL_DNS.port() && request.host.parse::<std::net::IpAddr>().is_ok() {
         request.host = TUNNEL_DNS.ip().to_string();
+    }
+
+    if request.host.parse::<std::net::IpAddr>().is_ok_and(|ip| !ipv6::allowed(ipv6, FlowKind::Tcp,
+        udp_protocol::PacketAddress::Socket(std::net::SocketAddr::new(ip, request.port)))) {
+        write_socks5_reply(&mut stream, 0x08).await?;
+        return Ok(());
     }
     let fake_ip = tls_target::is_fake_ip(&request.host);
     let (destination, preface) = if fake_ip {
@@ -2048,6 +2040,7 @@ async fn relay_udp_association(
     counters: Arc<TrafficCounters>,
     buffers: DatagramBuffers,
     dns_idle: DnsIdle,
+    ipv6: Option<Ipv6Support>,
 ) -> Result<(), String> {
     let mut flow = match transport.open(FlowKind::Udp, Vec::new()).await {
         Ok(flow) => flow,
@@ -2094,6 +2087,16 @@ async fn relay_udp_association(
                 if source.ip() != peer.ip() || endpoint.is_some_and(|expected| expected != source) { continue; }
                 let (payload, port) = match udp_protocol::parse_packet(&packet) {
                     Ok(parsed) => {
+                        // Numeric DNS is redirected below to the tunnel's IPv4
+                        // resolver, so it needs no IPv6 egress on the server.
+                        let egress = match parsed.address {
+                            udp_protocol::PacketAddress::Socket(address) if address.port() == TUNNEL_DNS.port() => udp_protocol::PacketAddress::Socket(TUNNEL_DNS),
+                            address => address,
+                        };
+                        if !ipv6::allowed(ipv6, FlowKind::Udp, egress) {
+                            sender.note_udp_failure(secret_tunnel_mux::UdpFailure::Send, "IPv6 UDP blocked: exit probe failed");
+                            continue;
+                        }
                         if usage.is_none() {
                             let destination = match parsed.address {
                                 udp_protocol::PacketAddress::Socket(address) => address.to_string(),
@@ -2178,6 +2181,10 @@ mod udp_association_tests {
     /// A real multiplexer pair in memory whose server side echoes datagrams
     /// (or stays silent), and one SOCKS UDP association over loopback sockets.
     async fn association(dns_idle: DnsIdle, echo: bool) -> Association {
+        association_with_ipv6(dns_idle, echo, None).await
+    }
+
+    async fn association_with_ipv6(dns_idle: DnsIdle, echo: bool, ipv6: Option<Ipv6Support>) -> Association {
         let (a, b) = tokio::io::duplex(1 << 16);
         let config = MuxConfig {
             max_flows: 8,
@@ -2214,6 +2221,7 @@ mod udp_association_tests {
             Arc::new(TrafficCounters::default()),
             DatagramBuffers::default(),
             dns_idle,
+            ipv6,
         ));
         let mut reply = [0_u8; 10];
         app_control.read_exact(&mut reply).await.unwrap();
@@ -2235,6 +2243,73 @@ mod udp_association_tests {
         .expect("echo through the multiplexer")
         .unwrap();
         assert_eq!(&buffer[..count], &packet[..]);
+    }
+
+    #[tokio::test]
+    async fn unavailable_ipv6_udp_is_not_forwarded_and_ipv4_still_works() {
+        for allowed in [false, true] {
+            let support = Some(Ipv6Support { tcp: true, udp: allowed, checked_at_ms: 1 });
+            let association = association_with_ipv6(FAST, true, support).await;
+            let packet = udp_protocol::encode_packet("[2001:db8::1]:443".parse().unwrap(), b"v6").unwrap();
+            association.app_udp.send_to(&packet, association.relay).await.unwrap();
+            let mut buffer = [0; 128];
+            if allowed {
+                let (length, _) = tokio::time::timeout(Duration::from_secs(2), association.app_udp.recv_from(&mut buffer)).await.unwrap().unwrap();
+                assert_eq!(&buffer[..length], packet);
+            } else {
+                assert!(tokio::time::timeout(Duration::from_millis(100), association.app_udp.recv_from(&mut buffer)).await.is_err());
+                assert_eq!(association.transport.snapshot().bytes_tx, 0, "blocked IPv6 reached the server");
+            }
+            exchange(&association, 443).await;
+            let dns = udp_protocol::encode_packet("[2001:db8::53]:53".parse().unwrap(), b"dns").unwrap();
+            association.app_udp.send_to(&dns, association.relay).await.unwrap();
+            let (length, _) = tokio::time::timeout(Duration::from_secs(2), association.app_udp.recv_from(&mut buffer)).await.unwrap().unwrap();
+            assert_eq!(&buffer[..length], dns, "IPv6 DNS must use the tunneled IPv4 resolver and restore its source");
+            drop(association.app_control);
+            association.task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_ipv6_tcp_is_rejected_before_opening_an_agent_flow() {
+        for (destination, allowed, expected) in [("[2001:db8::1]:443", false, 8), ("203.0.113.1:443", false, 0), ("[2001:db8::1]:443", true, 0), ("[2001:db8::53]:53", false, 0), ("[::ffff:203.0.113.1]:443", false, 0)] {
+            let (a, b) = tokio::io::duplex(65536);
+            let (client, server) = tokio::join!(Endpoint::start(a, Role::Client, MuxConfig::default()), Endpoint::start(b, Role::Server, MuxConfig::default()));
+            let (client, server) = (client.unwrap(), server.unwrap());
+            let server_owner = server.clone();
+            let remote = tokio::spawn(async move {
+                if let Some(incoming) = server.accept().await {
+                    if destination.ends_with(":53") {
+                        assert_eq!(udp_protocol::parse_packet(&incoming.target).unwrap().address, udp_protocol::PacketAddress::Socket(TUNNEL_DNS));
+                    }
+                    let mut flow = incoming.flow;
+                    flow.accept().unwrap();
+                    while let Ok(Some(_)) = flow.recv().await {}
+                    flow.sender().eof().await.unwrap();
+                    let _ = flow.finish().await;
+                }
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut socket = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let (stream, peer) = listener.accept().await.unwrap();
+            let transport = client.clone();
+            let task = tokio::spawn(async move {
+                handle_socks_client(stream, peer, transport, Arc::new(TrafficCounters::default()), &Default::default(), DatagramBuffers::default(), false,
+                    Some(Ipv6Support { tcp: allowed, udp: allowed, checked_at_ms: 1 })).await
+            });
+            socket.write_all(&[5, 1, 0]).await.unwrap();
+            let mut method = [0; 2]; socket.read_exact(&mut method).await.unwrap();
+            assert_eq!(method, [5, 0]);
+            let mut request = udp_protocol::encode_packet(destination.parse().unwrap(), &[]).unwrap();
+            request[..3].copy_from_slice(&[5, 1, 0]);
+            socket.write_all(&request).await.unwrap();
+            let mut reply = [0; 10]; socket.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], expected);
+            drop(socket);
+            task.await.unwrap().unwrap();
+            if expected == 8 { assert_eq!(client.snapshot().peak, 0); }
+            remote.abort(); client.shutdown(); server_owner.shutdown();
+        }
     }
 
     #[tokio::test]

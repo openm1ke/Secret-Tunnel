@@ -1604,6 +1604,13 @@ class MainActivity:Activity() {
         append("Secret Tunnel ${BuildConfig.VERSION_NAME} · Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})\n")
         append("Устройство: ${Build.MANUFACTURER} ${Build.MODEL}\n\n")
         append(TunnelVpnService.phase+"\n"+TunnelVpnService.detail+"\n\n")
+        lastStatus.optJSONObject("ipv6")?.let {
+            append("IPv6 через SSH: TCP ${if(it.optBoolean("tcp"))"доступен" else "недоступен"} · UDP ${if(it.optBoolean("udp"))"доступен" else "недоступен"}\n")
+            if(TunnelVpnService.interceptionActive) {
+                append(if(lastStatus.optBoolean("ipv6_supported")) "IPv6 выбранных приложений идёт через VPN.\n" else "IPv6 выбранных приложений заблокирован внутри VPN.\n")
+            }
+            append("\n")
+        }
         previousConnectionFailure?.let { append("История завершений Android\n${it.message}\n\n") }
         lastStatus.optString("agent").takeIf{it.isNotBlank()&&it!="null"}?.let{append(it+"\n\n")}
         lastStatus.optJSONObject("transport")?.let { t->

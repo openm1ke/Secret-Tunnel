@@ -2,6 +2,8 @@
 mod embedded_ssh;
 #[path = "../src/udp_protocol.rs"]
 mod udp_protocol;
+#[path = "../src/connection_checks.rs"]
+mod connection_checks;
 use std::sync::{Arc, Mutex};
 fn log_line(_: &Arc<Mutex<Vec<String>>>, message: impl Into<String>) {
     eprintln!("{}", message.into());

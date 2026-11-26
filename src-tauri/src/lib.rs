@@ -788,6 +788,7 @@ fn embedded_route(config: &AppConfig, destination: &ServerProfile) -> Result<emb
     ssh_tuning.validate()?;
     Ok(embedded_ssh::EmbeddedOptions {
         host_key_sha256: destination.host_key_sha256.clone(),
+        probe_ipv6: true,
         jumps,
         ssh_tuning,
         // QUIC downloads need room for bursts: 128 datagrams per flow capped one

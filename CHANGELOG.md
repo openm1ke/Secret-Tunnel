@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.36 — 2026-11-26
+
+- Verify server IPv6 TCP and UDP egress independently inside SSH. Android enables IPv6 only when both checks succeed, and repeats them after reconnecting or changing networks; otherwise IPv6 stays blocked while IPv4 remains available.
+- Reject unsupported numeric IPv6 destinations in the embedded SOCKS engine without a direct fallback. Preserve tunnelled DNS redirection and IPv4-mapped addresses.
+- Experimental iOS: capture both IPv4 and IPv6, apply the full-tunnel network policy, and use the first SSH hop as the VPN entry address. IPv6 stays inside the VPN even when the server has no IPv6 egress.
+- Include separate IPv6 TCP/UDP results in Android diagnostics. Add isolated VPN probes and regression tests for capability checks, blocked traffic, DNS and connection cleanup.
+- Validated Android 14 VPN network changes and physical iPad TCP/UDP traffic, including an SSH chain. A separate valid iPad control confirmed that a Wi-Fi-scoped IPv6 connection cannot bypass the active VPN; repeated controls in two other runs were unavailable before VPN startup and were inconclusive.
+
 ## 0.3.35 — 2026-11-24
 
 - Retire a UDP association when its server receive task exits, so the client can recreate the mapping instead of keeping a connection that sends requests but cannot receive replies.

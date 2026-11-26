@@ -397,7 +397,7 @@ pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_status(
         json!({"separate":separate,"error":t.priority_error,"port":t.primary.priority_udp_port(),"rx":rx,"tx":tx})
     });
     let checks = if running { s.checks.snapshot() } else { Default::default() };
-    let value=json!({"running":running,"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.primary.agent_summary()),"ipv6_supported":s.tunnel.as_ref().and_then(|t|t.primary.ipv6_supported()).unwrap_or(false),"checks":checks,"priority_udp_ssh":priority_status,"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
+    let value=json!({"running":running,"starting":s.starting,"error":s.error,"rx":totals.0,"tx":totals.1,"transport":transport,"agent":s.tunnel.as_ref().map(|t|t.primary.agent_summary()),"ipv6_supported":running && s.tunnel.as_ref().and_then(|t|t.primary.ipv6_supported()).unwrap_or(false),"ipv6":s.tunnel.as_ref().and_then(|t|t.primary.ipv6_status()),"checks":checks,"priority_udp_ssh":priority_status,"observed_host_key":*observed().lock().unwrap(),"logs":*logs().lock().unwrap()}).to_string();
     output(&mut env, value)
 }
 

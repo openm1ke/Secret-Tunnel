@@ -209,11 +209,11 @@ struct ContentView: View {
 
     private var heroDetail: String {
         if !c.connectionError.isEmpty { return c.connectionError }
-        if c.isConnected { return "IPv4-трафик устройства идёт через SSH-сервер." }
+        if c.isConnected { return "Трафик устройства идёт через SSH-сервер. Недоступный на сервере IPv6 блокируется." }
         if c.busy { return c.message }
         if !c.isConfigured { return "Добавьте SSH-сервер, импортируйте ключ и подтвердите отпечаток." }
         if c.simulator { return "В симуляторе доступны SSH и проверка агента. Для VPN нужен iPhone или iPad." }
-        return "Подключите VPN, чтобы направить IPv4-трафик устройства через SSH-сервер."
+        return "Подключите VPN, чтобы направить трафик устройства через SSH-сервер."
     }
 
     private var home: some View {
@@ -260,7 +260,7 @@ struct ContentView: View {
             card {
                 Label("VPN для всего устройства", systemImage: "shield")
                     .font(.headline)
-                detail("Этот VPN охватывает IPv4-трафик устройства. Для выбора отдельных приложений iOS требует, чтобы ими управлял MDM.")
+                detail("Этот VPN охватывает IPv4- и IPv6-трафик устройства. Для выбора отдельных приложений iOS требует, чтобы ими управлял MDM.")
                 action("К подключению") { page = .home }
             }
         }

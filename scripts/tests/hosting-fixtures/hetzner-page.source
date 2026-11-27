@@ -1,0 +1,335 @@
+<div class="cloud-matrix-product "
+    style="order: 1;"
+>
+    <div class="cell name-cell">
+    <div class="no-wrap ">
+        CPX02
+    </div>
+
+</div>
+
+
+    <div class="label-cell default-label">
+        <div class="no-wrap product-cloud-label product-highlight-label-Favorite m-0">
+            New
+        </div>
+    </div>
+
+
+    <div class="cell cpu-cell">
+
+
+    1
+
+        <div class="arch-type-badge">
+            AMD
+        </div>
+
+</div>
+
+    <div class="cell ram-cell">
+
+
+    1 GB
+</div>
+
+    <div class="cell drive-cell">
+
+
+    20 GB
+    <div class="h-100 d-flex justify-content-center align-items-center">
+        <span class="no-wrap product-cloud-drive-label">
+
+                NVMe
+
+        </span>
+    </div>
+</div>
+
+    <div class="cell month-price-cell">
+    <ho-localization-provider>
+        <ho-price-container
+            country="de,fi,sg"
+            product-key="CLOUD_140+CLOUD_21"
+        >
+            <span slot="start" class="price-prefix">
+                from
+            </span>
+            <span slot="end" class="price-suffix">
+                 /month
+            </span>
+            <span class="visually-hidden">€ 5.49 per month, excl. VAT</span>
+        </ho-price-container>
+    </ho-localization-provider>
+    <span class="price-suffix-mobile">
+        from /month
+    </span>
+</div>
+
+    <div class="cell hour-price-cell">
+    <ho-localization-provider>
+        <ho-price-container
+            product-key="CLOUD_140+CLOUD_21"
+            country="de,fi,sg"
+            price-type="hourly"
+            decimals="4"
+        >
+            <span slot="end" class="price-suffix">
+                 /hour
+            </span>
+            <span class="visually-hidden">€ 0.0088 per hour, excl. VAT</span>
+        </ho-price-container>
+    </ho-localization-provider>
+    <span class="price-suffix-mobile">
+         /hour
+        <div class="custom-popover mobile-popover">
+    <i class="ho-icon ho-icon-info-i-s link-collapse" aria-hidden="true"></i>
+    <div class="tooltip-text">
+        Your server's bill will never exceed its monthly price cap. If you  delete your cloud server before the end of the billing month, we will  only bill you for the hourly rate. We will bill you for each cloud  server until you choose to delete them.
+    </div>
+</div>
+
+    </span>
+</div>
+
+    <div class="mobile-line"></div>
+    <div class="cell btn-cell">
+    <a
+        class="btn btn-sm btn-prio-2 configbtn"
+        href="https://console.hetzner.com/create/server?type=cpx02&amp;useIPv4=true&amp;useIPv6=false&amp;usePrivateNet=false&amp;location=hel1"
+        target="_blank"
+    >
+        Create
+    </a>
+    <span class="configbtn-tooltip">
+        This product is currently unavailable. Please check back later.
+    </span>
+</div>
+
+    <div class="cell expand-cell" data-expand-id="176834">
+    <div class="expand-icon">
+        <i class="ho-icon ho-icon-chevron-down-xs" aria-hidden="true"></i>
+    </div>
+    <span class="d-md-none">Details</span>
+</div>
+
+    <div class="product-details-container" id="176834">
+
+        <div class="location-box text-caption-2  mt-md-3 box-1">
+            <div class="location-details">
+
+    <span class="location-label">
+        eu-central
+    </span>
+
+        <span class="location-flag location-flag-1" data-location="DE">
+            <i class="fi fis fi-de"></i>
+            <span class="flag-text">FSN1</span>
+        </span>
+
+        <span class="location-flag location-flag-2" data-location="DE">
+            <i class="fi fis fi-de"></i>
+            <span class="flag-text">NBG1</span>
+        </span>
+
+
+
+
+
+
+
+
+            </div>
+            <div class="location-data">
+                <div class="traffic-info">
+    <span class="traffic-info-title">
+        Traffic inclusive
+    </span>
+    <div class="traffic-info-content">
+        <span class="traffic-info-amount">
+
+                20
+
+            TB
+        </span>
+        <div class="custom-popover traffic-popover">
+    <span class="ho-icon ho-icon-info-i-alt-m ho-right link-collapse matrix-icon-small d-flex justify-content-center" aria-hidden="true"></span>
+    <div class="tooltip-text">
+        <span>Cloud servers located in the EU include at least 20 TB of included traffic. For each additional TB at EU-Central locations we charge <span class='no-wrap'><ho-localization-provider><ho-price-container class="text-price" product-key="CLOUD_66" price-type="hourly" decimals="2"  location=ALL><span class="visually-hidden">€ 1.00 per hour, excl. VAT</span></ho-price-container></ho-localization-provider></span>.</span>
+    </div>
+</div>
+
+        <div class="custom-popover mobile-popover">
+    <i class="ho-icon ho-icon-info-i-s link-collapse" aria-hidden="true"></i>
+    <div class="tooltip-text">
+        <span>Cloud servers located in the EU include at least 20 TB of included traffic. For each additional TB at EU-Central locations we charge <span class='no-wrap'><ho-localization-provider><ho-price-container class="text-price" product-key="CLOUD_66" price-type="hourly" decimals="2"  location=ALL><span class="visually-hidden">€ 1.00 per hour, excl. VAT</span></ho-price-container></ho-localization-provider></span>.</span>
+    </div>
+</div>
+
+    </div>
+</div>
+
+                <div class="detail-price">
+    <ho-localization-provider>
+        <ho-price-container
+            location="FSN1,NBG1"
+            product-key="CLOUD_140+CLOUD_21"
+        >
+            <span slot="end" class="price-suffix">
+                 /month
+            </span>
+            <span class="visually-hidden">€ 6.49 per month, excl. VAT</span>
+        </ho-price-container>
+    </ho-localization-provider>
+    <span class="price-suffix-mobile">
+         /month
+    </span>
+</div>
+
+
+            </div>
+        </div>
+
+        <div class="location-box text-caption-2  box-2">
+            <div class="location-details">
+
+    <span class="location-label">
+        eu-central
+    </span>
+
+        <span class="location-flag location-flag-1" data-location="FI">
+            <i class="fi fis fi-fi"></i>
+            <span class="flag-text">HEL1</span>
+        </span>
+
+
+
+
+
+
+
+
+            </div>
+            <div class="location-data">
+                <div class="traffic-info">
+    <span class="traffic-info-title">
+        Traffic inclusive
+    </span>
+    <div class="traffic-info-content">
+        <span class="traffic-info-amount">
+
+                20
+
+            TB
+        </span>
+        <div class="custom-popover traffic-popover">
+    <span class="ho-icon ho-icon-info-i-alt-m ho-right link-collapse matrix-icon-small d-flex justify-content-center" aria-hidden="true"></span>
+    <div class="tooltip-text">
+        <span>Cloud servers located in the EU include at least 20 TB of included traffic. For each additional TB at EU-Central locations we charge <span class='no-wrap'><ho-localization-provider><ho-price-container class="text-price" product-key="CLOUD_66" price-type="hourly" decimals="2"  location=ALL><span class="visually-hidden">€ 1.00 per hour, excl. VAT</span></ho-price-container></ho-localization-provider></span>.</span>
+    </div>
+</div>
+
+        <div class="custom-popover mobile-popover">
+    <i class="ho-icon ho-icon-info-i-s link-collapse" aria-hidden="true"></i>
+    <div class="tooltip-text">
+        <span>Cloud servers located in the EU include at least 20 TB of included traffic. For each additional TB at EU-Central locations we charge <span class='no-wrap'><ho-localization-provider><ho-price-container class="text-price" product-key="CLOUD_66" price-type="hourly" decimals="2"  location=ALL><span class="visually-hidden">€ 1.00 per hour, excl. VAT</span></ho-price-container></ho-localization-provider></span>.</span>
+    </div>
+</div>
+
+    </div>
+</div>
+
+                <div class="detail-price">
+    <ho-localization-provider>
+        <ho-price-container
+            location="HEL1"
+            product-key="CLOUD_140+CLOUD_21"
+        >
+            <span slot="end" class="price-suffix">
+                 /month
+            </span>
+            <span class="visually-hidden">€ 5.49 per month, excl. VAT</span>
+        </ho-price-container>
+    </ho-localization-provider>
+    <span class="price-suffix-mobile">
+         /month
+    </span>
+</div>
+
+
+            </div>
+        </div>
+
+        <div class="location-box text-caption-2  box-3">
+            <div class="location-details">
+
+
+
+
+
+
+    <span class="location-label">
+        ap-southeast
+    </span>
+
+        <span class="location-flag location-flag-1" data-location="SG">
+            <i class="fi fis fi-sg"></i>
+            <span class="flag-text">SIN1</span>
+        </span>
+
+
+
+            </div>
+            <div class="location-data">
+                <div class="traffic-info">
+    <span class="traffic-info-title">
+        Traffic inclusive
+    </span>
+    <div class="traffic-info-content">
+        <span class="traffic-info-amount">
+
+                0.5
+
+            TB
+        </span>
+        <div class="custom-popover traffic-popover">
+    <span class="ho-icon ho-icon-info-i-alt-m ho-right link-collapse matrix-icon-small d-flex justify-content-center" aria-hidden="true"></span>
+    <div class="tooltip-text">
+        <span>Cloud servers at AP locations include at least 0.5 TB of included traffic. For each additional TB at AP locations we charge <span class='no-wrap'><ho-localization-provider><ho-price-container class="text-price" product-key="CLOUD_66" price-type="hourly" decimals="2"  location=SIN1><span class="visually-hidden">€ 7.40 per hour, excl. VAT</span></ho-price-container></ho-localization-provider></span>.</span>
+    </div>
+</div>
+
+        <div class="custom-popover mobile-popover">
+    <i class="ho-icon ho-icon-info-i-s link-collapse" aria-hidden="true"></i>
+    <div class="tooltip-text">
+        <span>Cloud servers at AP locations include at least 0.5 TB of included traffic. For each additional TB at AP locations we charge <span class='no-wrap'><ho-localization-provider><ho-price-container class="text-price" product-key="CLOUD_66" price-type="hourly" decimals="2"  location=SIN1><span class="visually-hidden">€ 7.40 per hour, excl. VAT</span></ho-price-container></ho-localization-provider></span>.</span>
+    </div>
+</div>
+
+    </div>
+</div>
+
+                <div class="detail-price">
+    <ho-localization-provider>
+        <ho-price-container
+            location="SIN1"
+            product-key="CLOUD_140+CLOUD_21"
+        >
+            <span slot="end" class="price-suffix">
+                 /month
+            </span>
+            <span class="visually-hidden">€ 7.99 per month, excl. VAT</span>
+        </ho-price-container>
+    </ho-localization-provider>
+    <span class="price-suffix-mobile">
+         /month
+    </span>
+</div>
+
+
+            </div>
+        </div>
+
+</div>
+
+</div>

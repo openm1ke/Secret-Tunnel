@@ -1,0 +1,511 @@
+{
+  "locale": {
+    "currencyCode": "EUR",
+    "subsidiary": "IE",
+    "taxRate": 23
+  },
+  "plans": [
+    {
+      "planCode": "vps-2025-model1",
+      "invoiceName": "VPS-1 2026",
+      "addonFamilies": [
+        {
+          "name": "cpanel",
+          "exclusive": true,
+          "mandatory": false,
+          "addons": [
+            "option-cpanel-200",
+            "option-cpanel-250",
+            "option-cpanel-30",
+            "option-cpanel-100",
+            "option-cpanel-150",
+            "option-cpanel-300",
+            "option-cpanel-400",
+            "option-cpanel-50",
+            "option-cpanel-500",
+            "option-cpanel-1",
+            "option-cpanel-1000",
+            "option-cpanel-5",
+            "option-cpanel-600",
+            "option-cpanel-700",
+            "option-cpanel-800",
+            "option-cpanel-900"
+          ],
+          "default": null
+        },
+        {
+          "name": "os",
+          "exclusive": true,
+          "mandatory": true,
+          "addons": [
+            "option-linux",
+            "option-windows-2025-model1"
+          ],
+          "default": null
+        },
+        {
+          "name": "plesk",
+          "exclusive": true,
+          "mandatory": false,
+          "addons": [
+            "option-plesk-webadmin",
+            "option-plesk-webhost",
+            "option-plesk-webpro"
+          ],
+          "default": null
+        },
+        {
+          "name": "automatedBackup",
+          "exclusive": true,
+          "mandatory": true,
+          "addons": [
+            "option-auto-backup-2025-1-model1",
+            "option-auto-backup-2025-7-model1"
+          ],
+          "default": null
+        },
+        {
+          "name": "additionalDisk",
+          "exclusive": true,
+          "mandatory": false,
+          "addons": [
+            "option-additional-disk-2025-10000g",
+            "option-additional-disk-2025-1000g",
+            "option-additional-disk-2025-5000g",
+            "option-additional-disk-2025-100g",
+            "option-additional-disk-2025-200g",
+            "option-additional-disk-2025-500g",
+            "option-additional-disk-2025-50g"
+          ],
+          "default": null
+        },
+        {
+          "name": "snapshot",
+          "exclusive": true,
+          "mandatory": false,
+          "addons": [
+            "option-snapshot-2025-model1"
+          ],
+          "default": null
+        }
+      ],
+      "product": "vps-2025-model1",
+      "pricingType": "rental",
+      "consumptionConfiguration": null,
+      "pricings": [
+        {
+          "phase": 0,
+          "capacities": [
+            "installation"
+          ],
+          "commitment": 0,
+          "description": "Installation fees",
+          "interval": 0,
+          "intervalUnit": "none",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": 1
+          },
+          "price": 0,
+          "formattedPrice": "€ 0.00",
+          "tax": 0,
+          "mode": "default",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 0,
+          "capacities": [
+            "upgrade"
+          ],
+          "commitment": 0,
+          "description": "Upgrade fees",
+          "interval": 0,
+          "intervalUnit": "none",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": 1
+          },
+          "price": 0,
+          "formattedPrice": "€ 0.00",
+          "tax": 0,
+          "mode": "default",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 1,
+          "capacities": [
+            "renew"
+          ],
+          "commitment": 0,
+          "description": "Monthly fees",
+          "interval": 1,
+          "intervalUnit": "month",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": null
+          },
+          "price": 649000000,
+          "formattedPrice": "€ 6.49",
+          "tax": 149270000,
+          "mode": "default",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 0,
+          "capacities": [
+            "upgrade"
+          ],
+          "commitment": 0,
+          "description": "Upgrade fees",
+          "interval": 0,
+          "intervalUnit": "none",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": 1
+          },
+          "price": 0,
+          "formattedPrice": "€ 0.00",
+          "tax": 0,
+          "mode": "upfront12",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 0,
+          "capacities": [
+            "installation"
+          ],
+          "commitment": 0,
+          "description": "Installation fees",
+          "interval": 0,
+          "intervalUnit": "none",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": 1
+          },
+          "price": 0,
+          "formattedPrice": "€ 0.00",
+          "tax": 0,
+          "mode": "upfront12",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 1,
+          "capacities": [
+            "renew"
+          ],
+          "commitment": 12,
+          "description": "12 months fees",
+          "interval": 1,
+          "intervalUnit": "month",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 12,
+            "max": 12
+          },
+          "price": 552000000,
+          "formattedPrice": "€ 5.52",
+          "tax": 126960000,
+          "mode": "upfront12",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": {
+            "defaultEndAction": "REACTIVATE_ENGAGEMENT",
+            "duration": "P12M",
+            "type": "upfront"
+          }
+        },
+        {
+          "phase": 0,
+          "capacities": [
+            "upgrade"
+          ],
+          "commitment": 0,
+          "description": "Upgrade fees",
+          "interval": 0,
+          "intervalUnit": "none",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": 1
+          },
+          "price": 0,
+          "formattedPrice": "€ 0.00",
+          "tax": 0,
+          "mode": "upfront6",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 0,
+          "capacities": [
+            "installation"
+          ],
+          "commitment": 0,
+          "description": "Installation fees",
+          "interval": 0,
+          "intervalUnit": "none",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 1,
+            "max": 1
+          },
+          "price": 0,
+          "formattedPrice": "€ 0.00",
+          "tax": 0,
+          "mode": "upfront6",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": null
+        },
+        {
+          "phase": 1,
+          "capacities": [
+            "renew"
+          ],
+          "commitment": 6,
+          "description": "6 months fees",
+          "interval": 1,
+          "intervalUnit": "month",
+          "quantity": {
+            "min": 1,
+            "max": 100
+          },
+          "repeat": {
+            "min": 6,
+            "max": 6
+          },
+          "price": 617000000,
+          "formattedPrice": "€ 6.17",
+          "tax": 141910000,
+          "mode": "upfront6",
+          "strategy": "tiered",
+          "mustBeCompleted": false,
+          "type": "rental",
+          "promotions": [],
+          "engagementConfiguration": {
+            "defaultEndAction": "REACTIVATE_ENGAGEMENT",
+            "duration": "P6M",
+            "type": "upfront"
+          }
+        }
+      ],
+      "configurations": [
+        {
+          "name": "infrastructure",
+          "isCustom": false,
+          "isMandatory": false,
+          "values": [
+            "preproduction",
+            "production"
+          ]
+        },
+        {
+          "name": "region",
+          "isCustom": false,
+          "isMandatory": false,
+          "values": [
+            "canada",
+            "europe"
+          ]
+        },
+        {
+          "name": "vps_datacenter",
+          "isCustom": false,
+          "isMandatory": true,
+          "values": [
+            "BHS",
+            "DE",
+            "GRA",
+            "SBG",
+            "SGP",
+            "SYD",
+            "UK",
+            "WAW",
+            "YNM",
+            "EU-SOUTH-MIL",
+            "EU-WEST-RBX"
+          ]
+        },
+        {
+          "name": "vps_install_rtm",
+          "isCustom": false,
+          "isMandatory": false,
+          "values": [
+            "if_available",
+            "no"
+          ]
+        },
+        {
+          "name": "vps_os",
+          "isCustom": false,
+          "isMandatory": false,
+          "values": [
+            "AlmaLinux 8",
+            "AlmaLinux 8 - cPanel",
+            "AlmaLinux 9",
+            "AlmaLinux 9 - cPanel",
+            "CloudLinux 9",
+            "Debian 12",
+            "Debian 12 - Docker",
+            "Debian 12 - Plesk",
+            "Rocky Linux 8",
+            "Rocky Linux 9",
+            "Ubuntu 22.04",
+            "Ubuntu 24.04",
+            "Windows Server 2016 Standard (Desktop)",
+            "Windows Server 2019 Standard (Desktop)",
+            "Windows Server 2022 Standard (Desktop)",
+            "Windows Server 2025 Standard (Desktop)",
+            "Debian 12 - n8n",
+            "FreeBSD-14.3 - UEFI",
+            "Debian 13",
+            "AlmaLinux 10",
+            "Rocky Linux 10",
+            "Fedora 44",
+            "Ubuntu 26.04",
+            "Fedora 43",
+            "FreeBSD-15-ufs - UEFI",
+            "FreeBSD-15-zfs - UEFI",
+            "FreeBSD-14.5-ufs - UEFI",
+            "FreeBSD-14.5-zfs - UEFI"
+          ]
+        }
+      ],
+      "family": "vps-2025",
+      "blobs": {
+        "commercial": {
+          "features": [
+            {
+              "name": "Anti-DDoS",
+              "value": "Yes"
+            },
+            {
+              "name": "KVM",
+              "value": "Yes"
+            },
+            {
+              "name": "Root access",
+              "value": "Yes"
+            },
+            {
+              "name": "API",
+              "value": "Yes"
+            },
+            {
+              "name": "IPv4 Address",
+              "value": "1"
+            },
+            {
+              "name": "IPv6 Address",
+              "value": "/128"
+            },
+            {
+              "name": "Monitoring and Interventions",
+              "value": "24/7"
+            },
+            {
+              "name": "SLA",
+              "value": "99.9%"
+            }
+          ],
+          "line": "2025",
+          "range": "2025"
+        },
+        "tags": [
+          "os:distribution-only",
+          "os:distribution-with-application"
+        ]
+      }
+    }
+  ],
+  "products": [
+    {
+      "name": "vps-2025-model1",
+      "blobs": {
+        "technical": {
+          "cpu": {
+            "type": "vCore",
+            "brand": " ",
+            "cores": 4,
+            "model": " "
+          },
+          "memory": {
+            "size": 8
+          },
+          "storage": {
+            "disks": [
+              {
+                "capacity": 75,
+                "interface": "NVMe",
+                "technology": "SSD"
+              }
+            ]
+          },
+          "bandwidth": {
+            "level": 400,
+            "unlimited": true
+          },
+          "virtualization": {
+            "hypervisor": "KVM OpenStack"
+          }
+        }
+      }
+    }
+  ]
+}

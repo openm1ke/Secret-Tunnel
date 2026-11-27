@@ -56,6 +56,7 @@ src-tauri/resources/
 
 session-control/target/
 profile-transfer/target/
+hosting-catalog/target/
 
 # iOS client: build outputs and the XcodeGen-generated project
 ios/build/

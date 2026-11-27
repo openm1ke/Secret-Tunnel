@@ -172,6 +172,7 @@ class SetupActivity : Activity() {
         setTheme(if(dark)R.style.Theme_SecretTunnel_Dark else R.style.Theme_SecretTunnel_Light)
         super.onCreate(state)
         session = lastNonConfigurationInstance as? SshSetupSession ?: SshSetupSession(applicationContext)
+        if (lastNonConfigurationInstance == null && intent.getBooleanExtra("server_purchased", false)) session.step = SetupStep.ACCESS
         palette = if (dark) Palette.dark else Palette.light
         window.statusBarColor = palette.background
         window.navigationBarColor = palette.background
@@ -204,7 +205,7 @@ class SetupActivity : Activity() {
                 text("У вас уже есть сервер?",20,true)
                 text("Для подключения нужен ваш VPS с доступом по SSH.")
                 button("Да, сервер уже куплен",true) { session.step=SetupStep.ACCESS; render() }
-                button("Пока нет сервера") { session.hasServer=false; render() }
+                button("Пока нет сервера") { startActivityForResult(Intent(this, HostingCatalogActivity::class.java).putExtra("from_wizard", true), 209) }
                 if (!session.hasServer) text("Выберите VPS с Linux x86_64 у своего хостера. После покупки понадобятся адрес, порт SSH, логин и пароль или готовый ключ.")
             }
             SetupStep.ACCESS -> {
@@ -292,6 +293,7 @@ class SetupActivity : Activity() {
     @Deprecated("Platform activity result")
     override fun onActivityResult(request:Int,result:Int,data:Intent?) {
         super.onActivityResult(request,result,data)
+        if (request == 209 && result == RESULT_OK) { session.step = SetupStep.ACCESS; render(); return }
         if(request!=106 || result!=RESULT_OK)return
         val uri=data?.data ?: return
         try {

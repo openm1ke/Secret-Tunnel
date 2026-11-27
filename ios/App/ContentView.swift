@@ -18,8 +18,8 @@ struct SecretTunnelApp: App {
 private enum Page: String, CaseIterable {
     case home = "Главная"
     case apps = "Приложения"
+    case catalog = "Каталог"
     case speed = "Скорость"
-    case stats = "Статистика"
     case more = "Ещё"
 
     var icon: String {
@@ -27,13 +27,14 @@ private enum Page: String, CaseIterable {
         case .home: return "checkmark.shield"
         case .apps: return "square.grid.2x2"
         case .speed: return "speedometer"
-        case .stats: return "chart.bar"
+        case .catalog: return "globe.europe.africa"
         case .more: return "ellipsis"
         }
     }
 }
 
 private enum MorePage: String {
+    case stats = "Статистика"
     case servers = "Серверы"
     case proxies = "Прокси"
     case settings = "Настройки"
@@ -55,6 +56,7 @@ struct ContentView: View {
     @State private var showAddress = false
     @State private var editingPort = false
     @State private var setupOpen = false
+    @State private var setupPurchased = false
     @State private var transferOpen = false
     @State private var transferServerID: String?
     @State private var transferPayload = ""
@@ -64,6 +66,9 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if page == .catalog {
+                HostingCatalogView(palette: palette, showsBack: false, onPurchased: { setupPurchased = true; setupOpen = true }).environmentObject(c)
+            } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     currentPage
@@ -75,6 +80,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
             }
             .id(page.rawValue + (morePage?.rawValue ?? ""))
+            }
             bottomBar
         }
         .foregroundColor(palette.text)
@@ -92,8 +98,9 @@ struct ContentView: View {
                 .environmentObject(c)
         }
         .sheet(isPresented: $setupOpen) {
-            SetupWizard(palette: palette).environmentObject(c)
+            SetupWizard(palette: palette, serverPurchased: setupPurchased).environmentObject(c)
         }
+        .onChange(of: setupOpen) { if !$0 { setupPurchased = false } }
         .sheet(isPresented: $transferOpen) {
             ProfileTransferView(serverID: transferServerID, initialPayload: transferPayload, palette: palette).environmentObject(c)
         }
@@ -157,7 +164,7 @@ struct ContentView: View {
         case .home: home
         case .apps: apps
         case .speed: speed
-        case .stats: stats
+        case .catalog: EmptyView()
         case .more:
             if let morePage {
                 Button { self.morePage = nil } label: {
@@ -170,6 +177,7 @@ struct ContentView: View {
                 .foregroundColor(palette.accent)
                 heading(morePage.rawValue)
                 switch morePage {
+                case .stats: stats
                 case .servers: servers
                 case .proxies: proxies
                 case .settings: settings
@@ -317,6 +325,7 @@ struct ContentView: View {
         Group {
             heading("Ещё")
             detail("Подключения, настройки и журнал")
+            rowLink("Статистика", "Трафик текущего сеанса", icon: "chart.bar") { go(.stats) }
             rowLink("Серверы", "SSH, ключ доступа и проверка агента", icon: "server.rack") { go(.servers) }
             rowLink("Прокси", "Основной прокси и локальный порт SOCKS5", icon: "arrow.left.arrow.right") { go(.proxies) }
             rowLink("Настройки", "Оформление и конфиденциальность", icon: "gearshape") { go(.settings) }
@@ -352,6 +361,7 @@ struct ContentView: View {
                 }
                 action("Мастер настройки", primary: !c.hasEndpoint) { setupOpen = true }
                     .disabled(!c.canEditServer || speedCheck.running)
+                action("Каталог серверов") { page = .catalog; morePage = nil }
                 action("Импортировать") { transferServerID = nil; transferPayload = ""; transferOpen = true }
                     .disabled(!c.canEditServer || speedCheck.running)
                 action(c.hasEndpoint ? "Изменить сервер" : "Добавить сервер") {

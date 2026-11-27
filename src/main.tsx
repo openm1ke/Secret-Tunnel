@@ -1,5 +1,6 @@
 import DomainsPanel from "./DomainsPanel";
 import SetupWizard from "./SetupWizard";
+import HostingCatalog from "./HostingCatalog";
 import ProfileTransfer from "./ProfileTransfer";
 import StatsPanel, { SessionRecord, knownAppMatcher } from "./StatsPanel";
 import SpeedPanel, { SpeedLive, SpeedRun, emptyLive } from "./SpeedPanel";
@@ -162,7 +163,7 @@ type TunnelStatus = {
 type Leak = { app: string; process: string; path: string; rule: string; flows: number };
 /** A program a selected application started that was given a rule while running. */
 type Followed = { app: string; process: string; rule: string };
-type Tab = "connect" | "servers" | "proxies" | "applications" | "domains" | "stats" | "speed" | "settings" | "about";
+type Tab = "connect" | "servers" | "catalog" | "proxies" | "applications" | "domains" | "stats" | "speed" | "settings" | "about";
 type DomainRule = { id: string; pattern: string; enabled: boolean; action: "tunnel" | "direct" };
 type DomainStats = { events: number; unknown: number; rules: { id: string; observed: number; tunnel: number; direct: number }[] };
 type RedirectStatus = { running: boolean; starting: boolean; platform: string; requires_administrator: boolean; supports_system_ssh: boolean; supports_domains: boolean; setup_message: string; pid: number | null; administrator: boolean; component_available: boolean; last_error: string; domain_stats?: DomainStats };
@@ -416,6 +417,7 @@ function App() {
   const [busy, setBusy] = useState<BusyAction>(null);
   const [showServerHost, setShowServerHost] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [setupPurchased, setSetupPurchased] = useState(false);
   const [transfer, setTransfer] = useState<{ serverId: string | null } | null>(null);
   const [showIpinfoToken, setShowIpinfoToken] = useState(false);
   const [copiedField, setCopiedField] = useState<CopyField>(null);
@@ -964,6 +966,7 @@ function App() {
   const nav: { tab: Tab; label: string; icon: React.ReactNode; badge?: string }[] = [
     { tab: "connect", label: "Подключение", icon: <Power size={17} /> },
     { tab: "servers", label: "Серверы", icon: <Server size={17} />, badge: String(config.servers.length || "") },
+    { tab: "catalog", label: "Каталог серверов", icon: <Globe size={17} /> },
     { tab: "proxies", label: "Локальный прокси", icon: <Network size={17} /> },
     { tab: "applications", label: "Приложения", icon: <LayoutGrid size={17} />, badge: redirect.running ? "вкл" : undefined },
     { tab: "domains", label: "Домены", icon: <Globe size={17} /> },
@@ -1124,11 +1127,13 @@ function App() {
             </section>
           )}
 
+          {activeTab === "catalog" && <HostingCatalog tunnelActive={sessionActive} onPurchased={() => { setSetupPurchased(true); setSetupOpen(true); }}/>}
           {activeTab === "servers" && (
             <div className="split">
               <section className="panel listPanel">
                 <header className="panelHead">
                   <h2>Серверы</h2>
+                  <button className="ghost" onClick={() => setActiveTab("catalog")}>Каталог серверов</button>
                   <button className="ghost" onClick={() => setTransfer({ serverId: null })}>Импортировать</button>
                   <button className="primary" onClick={() => setSetupOpen(true)}>Мастер настройки</button>
                   <button className="ghost" onClick={() => { serverDraftDirtyRef.current = true; setServerDraft(emptyServer); }}><Plus size={15} />Добавить</button>
@@ -1712,7 +1717,7 @@ function App() {
             </div>
           </div>
         )}
-        {setupOpen && <SetupWizard onClose={() => setSetupOpen(false)} onSaved={id => {
+        {setupOpen && <SetupWizard serverPurchased={setupPurchased} onClose={() => { setSetupOpen(false); setSetupPurchased(false); }} onSaved={id => {
           void invoke<AppConfig>("get_config").then(next => {
             setConfig(next);
             const saved = next.servers.find(server => server.id === id);
@@ -1737,9 +1742,9 @@ function App() {
             </div>
           )}
         </div>
-        <LogDock logs={logs} busy={busy !== null} hideAddresses={config.settings.hide_sensitive}
+        {activeTab !== "catalog" && <LogDock logs={logs} busy={busy !== null} hideAddresses={config.settings.hide_sensitive}
           onClear={() => runAction("logs", async () => { await invoke<void>("clear_logs"); return "Журнал очищен"; })}
-          onCopied={(text) => copyText(text, "logs")} />
+          onCopied={(text) => copyText(text, "logs")} />}
       </section>
     </main>
   );

@@ -503,6 +503,15 @@ fn now_epoch() -> u64 {
         .as_secs()
 }
 
+#[tauri::command]
+async fn hosting_request(state: State<'_, AppState>, request: String) -> Result<String, String> {
+    let active = state.runtime.lock().map_err(|e| e.to_string())?.is_some()
+        || !matches!(state.control.snapshot().phase, Phase::Stopped | Phase::Failed);
+    let dir = app_config_dir("secret-tunnel")?.join("catalog");
+    tauri::async_runtime::spawn_blocking(move || secret_tunnel_hosting_catalog::request(&request, &dir, active))
+        .await.map_err(|e| e.to_string())
+}
+
 fn log_line(logs: &Arc<Mutex<Vec<String>>>, message: impl Into<String>) {
     let line = format!("[{}] {}", now_epoch(), message.into());
     if let Ok(mut items) = logs.lock() {
@@ -2554,6 +2563,7 @@ pub fn run() {
             setup_wizard::wizard_access,
             setup_wizard::wizard_finish,
             get_config,
+            hosting_request,
             redirect_status,
             discord_redirect_processes,
             check_domain_rule,

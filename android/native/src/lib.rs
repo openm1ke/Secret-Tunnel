@@ -142,6 +142,16 @@ fn output(env: &mut JNIEnv, value: String) -> jstring {
 }
 
 #[no_mangle]
+pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_hosting(mut env: JNIEnv, _: JObject, request: JString, cache_dir: JString, vpn_active: jni::sys::jboolean) -> jstring {
+    let result = (|| -> Result<String, String> {
+        let raw: String = env.get_string(&request).map_err(|e| e.to_string())?.into();
+        let dir: String = env.get_string(&cache_dir).map_err(|e| e.to_string())?.into();
+        Ok(secret_tunnel_core::hosting_catalog::request(&raw, std::path::Path::new(&dir), vpn_active != 0))
+    })();
+    output(&mut env, result.unwrap_or_else(|error| json!({"error":error}).to_string()))
+}
+
+#[no_mangle]
 pub extern "system" fn Java_dev_secrettunnel_android_NativeBridge_transferExport(mut env: JNIEnv, _: JObject, document: JString) -> jstring {
     let result = (|| -> Result<String, String> {
         let raw: String = env.get_string(&document).map_err(|e| e.to_string())?.into();

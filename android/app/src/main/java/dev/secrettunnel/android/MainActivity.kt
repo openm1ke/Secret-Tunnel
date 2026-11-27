@@ -292,13 +292,14 @@ class MainActivity:Activity() {
         page!="home"->go("home")
         else->finish()
     }}
-    private val moreSections=setOf("servers","proxies","settings","logs","about","help")
+    private val moreSections=setOf("servers","proxies","settings","logs","about","help","stats")
     private val phoneDestinations=listOf(
-        "home" to "Главная", "apps" to "Приложения", "speed" to "Скорость",
-        "stats" to "Статистика", "more" to "Ещё",
+        "home" to "Главная", "apps" to "Приложения", "catalog" to "Каталог",
+        "speed" to "Скорость", "more" to "Ещё",
     )
     private val tvDestinations=listOf(
         "home" to "Главная", "apps" to "Приложения", "servers" to "Серверы", "proxies" to "Прокси",
+        "catalog" to "Каталог серверов",
         "speed" to "Скорость", "stats" to "Статистика", "logs" to "Журнал",
         "settings" to "Настройки", "about" to "О программе", "help" to "Справка",
     )
@@ -309,6 +310,7 @@ class MainActivity:Activity() {
         else navigate(destination)
     }
     private fun navigate(destination:String){
+        if (destination == "catalog") { startActivity(Intent(this, HostingCatalogActivity::class.java)); return }
         val enteringApps = destination == "apps" && page != destination
         page=destination;formDraft=null;render()
         if (enteringApps) scanApps()
@@ -591,6 +593,7 @@ class MainActivity:Activity() {
 
     private fun serversPage(){
         heading("Серверы","SSH-серверы, ключи доступа и доверие")
+        body.addView(button("Каталог серверов"){go("catalog")},spaced(12))
         body.addView(button("Мастер настройки",true){startActivityForResult(Intent(this,SetupActivity::class.java),105)},spaced(16))
         body.addView(button("Импортировать"){unlocked();startActivityForResult(Intent(this,ProfileTransferActivity::class.java),107)},spaced(12))
         val transferable=store.servers().filter{it.host.isNotBlank()&&it.user.isNotBlank()&&SettingsStore(this,it.id).hasKey()&&isTrustedSshPin(SettingsStore(this,it.id).fingerprint)}
@@ -848,6 +851,7 @@ class MainActivity:Activity() {
             card.setOnClickListener{go(id)};tvCardFocus(card);card.contentDescription=title;body.addView(card,spaced(12))
         }
         item("servers","Серверы","SSH-серверы, ключи доступа, цепочки и проверка агента · ${store.servers().size}")
+        item("stats","Статистика","Трафик текущего сеанса")
         item("proxies","Прокси","Профили подключения и локальный порт SOCKS5 · ${store.proxies().size}")
         item("settings","Настройки","Тема, подключение и параметры SSH")
         item("logs","Журнал","Диагностика подключения и ошибок")

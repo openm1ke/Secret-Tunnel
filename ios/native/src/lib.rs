@@ -143,6 +143,14 @@ fn input(ptr: *const c_char) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+#[no_mangle]
+pub extern "C" fn st_ios_hosting(request: *const c_char, cache_dir: *const c_char, vpn_active: i32) -> *mut c_char {
+    guarded(|| match (input(request), input(cache_dir)) {
+        (Ok(raw), Ok(dir)) => secret_tunnel_core::hosting_catalog::request(&raw, std::path::Path::new(&dir), vpn_active != 0),
+        _ => json!({"error":"Некорректный запрос каталога"}).to_string(),
+    })
+}
+
 fn output(value: String) -> *mut c_char {
     CString::new(value.replace('\0', " "))
         .map(CString::into_raw)

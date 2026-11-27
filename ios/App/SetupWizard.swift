@@ -141,7 +141,14 @@ struct SetupWizard: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = SSHSetupModel()
     @State private var importing = false
+    @State private var hosting = false
     let palette: MobilePalette
+    @MainActor init(palette: MobilePalette, serverPurchased: Bool = false) {
+        self.palette = palette
+        let model = SSHSetupModel()
+        if serverPurchased { model.stage = .access }
+        _model = StateObject(wrappedValue: model)
+    }
 
     var body: some View {
         ScrollView {
@@ -185,6 +192,9 @@ struct SetupWizard: View {
             if saved { controller.settings = Shared.loadSettings(); controller.hasKey = Shared.hasKey }
         }
         .onDisappear { model.clear(); controller.busy = false }
+        .fullScreenCover(isPresented: $hosting) {
+            HostingCatalogView(palette: palette, onPurchased: { model.stage = .access }).environmentObject(controller)
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -193,7 +203,7 @@ struct SetupWizard: View {
             Text("У вас уже есть сервер?").font(.title3.weight(.semibold))
             Text("Для подключения нужен ваш VPS с доступом по SSH.")
             button("Да, сервер уже куплен", primary: true) { model.stage = .access }
-            button("Пока нет сервера") { model.hasServer = false }
+            button("Пока нет сервера") { hosting = true }
             if !model.hasServer { Text("Выберите VPS с Linux x86_64 у своего хостера. После покупки понадобятся адрес, SSH-порт и данные для входа.").foregroundColor(palette.muted) }
         case .access:
             Text("Как вы входите на сервер?").font(.title3.weight(.semibold))

@@ -18,3 +18,4 @@ pub fn log_line(logs: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: impl
         logs.push(format!("[{}] {}", secret_tunnel_mux::unix_millis(), line.into()));
     }
 }
+pub use secret_tunnel_hosting_catalog as hosting_catalog;

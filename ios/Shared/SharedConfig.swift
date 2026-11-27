@@ -89,6 +89,9 @@ enum Shared {
 
 /// Swift wrappers for the Rust C API (`secret_tunnel_ios.h`).
 enum RustCore {
+    static func hosting(_ json: String, cacheDir: String, vpnActive: Bool) -> String {
+        take(json.withCString { request in cacheDir.withCString { st_ios_hosting(request, $0, vpnActive ? 1 : 0) } })
+    }
     private static func take(_ ptr: UnsafeMutablePointer<CChar>?) -> String {
         guard let ptr else { return "" }
         defer { st_ios_free(ptr) }

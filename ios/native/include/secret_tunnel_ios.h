@@ -17,6 +17,8 @@ char *st_ios_check(const char *config_json);
 char *st_ios_transfer_export(const char *document_json);
 char *st_ios_transfer_unlock(const char *payload, const char *code, int preview);
 void st_ios_free(char *value);
+// Run on a worker thread. Returned string must be released with st_ios_free.
+char *st_ios_hosting(const char *request, const char *cache_dir, int vpn_active);
 
 #ifdef __cplusplus
 }

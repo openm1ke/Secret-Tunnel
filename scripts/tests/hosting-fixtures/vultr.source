@@ -1,0 +1,126 @@
+{
+  "plans": [
+    {
+      "id": "vc2-1c-0.5gb-free",
+      "vcpu_count": 1,
+      "ram": 512,
+      "disk": 10,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 0,
+      "monthly_cost": 0,
+      "hourly_cost": 0,
+      "monthly_cost_preemptible": 0,
+      "hourly_cost_preemptible": 0,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "sea",
+        "fra",
+        "mia"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {},
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vc2-1c-0.5gb-v6",
+      "vcpu_count": 1,
+      "ram": 512,
+      "disk": 10,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 512,
+      "monthly_cost": 2.5,
+      "hourly_cost": 0.003,
+      "monthly_cost_preemptible": 2.5,
+      "hourly_cost_preemptible": 0.003,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr",
+        "atl"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {},
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vc2-1c-1gb",
+      "vcpu_count": 1,
+      "ram": 1024,
+      "disk": 25,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 1024,
+      "monthly_cost": 5,
+      "hourly_cost": 0.007,
+      "monthly_cost_preemptible": 5,
+      "hourly_cost_preemptible": 0.007,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr",
+        "ord",
+        "dfw",
+        "sea",
+        "lax",
+        "atl",
+        "ams",
+        "lhr",
+        "fra",
+        "sjc",
+        "syd",
+        "yto",
+        "cdg",
+        "nrt",
+        "waw",
+        "mad",
+        "icn",
+        "mia",
+        "sgp",
+        "sto",
+        "mex",
+        "sao",
+        "mel",
+        "bom",
+        "jnb",
+        "tlv",
+        "blr",
+        "del",
+        "scl",
+        "itm",
+        "man"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {
+        "sao": {
+          "monthly_cost": 7.5,
+          "hourly_cost": 0.01,
+          "monthly_cost_preemptible": 7.5,
+          "hourly_cost_preemptible": 0.01
+        }
+      },
+      "gpu_brand": "none"
+    }
+  ],
+  "meta": {
+    "total": 140,
+    "links": {
+      "next": "",
+      "prev": ""
+    }
+  }
+}

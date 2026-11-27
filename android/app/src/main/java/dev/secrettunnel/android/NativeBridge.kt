@@ -13,6 +13,7 @@ object NativeBridge {
     }
 
     external fun start(config: String, service: TunnelVpnService): String
+    external fun hosting(request: String, cacheDir: String, vpnActive: Boolean): String
     external fun probe(config: String): String
     external fun checkServer(config: String): String
     external fun manageAgent(config: String, version: String, archivePath: String): String

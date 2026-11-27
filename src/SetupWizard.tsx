@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowLeft, Check, FileKey, KeyRound, LoaderCircle, Server, X } from "lucide-react";
+import HostingCatalog from "./HostingCatalog";
 
 type Step = "server" | "access" | "details" | "trust" | "finish";
 
-export default function SetupWizard({ onClose, onSaved }: { onClose: () => void; onSaved: (id: string) => void }) {
-  const [step, setStep] = useState<Step>("server");
-  const [hasServer, setHasServer] = useState(true);
+export default function SetupWizard({ onClose, onSaved, serverPurchased = false }: { onClose: () => void; onSaved: (id: string) => void; serverPurchased?: boolean }) {
+  const [step, setStep] = useState<Step>(serverPurchased ? "access" : "server");
+  const [hosting, setHosting] = useState(false);
   const [hasKey, setHasKey] = useState(false);
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
@@ -67,6 +68,7 @@ export default function SetupWizard({ onClose, onSaved }: { onClose: () => void;
   }
 
   const valid = host.trim() && user.trim() && Number(port) >= 1 && Number(port) <= 65535 && Number.isInteger(Number(port)) && (hasKey ? keyPath : password);
+  if (hosting) return <HostingCatalog overlay onClose={() => setHosting(false)} onPurchased={() => { setHosting(false); setStep("access"); }}/>;
   return <div className="modalBackdrop">
     <div className="modal setupWizard" role="dialog" aria-modal="true" aria-labelledby="setup-title" ref={dialog} tabIndex={-1}
       onKeyDown={e => {
@@ -83,11 +85,9 @@ export default function SetupWizard({ onClose, onSaved }: { onClose: () => void;
         <h3>У вас уже есть сервер?</h3>
         <p>Для подключения нужен ваш VPS с доступом по SSH.</p>
         <div className="setupChoices">
-          <button aria-pressed={hasServer} onClick={() => setHasServer(true)}><Server size={20}/><span>Да, сервер уже куплен</span></button>
-          <button aria-pressed={!hasServer} onClick={() => setHasServer(false)}><span>Пока нет сервера</span></button>
+          <button onClick={() => setStep("access")}><Server size={20}/><span>Да, сервер уже куплен</span></button>
+          <button onClick={() => setHosting(true)}><span>Пока нет сервера</span></button>
         </div>
-        {!hasServer && <p className="setupNote">Выберите VPS с Linux x86_64 у своего хостера. После покупки понадобятся адрес, порт SSH, логин и пароль или готовый ключ. Вернитесь сюда, когда получите данные.</p>}
-        <button className="primary" disabled={!hasServer} onClick={() => setStep("access")}>Продолжить</button>
       </>}
       {step === "access" && <>
         <h3>Как вы входите на сервер?</h3>

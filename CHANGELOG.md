@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.37 — 2026-11-28
+
+- Add a dedicated hosting catalog to desktop, Android and Android TV, with country flags, monthly prices, hardware, traffic conditions and provider links. The experimental iOS client includes layouts for iPhone and iPad.
+- Compare latency with five short TCP connections from the current device. Filter countries, sort results, cancel checks and return to the SSH setup wizard after purchasing a VPS. Providers without a confirmed endpoint remain visible without a network probe.
+- Include OVHcloud, ITLDC, Timeweb Cloud, FirstVDS, IPHoster, Vultr and Hetzner. Daily GitHub Actions refreshes official sources and publishes validated data independently of app releases.
+- Preserve the last valid catalog and each offer's original verification date on source failures. Keep catalog data separate from SSH profiles, reject unsafe test addresses and refuse measurements while the application's tunnel is active.
+- Validate adapters, cache, cancellation, site publication and the shared contract. Verify desktop/mobile builds, iPad refresh and real TCP checks. Latency and advertised port speeds do not guarantee rented VPS performance.
+
 ## 0.3.36 — 2026-11-26
 
 - Verify server IPv6 TCP and UDP egress independently inside SSH. Android enables IPv6 only when both checks succeed, and repeats them after reconnecting or changing networks; otherwise IPv6 stays blocked while IPv4 remains available.

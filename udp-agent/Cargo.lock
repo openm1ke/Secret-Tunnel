@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "secret-tunnel-agent"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "libc",
  "secret-tunnel-mux",

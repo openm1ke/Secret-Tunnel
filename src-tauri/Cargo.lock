@@ -3952,7 +3952,7 @@ dependencies = [
 
 [[package]]
 name = "secret-tunnel"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "base64 0.22.1",
  "libc",

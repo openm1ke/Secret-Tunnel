@@ -1,0 +1,185 @@
+name: Hosting catalog
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish catalog data to Pages (no app release)'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '25 5 * * *'
+  push:
+    paths:
+      - '.github/workflows/hosting-catalog.yml'
+      - 'scripts/*hosting*'
+      - 'scripts/tests/**'
+      - 'hosting-catalog/**'
+      - 'site/catalog/**'
+  pull_request:
+    paths:
+      - '.github/workflows/hosting-catalog.yml'
+      - 'scripts/*hosting*'
+      - 'scripts/tests/**'
+      - 'hosting-catalog/**'
+      - 'site/catalog/**'
+
+permissions:
+  contents: read
+concurrency:
+  group: hosting-catalog-${{ github.event_name == 'pull_request' && github.ref || 'updates' }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      base_sha: ${{ steps.baseline.outputs.sha }}
+      publishable: ${{ steps.result.outputs.publishable }}
+      source_errors: ${{ steps.result.outputs.source_errors }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test adapters, last good data and site publishing
+        run: python3 -m unittest discover -s scripts/tests -p 'test_hosting*.py' -v
+      - name: Test client contract
+        run: cargo test --manifest-path hosting-catalog/Cargo.toml --locked
+      - name: Read last published catalog
+        id: baseline
+        run: |
+          git fetch --no-tags --depth=1 origin gh-pages
+          echo "sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          if git cat-file -e FETCH_HEAD:catalog/hosting-v1.json; then
+            git show FETCH_HEAD:catalog/hosting-v1.json > "$RUNNER_TEMP/hosting-previous.json"
+          fi
+      - name: Fetch official offers
+        id: fetch
+        continue-on-error: true
+        run: |
+          python3 scripts/update-hosting-catalog.py \
+            --published "$RUNNER_TEMP/hosting-previous.json" \
+            --output hosting-v1.json --report hosting-report.json \
+            --summary "$GITHUB_STEP_SUMMARY" --allow-partial
+      - name: Validate with the clients' parser
+        run: cargo run --manifest-path hosting-catalog/Cargo.toml --locked --example catalog -- validate hosting-v1.json
+      - name: Decide publication
+        id: result
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          report = json.loads(Path("hosting-report.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"publishable={str(report['status'] != 'failed').lower()}\n")
+              out.write(f"source_errors={str(bool(report['failures'])).lower()}\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosting-catalog-candidate
+          path: |
+            hosting-v1.json
+            hosting-report.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    if: >-
+      needs.update.outputs.publishable == 'true' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'schedule' || github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.publish))
+    needs: update
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: write
+      pages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+      - uses: actions/download-artifact@v4
+        with:
+          name: hosting-catalog-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Publish only catalog data
+        env:
+          BASE_SHA: ${{ needs.update.outputs.base_sha }}
+          CANDIDATE: ${{ runner.temp }}/candidate/hosting-v1.json
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$BASE_SHA" ]; then
+            echo 'The site changed during collection; rerun to use its latest catalog.' >&2
+            exit 1
+          fi
+          mkdir -p catalog
+          cp "$CANDIDATE" catalog/hosting-v1.json
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add catalog/hosting-v1.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'Update public hosting offers'
+            git push origin HEAD:gh-pages
+          fi
+      # GITHUB_TOKEN pushes do not trigger legacy Pages builds.
+      # Explicit build requests need no PAT and keep the site's settings.
+      - name: Build Pages and verify the public JSON
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ runner.temp }}/candidate/hosting-v1.json
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" > /dev/null
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, time
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          expected = Path(os.environ["CANDIDATE"]).read_bytes()
+          digest = hashlib.sha256(expected).hexdigest()
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          repo = os.environ["GITHUB_REPOSITORY"]
+          url = f"https://{repo.split('/')[0]}.github.io/{repo.split('/')[1]}/catalog/hosting-v1.json"
+          deadline = time.monotonic() + 480
+          while time.monotonic() < deadline:
+              build = json.loads(subprocess.check_output(["gh", "api", f"repos/{repo}/pages/builds/latest"], text=True))
+              if build.get("commit") == commit and build.get("status") == "errored":
+                  raise SystemExit("Pages build failed")
+              if build.get("commit") == commit and build.get("status") == "built":
+                  try:
+                      request = Request(url + "?run=" + os.environ["GITHUB_RUN_ID"], headers={"Cache-Control": "no-cache"})
+                      with urlopen(request, timeout=15) as response:
+                          actual = response.read(262145)
+                      if hashlib.sha256(actual).hexdigest() == digest:
+                          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                              summary.write(f"Published and verified: [{url}]({url})\n\nSHA-256: {digest}\n")
+                          break
+                  except OSError:
+                      pass
+              time.sleep(10)
+          else:
+              raise SystemExit("Public catalog did not match the validated artifact within 8 minutes")
+          PY
+
+  source-health:
+    if: always()
+    needs: [update, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Report source or publication failures
+        env:
+          UPDATE_RESULT: ${{ needs.update.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          SOURCE_ERRORS: ${{ needs.update.outputs.source_errors }}
+        run: |
+          if [ "$UPDATE_RESULT" != success ] || [ "$PUBLISH_RESULT" = failure ] || [ "$PUBLISH_RESULT" = cancelled ]; then
+            echo 'Catalog validation or publication failed. See job logs and candidate artifact.' >&2
+            exit 1
+          fi
+          if [ "$SOURCE_ERRORS" = true ]; then
+            echo 'Some sources failed; their previous facts and verification dates were retained. See hosting-report.json.' >&2
+            exit 1
+          fi

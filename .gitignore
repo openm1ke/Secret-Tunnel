@@ -62,3 +62,5 @@ hosting-catalog/target/
 ios/build/
 ios/native/target/
 ios/*.xcodeproj/
+
+hosting-catalog/target/

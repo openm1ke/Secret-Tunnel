@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-11-27T18:46:18+00:00",
+  "generated_at": "2026-11-28T14:22:19+00:00",
   "offers": [
     {
       "id": "ovh",
@@ -22,7 +22,7 @@
       "disk_gb": 75,
       "port_mbps": 400,
       "conditions": "Базовая цена без НДС, каталог IE. Налоги и обязательные опции уточните при заказе. Трафик без лимита в европейских локациях.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://eu.api.ovh.com/1.0/order/catalog/public/vps?ovhSubsidiary=IE",
       "update_error": null,
       "price_note": "Без НДС · базовая цена"
@@ -47,7 +47,7 @@
       "disk_gb": 10,
       "port_mbps": null,
       "conditions": "Скорость порта не указана в карточке источника. Налоги, IPv4 и лимит трафика уточните перед оплатой.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://itldc.com/en/vds/",
       "update_error": null,
       "price_note": "Налоги и IPv4 — у хостера"
@@ -73,7 +73,7 @@
       "disk_gb": 15,
       "port_mbps": 1000,
       "conditions": "Базовый тариф помесячно. Публичный IPv4, дополнительные услуги и условия трафика проверьте в конфигураторе.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://timeweb.cloud/services/vds-vps",
       "price_note": "Базовая цена · IPv4 уточните"
     },
@@ -98,7 +98,7 @@
       "disk_gb": 15,
       "port_mbps": 100,
       "conditions": "Linux, KVM, один IPv4, трафик без лимита до указанной скорости. Без платной панели и дополнительных услуг.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://firstvds.ru/products/vds_vps_hosting",
       "price_note": "IPv4 включён"
     },
@@ -123,7 +123,7 @@
       "port_mbps": 100,
       "price_note": "Текущая цена · IPv4 включён",
       "conditions": "Помесячная цена страницы, без годовой предоплаты. IPv4 и IPv6 включены. Общий порт, безлимитный трафик с fair use; налоги и цену продления уточните при заказе.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://iphoster.net/vds",
       "update_error": null
     },
@@ -148,7 +148,7 @@
       "port_mbps": null,
       "price_note": "Без налогов · лимит трафика",
       "conditions": "Обычный Cloud Compute, Амстердам, без spot/preemptible. Месячная цена API в USD; включено 1024 GB трафика, превышение оплачивается отдельно. Скорость порта в API не указана. Налоги и дополнительные услуги уточните при заказе.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://api.vultr.com/v2/plans?per_page=500",
       "update_error": null
     },
@@ -173,7 +173,7 @@
       "port_mbps": null,
       "price_note": "Без НДС · с платным IPv4",
       "conditions": "NBG1, месячный предел стоимости сервера плюс один Primary IPv4. Без НДС. Включено 20 TB трафика, превышение оплачивается отдельно. Скорость общего порта не гарантирована. Наличие ресурсов проверьте при заказе.",
-      "verified_at": "2026-11-27T18:46:18+00:00",
+      "verified_at": "2026-11-28T14:22:19+00:00",
       "source_url": "https://website-price-api.hetzner.com/api/v1/products/CLOUD_140?location=NBG1&priceType=monthly",
       "update_error": null
     }

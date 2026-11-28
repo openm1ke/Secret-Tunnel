@@ -31,7 +31,13 @@ import javax.net.ssl.SSLSocketFactory
  * desktop's names and JSON fields, so both apps read the same way.
  */
 object SpeedKinds {
-    data class Kind(val id: String, val title: String, val text: String, val time: String, val traffic: String)
+    data class Kind(val id: String, private val titleKey: String, private val textKey: String,
+        private val timeKey: String, private val trafficKey: String) {
+        val title get() = tr(titleKey)
+        val text get() = tr(textKey)
+        val time get() = tr(timeKey)
+        val traffic get() = tr(trafficKey)
+    }
     val all = listOf(
         Kind("quick", "Быстрый", "Пинг, загрузка и отдача в один поток.", "≈ 15 с", "до 150 МБ"),
         Kind("full", "Полный", "Все проверки по очереди: пинг, UDP, один и шесть потоков, отдача, короткие запросы.", "≈ 50 с", "до 400 МБ"),
@@ -144,7 +150,7 @@ object SpeedTest {
     val live = SpeedLive()
     private var current: RunControl? = null
 
-    fun cancel() = synchronized(live) { current?.abort("Тест остановлен пользователем.") }
+    fun cancel() = synchronized(live) { current?.abort(tr("Тест остановлен пользователем.")) }
 
     fun tunnelUnavailable(reason: String) = synchronized(live) {
         current?.takeIf { it.throughTunnel }?.abort(reason)
@@ -163,14 +169,14 @@ object SpeedTest {
     data class Target(val proxyPort: Int?, val provider: String, val server: String, val route: List<String>, val country: String)
 
     fun start(context: Context, kind: String, target: Target, done: (SpeedRun) -> Unit) {
-        val steps = plan(kind) ?: error("Неизвестный тест")
+        val steps = plan(kind) ?: error(tr("Неизвестный тест"))
         val control = RunControl(target.proxyPort != null)
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         val initialNetwork = if (control.throughTunnel) null else connectivity.activeNetwork
         synchronized(live) {
-            require(!live.running) { "Тест уже идёт" }
+            require(!live.running) { tr("Тест уже идёт") }
             if (control.throughTunnel) require(TunnelVpnService.connectedSocksPort == target.proxyPort) {
-                "Дождитесь восстановления туннеля."
+                tr("Дождитесь восстановления туннеля.")
             }
             current = control
             val previous = live.last
@@ -189,7 +195,7 @@ object SpeedTest {
             val watcher = if (control.throughTunnel) null else Executors.newSingleThreadScheduledExecutor()
             watcher?.scheduleWithFixedDelay({
                 if (connectivity.activeNetwork != initialNetwork) synchronized(live) {
-                    if (current === control) control.abort("Сеть изменилась. Запустите тест заново.")
+                    if (current === control) control.abort(tr("Сеть изменилась. Запустите тест заново."))
                 }
             }, 0, 500, TimeUnit.MILLISECONDS)
             try {
@@ -215,7 +221,7 @@ object SpeedTest {
                     }
                 }
             } catch (e: Exception) {
-                val stage = if (providerLabel.isBlank()) "Выбор сервера" else steps[live.step].title()
+                val stage = if (providerLabel.isBlank()) tr("Выбор сервера") else steps[live.step].title()
                 error = "$stage: ${e.message ?: e.javaClass.simpleName}"
             } finally {
                 watcher?.shutdownNow()
@@ -264,14 +270,14 @@ object SpeedTest {
         object Ndt7Download : Step()
         object Ndt7Upload : Step()
         fun title(): String = when (this) {
-            is Ping -> "Пинг"
-            is Dns -> "UDP: DNS-запросы"
-            is Download -> if (streams == 1) "Загрузка, 1 поток" else "Загрузка, $streams потоков"
-            is Upload -> if (streams == 1) "Отдача, 1 поток" else "Отдача, $streams потока"
-            is Requests -> "Короткие запросы, $count"
-            is Mixed -> "Смешанная нагрузка"
-            Ndt7Download -> "NDT7: загрузка"
-            Ndt7Upload -> "NDT7: отдача"
+            is Ping -> tr("Пинг")
+            is Dns -> tr("UDP: DNS-запросы")
+            is Download -> if (streams == 1) tr("Загрузка, 1 поток") else tr("Загрузка, {0} потоков", streams)
+            is Upload -> if (streams == 1) tr("Отдача, 1 поток") else tr("Отдача, {0} потока", streams)
+            is Requests -> tr("Короткие запросы, {0}", count)
+            is Mixed -> tr("Смешанная нагрузка")
+            Ndt7Download -> tr("NDT7: загрузка")
+            Ndt7Upload -> tr("NDT7: отдача")
         }
     }
 
@@ -360,7 +366,7 @@ object SpeedTest {
                 progress.interrupt()
                 progress.join()
             }
-            require(samples.isNotEmpty()) { "нет ответа через туннель" }
+            require(samples.isNotEmpty()) { tr("нет ответа через туннель") }
             live.results.pingMs = median(samples); live.results.pingMinMs = samples.min(); live.results.jitterMs = jitter(samples)
             live.progress = 1.0
         }
@@ -403,8 +409,8 @@ object SpeedTest {
                     out.write(byteArrayOf(5, 1, 0)); Http.readFully(input, 2)
                     out.write(byteArrayOf(5, 3, 0, 1, 0, 0, 0, 0, 0, 0))
                     val head = Http.readFully(input, 4)
-                    require(head[1].toInt() == 0) { "туннель не открыл UDP (код ${head[1]})" }
-                    val address = when (head[3].toInt()) { 1 -> Http.readFully(input, 4); 4 -> Http.readFully(input, 16); else -> error("неожиданный ответ SOCKS") }
+                    require(head[1].toInt() == 0) { tr("туннель не открыл UDP (код {0})", head[1]) }
+                    val address = when (head[3].toInt()) { 1 -> Http.readFully(input, 4); 4 -> Http.readFully(input, 16); else -> error(tr("неожиданный ответ SOCKS")) }
                     val port = Http.readFully(input, 2).let { (it[0].toInt() and 255) * 256 + (it[1].toInt() and 255) }
                     val relayIp = InetAddress.getByAddress(address).let { if (it.isAnyLocalAddress) InetAddress.getByName("127.0.0.1") else it }
                     sockets.track(DatagramSocket(0, InetAddress.getByName("127.0.0.1"))).use { ask(it, InetSocketAddress(relayIp, port), true) }
@@ -413,7 +419,7 @@ object SpeedTest {
             val asked = samples.size + lost
             live.results.dnsMs = median(samples)
             live.results.dnsLoss = if (asked > 0) lost / asked.toDouble() else null
-            require(live.results.dnsMs != null || asked == 0) { "UDP-запросы не получили ответа" }
+            require(live.results.dnsMs != null || asked == 0) { tr("UDP-запросы не получили ответа") }
         }
 
         /** A chain of the largest allowed downloads on one connection, counted as bytes arrive. */
@@ -513,9 +519,9 @@ object SpeedTest {
             val pinger = if (loadedPing) backgroundPing(samples, stopPing) else null
             val (bytes, millis, total) = try { sustain(seconds, streams, false) } finally { stopPing.set(true) }
             pinger?.join(2000)
-            require(total >= 1_000_000) { if (refused.get()) "источники загрузки отказали" else "ничего не загрузилось" }
+            require(total >= 1_000_000) { if (refused.get()) tr("источники загрузки отказали") else tr("ничего не загрузилось") }
             val rate = mbps(bytes, millis)
-            if (provider is Provider.Cloudflare && refused.get()) live.results.downloadSource = "Hetzner, Нюрнберг: Cloudflare временно ограничил загрузки"
+            if (provider is Provider.Cloudflare && refused.get()) live.results.downloadSource = tr("Hetzner, Нюрнберг: Cloudflare временно ограничил загрузки")
             if (streams == 1) live.results.downloadSingleMbps = rate else live.results.downloadMbps = rate
             if (live.results.downloadMbps == null) live.results.downloadMbps = rate
             if (loadedPing) live.results.loadedPingMs = median(synchronized(samples) { samples.toList() })
@@ -524,7 +530,7 @@ object SpeedTest {
 
         fun upload(streams: Int, seconds: Int) {
             val (bytes, millis, total) = sustain(seconds, streams, true)
-            require(total > 0) { "ничего не отправилось" }
+            require(total > 0) { tr("ничего не отправилось") }
             live.results.uploadMbps = mbps(bytes, millis); live.results.bytesUp += total
         }
 
@@ -554,14 +560,14 @@ object SpeedTest {
             }
             pool.shutdown()
             try {
-                if (!pool.awaitTermination(120, TimeUnit.SECONDS)) error("запросы не завершились за 120 секунд")
+                if (!pool.awaitTermination(120, TimeUnit.SECONDS)) error(tr("запросы не завершились за 120 секунд"))
             } finally {
                 sockets.close()
                 pool.shutdownNow()
                 pool.awaitTermination(3, TimeUnit.SECONDS)
             }
             val elapsed = System.currentTimeMillis() - start
-            require(times.isNotEmpty()) { "запросы не прошли" }
+            require(times.isNotEmpty()) { tr("запросы не прошли") }
             live.results.requestsPerSecond = times.size / (elapsed / 1000.0); live.results.requestMs = median(times.toList())
             live.results.bytesDown += received.get(); live.downMbps = 0.0
         }
@@ -580,7 +586,7 @@ object SpeedTest {
                 burst.awaitTermination(3, TimeUnit.SECONDS)
                 pinger.join(2000)
             }
-            require(total >= 1_000_000) { "ничего не загрузилось" }
+            require(total >= 1_000_000) { tr("ничего не загрузилось") }
             live.results.mixedDownloadMbps = mbps(bytes, millis); live.results.mixedRequestMs = median(times.toList())
             live.results.loadedPingMs = median(synchronized(samples) { samples.toList() }); live.results.bytesDown += total
         }
@@ -614,24 +620,24 @@ object SpeedTest {
                 sockets.close()
                 pool.shutdownNow()
             }
-            val (host, base, name) = best?.second ?: error("ни один сервер LibreSpeed не ответил")
+            val (host, base, name) = best?.second ?: error(tr("ни один сервер LibreSpeed не ответил"))
             return Provider.LibreSpeed(host, base) to "LibreSpeed · $name"
         }
 
         /** M-Lab's nearest NDT7 server on this path. */
         fun locateNdt7(): Pair<Provider, String> {
             val answer = JSONObject(Http.fetchText(proxyPort, "locate.measurementlab.net", "/v2/nearest/ndt/ndt7", 10_000, sockets))
-            val result = answer.optJSONArray("results")?.optJSONObject(0) ?: error("M-Lab не нашёл сервер")
-            val urls = result.optJSONObject("urls") ?: error("M-Lab не выдал адреса теста")
+            val result = answer.optJSONArray("results")?.optJSONObject(0) ?: error(tr("M-Lab не нашёл сервер"))
+            val urls = result.optJSONObject("urls") ?: error(tr("M-Lab не выдал адреса теста"))
             val down = urls.optString("ws:///ndt/v7/download"); val up = urls.optString("ws:///ndt/v7/upload")
-            require(down.isNotBlank() && up.isNotBlank()) { "M-Lab не выдал адреса теста" }
+            require(down.isNotBlank() && up.isNotBlank()) { tr("M-Lab не выдал адреса теста") }
             val place = result.optJSONObject("location")?.let { "${it.optString("city")}, ${it.optString("country")}" }.orEmpty()
             return Provider.Ndt7(down, up) to "M-Lab NDT7 · $place"
         }
 
         /** M-Lab's method: ten seconds on one connection, download or upload. */
         fun ndt7(upload: Boolean) {
-            val p = provider as? Provider.Ndt7 ?: error("сервер M-Lab не выбран")
+            val p = provider as? Provider.Ndt7 ?: error(tr("сервер M-Lab не выбран"))
             val url = (if (upload) p.up else p.down).removePrefix("ws://")
             val hostPort = url.substringBefore('/'); val path = "/" + url.substringAfter('/', "")
             val host = hostPort.substringBefore(':'); val port = hostPort.substringAfter(':', "80").toIntOrNull() ?: 80
@@ -642,7 +648,7 @@ object SpeedTest {
                     "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n" +
                     "Sec-WebSocket-Protocol: net.measurementlab.ndt.v7\r\nUser-Agent: secret-tunnel-android\r\n\r\n").toByteArray())
                 val status = Http.readLine(input)
-                require(status.contains(" 101 ")) { "M-Lab отказал: ${status.trim()}" }
+                require(status.contains(" 101 ")) { tr("M-Lab отказал: {0}", status.trim()) }
                 while (Http.readLine(input).isNotEmpty()) Unit
                 val counter = AtomicLong(); val finished = AtomicBoolean(false)
                 val receiver = Thread {
@@ -701,7 +707,7 @@ object SpeedTest {
                 sockets.close()
                 receiver.join(1000)
                 sender?.join(1000)
-                require(bytes > 0) { if (upload) "ничего не отправилось" else "ничего не загрузилось" }
+                require(bytes > 0) { if (upload) tr("ничего не отправилось") else tr("ничего не загрузилось") }
             }
         }
     }
@@ -715,7 +721,7 @@ class SpeedSockets : Closeable {
     @Synchronized fun <T : Closeable> track(socket: T): T {
         if (closed) {
             runCatching { socket.close() }
-            throw SocketException("Тест остановлен")
+            throw SocketException(tr("Тест остановлен"))
         }
         sockets.add(socket)
         return socket
@@ -740,16 +746,16 @@ class SpeedSockets : Closeable {
 object Http {
     fun readFully(input: InputStream, size: Int): ByteArray {
         val bytes = ByteArray(size); var read = 0
-        while (read < size) { val n = input.read(bytes, read, size - read); if (n < 0) error("соединение закрыто"); read += n }
+        while (read < size) { val n = input.read(bytes, read, size - read); if (n < 0) error(tr("соединение закрыто")); read += n }
         return bytes
     }
     fun skip(input: InputStream, size: Long) {
         var left = size; val buffer = ByteArray(65536)
-        while (left > 0) { val n = input.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt()); if (n < 0) error("соединение закрыто"); left -= n }
+        while (left > 0) { val n = input.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt()); if (n < 0) error(tr("соединение закрыто")); left -= n }
     }
     fun readLine(input: InputStream): String {
         val line = StringBuilder()
-        while (true) { val c = input.read(); if (c < 0) error("соединение закрыто"); if (c == '\n'.code) break; if (c != '\r'.code) line.append(c.toChar()) }
+        while (true) { val c = input.read(); if (c < 0) error(tr("соединение закрыто")); if (c == '\n'.code) break; if (c != '\r'.code) line.append(c.toChar()) }
         return line.toString()
     }
 
@@ -769,8 +775,8 @@ object Http {
             val name = host.toByteArray()
             out.write(byteArrayOf(5, 1, 0, 3, name.size.toByte()) + name + byteArrayOf((port shr 8).toByte(), port.toByte()))
             val head = readFully(input, 4)
-            require(head[1].toInt() == 0) { "туннель не соединился с $host (код ${head[1]})" }
-            readFully(input, when (head[3].toInt()) { 1 -> 6; 4 -> 18; 3 -> (readFully(input, 1)[0].toInt() and 255) + 2; else -> error("неожиданный ответ SOCKS") })
+            require(head[1].toInt() == 0) { tr("туннель не соединился с {0} (код {1})", host, head[1]) }
+            readFully(input, when (head[3].toInt()) { 1 -> 6; 4 -> 18; 3 -> (readFully(input, 1)[0].toInt() and 255) + 2; else -> error(tr("неожиданный ответ SOCKS")) })
             return socket
         } catch (e: Exception) {
             runCatching { socket.close() }
@@ -801,7 +807,7 @@ object Http {
                 var left = length
                 while (left > 0) {
                     val n = input.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt())
-                    if (n < 0) error("соединение закрыто")
+                    if (n < 0) error(tr("соединение закрыто"))
                     capture?.write(buffer, 0, n); left -= n
                     if (!more(n)) return false
                 }
@@ -838,7 +844,7 @@ object Http {
                 socket = (SSLSocketFactory.getDefault() as SSLSocketFactory).createSocket(raw, host, 443, true) as SSLSocket
                 socket.soTimeout = 15_000
                 socket.startHandshake()
-                require(HttpsURLConnection.getDefaultHostnameVerifier().verify(host, socket.session)) { "сертификат не подходит для $host" }
+                require(HttpsURLConnection.getDefaultHostnameVerifier().verify(host, socket.session)) { tr("сертификат не подходит для {0}", host) }
                 input = BufferedInputStream(socket.inputStream, 65536); output = socket.outputStream
             } catch (e: Exception) {
                 runCatching { raw.close() }
@@ -850,13 +856,13 @@ object Http {
             "$method $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: secret-tunnel-android\r\nAccept: */*\r\n" +
                 (if (close) "Connection: close\r\n" else "") + extra + "\r\n"
         private fun response(): Response {
-            val status = readLine(input).split(' ').getOrNull(1)?.toIntOrNull() ?: error("неверный ответ сервера")
+            val status = readLine(input).split(' ').getOrNull(1)?.toIntOrNull() ?: error(tr("неверный ответ сервера"))
             val headers = mutableMapOf<String, String>()
             while (true) { val line = readLine(input); if (line.isEmpty()) break; headers[line.substringBefore(':').trim().lowercase()] = line.substringAfter(':').trim() }
             return Response(input, status, headers)
         }
         fun get(path: String, close: Boolean = false): Response {
-            require(path.startsWith("/") && path.none { it <= ' ' || it == '\u007f' }) { "Некорректный HTTP-путь" }
+            require(path.startsWith("/") && path.none { it <= ' ' || it == '\u007f' }) { tr("Некорректный HTTP-путь") }
             output.write(head("GET", path, close, "").toByteArray())
             output.flush()
             return response()

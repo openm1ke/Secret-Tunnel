@@ -5,12 +5,14 @@ import UniformTypeIdentifiers
 struct SecretTunnelApp: App {
     @StateObject private var controller = TunnelController()
     @AppStorage("appearance") private var appearance: Appearance = .system
+    @AppStorage("language") private var language: AppLanguage = .ru
 
     var body: some Scene {
         WindowGroup {
-            ContentView(appearance: $appearance)
+            ContentView(appearance: $appearance, language: $language)
                 .environmentObject(controller)
                 .preferredColorScheme(appearance.colorScheme)
+                .environment(\.locale, language.locale)
         }
     }
 }
@@ -47,6 +49,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var textSize
     @Binding var appearance: Appearance
+    @Binding var language: AppLanguage
     @AppStorage("hideSensitive") private var hideSensitive = true
     @StateObject private var speedCheck = SpeedCheck()
     @State private var page: Page = .home
@@ -106,7 +109,7 @@ struct ContentView: View {
         }
         .onOpenURL { url in
             guard url.scheme == "secrettunnel", url.host == "import", !transferOpen else { return }
-            guard url.absoluteString.utf8.count <= 1_048_576 else { c.message = "Ссылка переноса больше 1 МБ."; return }
+            guard url.absoluteString.utf8.count <= 1_048_576 else { c.message = tr("Ссылка переноса больше 1 МБ."); return }
             transferServerID = nil; transferPayload = url.absoluteString; transferOpen = true
         }
     }
@@ -139,7 +142,7 @@ struct ContentView: View {
                     VStack(spacing: 4) {
                         Image(systemName: tab.icon)
                             .font(.system(size: 21, weight: .medium))
-                        Text(tab.rawValue)
+                        Text(tr(tab.rawValue))
                             .font(.caption2.weight(page == tab ? .semibold : .regular))
                             .lineLimit(1)
                             .minimumScaleFactor(0.72)
@@ -150,7 +153,7 @@ struct ContentView: View {
                     .foregroundColor(page == tab ? palette.accent : palette.muted)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(tab.rawValue)
+                .accessibilityLabel(tr(tab.rawValue))
                 .accessibilityAddTraits(page == tab ? .isSelected : [])
             }
         }
@@ -168,14 +171,14 @@ struct ContentView: View {
         case .more:
             if let morePage {
                 Button { self.morePage = nil } label: {
-                    Label("Ещё", systemImage: "chevron.left")
+                    Label(tr("Ещё"), systemImage: "chevron.left")
                         .font(.subheadline.weight(.semibold))
                         .frame(minHeight: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(palette.accent)
-                heading(morePage.rawValue)
+                heading(tr(morePage.rawValue))
                 switch morePage {
                 case .stats: stats
                 case .servers: servers
@@ -191,13 +194,13 @@ struct ContentView: View {
     }
 
     private var status: String {
-        if c.busy { return "Проверка" }
-        if c.isConnected { return "Подключено" }
-        if c.vpnStatus == .reasserting { return "Переподключение" }
-        if c.startingVPN || c.vpnStatus == .connecting { return "Подключение" }
-        if c.vpnStatus == .disconnecting { return "Остановка" }
-        if !c.connectionError.isEmpty { return "Ошибка" }
-        return c.simulator ? "Симулятор" : "Остановлен"
+        if c.busy { return tr("Проверка") }
+        if c.isConnected { return tr("Подключено") }
+        if c.vpnStatus == .reasserting { return tr("Переподключение") }
+        if c.startingVPN || c.vpnStatus == .connecting { return tr("Подключение") }
+        if c.vpnStatus == .disconnecting { return tr("Остановка") }
+        if !c.connectionError.isEmpty { return tr("Ошибка") }
+        return c.simulator ? tr("Симулятор") : tr("Остановлен")
     }
 
     private var statusColor: Color {
@@ -207,21 +210,21 @@ struct ContentView: View {
     }
 
     private var heroTitle: String {
-        if c.busy { return "Проверяем сервер" }
-        if c.isConnected { return "Туннель работает" }
+        if c.busy { return tr("Проверяем сервер") }
+        if c.isConnected { return tr("Туннель работает") }
         if c.startingVPN || c.isActive || c.vpnStatus == .disconnecting { return status }
-        if !c.connectionError.isEmpty { return "Не удалось подключиться" }
-        if !c.isConfigured { return "Настройте подключение" }
-        return c.simulator ? "Проверьте SSH-соединение" : "Готово к подключению"
+        if !c.connectionError.isEmpty { return tr("Не удалось подключиться") }
+        if !c.isConfigured { return tr("Настройте подключение") }
+        return c.simulator ? tr("Проверьте SSH-соединение") : tr("Готово к подключению")
     }
 
     private var heroDetail: String {
         if !c.connectionError.isEmpty { return c.connectionError }
-        if c.isConnected { return "Трафик устройства идёт через SSH-сервер. Недоступный на сервере IPv6 блокируется." }
+        if c.isConnected { return tr("Трафик устройства идёт через SSH-сервер. Недоступный на сервере IPv6 блокируется.") }
         if c.busy { return c.message }
-        if !c.isConfigured { return "Добавьте SSH-сервер, импортируйте ключ и подтвердите отпечаток." }
-        if c.simulator { return "В симуляторе доступны SSH и проверка агента. Для VPN нужен iPhone или iPad." }
-        return "Подключите VPN, чтобы направить трафик устройства через SSH-сервер."
+        if !c.isConfigured { return tr("Добавьте SSH-сервер, импортируйте ключ и подтвердите отпечаток.") }
+        if c.simulator { return tr("В симуляторе доступны SSH и проверка агента. Для VPN нужен iPhone или iPad.") }
+        return tr("Подключите VPN, чтобы направить трафик устройства через SSH-сервер.")
     }
 
     private var home: some View {
@@ -233,10 +236,10 @@ struct ContentView: View {
             }
             if !c.message.isEmpty && !c.busy {
                 card {
-                    Text(c.message).font(.subheadline)
+                    Text(tr(c.message)).font(.subheadline)
                 }
             }
-            rowLink("Основной прокси", addressSummary, icon: "arrow.left.arrow.right") { go(.proxies) }
+            rowLink(tr("Основной прокси"), addressSummary, icon: "arrow.left.arrow.right") { go(.proxies) }
             trafficCards
             chart
         }
@@ -244,59 +247,59 @@ struct ContentView: View {
 
     @ViewBuilder private var homeAction: some View {
         if c.isActive {
-            action("Остановить", primary: true, c.toggle)
+            action(tr("Остановить"), primary: true, c.toggle)
         } else if !c.isConfigured {
-            action("Настроить подключение", primary: true) { setupOpen = true }
+            action(tr("Настроить подключение"), primary: true) { setupOpen = true }
                 .disabled(!c.canEditServer || speedCheck.running)
         } else if c.simulator {
-            action("Проверить вход и агент", primary: true, c.checkServer)
+            action(tr("Проверить вход и агент"), primary: true, c.checkServer)
                 .disabled(c.busy || speedCheck.running)
         } else {
-            action("Подключить", primary: true, c.toggle)
+            action(tr("Подключить"), primary: true, c.toggle)
                 .disabled(c.startingVPN || c.busy || c.vpnStatus == .disconnecting)
         }
     }
 
     private var addressSummary: String {
-        guard c.hasEndpoint else { return "Адрес не указан" }
-        return hideSensitive && !showAddress ? "Адрес скрыт" : "\(c.settings.host):\(c.settings.port)"
+        guard c.hasEndpoint else { return tr("Адрес не указан") }
+        return hideSensitive && !showAddress ? tr("Адрес скрыт") : "\(c.settings.host):\(c.settings.port)"
     }
 
     private var apps: some View {
         Group {
-            heading("Приложения")
+            heading(tr("Приложения"))
             card {
-                Label("VPN для всего устройства", systemImage: "shield")
+                Label(tr("VPN для всего устройства"), systemImage: "shield")
                     .font(.headline)
-                detail("Этот VPN охватывает IPv4- и IPv6-трафик устройства. Для выбора отдельных приложений iOS требует, чтобы ими управлял MDM.")
-                action("К подключению") { page = .home }
+                detail(tr("Этот VPN охватывает IPv4- и IPv6-трафик устройства. Для выбора отдельных приложений iOS требует, чтобы ими управлял MDM."))
+                action(tr("К подключению")) { page = .home }
             }
         }
     }
 
     private var speed: some View {
         Group {
-            heading("Скорость")
+            heading(tr("Скорость"))
             card {
-                Text("Быстрый тест").font(.headline)
+                Text(tr("Быстрый тест")).font(.headline)
                 if !SpeedCheck.available {
-                    detail("Для теста через SOCKS5 нужен iOS 17 или новее.")
+                    detail(tr("Для теста через SOCKS5 нужен iOS 17 или новее."))
                 } else {
-                    detail(c.simulator ? "HTTPS через SSH и агент. Тест передаёт до 3 МБ." : "HTTPS через локальный SOCKS5. Тест передаёт до 3 МБ.")
+                    detail(c.simulator ? tr("HTTPS через SSH и агент. Тест передаёт до 3 МБ.") : tr("HTTPS через локальный SOCKS5. Тест передаёт до 3 МБ."))
                     if let result = speedCheck.result {
-                        valueRow("Загрузка", String(format: "%.1f Мбит/с", result.down))
-                        valueRow("Отправка", String(format: "%.1f Мбит/с", result.up))
+                        valueRow(tr("Загрузка"), String(format: tr("%.1f Мбит/с"), result.down))
+                        valueRow(tr("Отправка"), String(format: tr("%.1f Мбит/с"), result.up))
                     }
                     if !speedCheck.error.isEmpty {
                         Text(speedCheck.error).font(.subheadline).foregroundColor(palette.error)
                     }
                     if c.simulator ? c.isConfigured : c.isConnected {
-                        action(speedCheck.running ? "Измеряем скорость…" : "Начать тест", primary: true) {
+                        action(speedCheck.running ? tr("Измеряем скорость…") : tr("Начать тест"), primary: true) {
                             speedCheck.start(settings: c.settings, simulator: c.simulator)
                         }
                         .disabled(speedCheck.running || c.busy)
                     } else {
-                        action(c.simulator ? "Настроить сервер" : "К подключению") {
+                        action(c.simulator ? tr("Настроить сервер") : tr("К подключению")) {
                             if c.simulator { go(.servers) } else { page = .home }
                         }
                     }
@@ -309,13 +312,13 @@ struct ContentView: View {
 
     private var stats: some View {
         Group {
-            heading("Статистика")
+            heading(tr("Статистика"))
             card {
-                Text("За сеанс VPN").font(.headline)
-                valueRow("Получено", bytes(Double(c.rx)))
-                valueRow("Отправлено", bytes(Double(c.tx)))
+                Text(tr("За сеанс VPN")).font(.headline)
+                valueRow(tr("Получено"), bytes(Double(c.rx)))
+                valueRow(tr("Отправлено"), bytes(Double(c.tx)))
                 if c.rx == 0, c.tx == 0 {
-                    detail(c.simulator ? "Счётчики VPN доступны при подключении на iPhone или iPad." : "Данные появятся после подключения VPN.")
+                    detail(c.simulator ? tr("Счётчики VPN доступны при подключении на iPhone или iPad.") : tr("Данные появятся после подключения VPN."))
                 }
             }
         }
@@ -323,14 +326,14 @@ struct ContentView: View {
 
     private var more: some View {
         Group {
-            heading("Ещё")
-            detail("Подключения, настройки и журнал")
-            rowLink("Статистика", "Трафик текущего сеанса", icon: "chart.bar") { go(.stats) }
-            rowLink("Серверы", "SSH, ключ доступа и проверка агента", icon: "server.rack") { go(.servers) }
-            rowLink("Прокси", "Основной прокси и локальный порт SOCKS5", icon: "arrow.left.arrow.right") { go(.proxies) }
-            rowLink("Настройки", "Оформление и конфиденциальность", icon: "gearshape") { go(.settings) }
-            rowLink("Журнал", "Диагностика подключения и ошибок", icon: "list.bullet.rectangle") { go(.logs) }
-            rowLink("О программе", "Версия \(version) и справка", icon: "info.circle") { go(.about) }
+            heading(tr("Ещё"))
+            detail(tr("Подключения, настройки и журнал"))
+            rowLink(tr("Статистика"), tr("Трафик текущего сеанса"), icon: "chart.bar") { go(.stats) }
+            rowLink(tr("Серверы"), tr("SSH, ключ доступа и проверка агента"), icon: "server.rack") { go(.servers) }
+            rowLink(tr("Прокси"), tr("Основной прокси и локальный порт SOCKS5"), icon: "arrow.left.arrow.right") { go(.proxies) }
+            rowLink(tr("Настройки"), tr("Оформление и конфиденциальность"), icon: "gearshape") { go(.settings) }
+            rowLink(tr("Журнал"), tr("Диагностика подключения и ошибок"), icon: "list.bullet.rectangle") { go(.logs) }
+            rowLink(tr("О программе"), tr("Версия {0} и справка", version), icon: "info.circle") { go(.about) }
         }
     }
 
@@ -340,50 +343,50 @@ struct ContentView: View {
                 card {
                     Text(profile.name).font(.headline)
                     if let jump = profile.settings.jumpProfileID, let parent = Shared.profiles.first(where: { $0.id == jump }) {
-                        Text("Через \(parent.name)").font(.footnote).foregroundColor(palette.muted)
+                        Text(tr("Через {0}", parent.name)).font(.footnote).foregroundColor(palette.muted)
                     }
                     if Shared.selectedProfile?.id == profile.id {
-                        Label("Выбран для подключения", systemImage: "checkmark.circle.fill").foregroundColor(palette.accent)
+                        Label(tr("Выбран для подключения"), systemImage: "checkmark.circle.fill").foregroundColor(palette.accent)
                     } else {
-                        action("Использовать") { c.selectServer(profile.id) }
+                        action(tr("Использовать")) { c.selectServer(profile.id) }
                             .disabled(!c.canEditServer || speedCheck.running)
                     }
-                    action("Поделиться") { transferServerID = profile.id; transferPayload = ""; transferOpen = true }
+                    action(tr("Поделиться")) { transferServerID = profile.id; transferPayload = ""; transferOpen = true }
                         .disabled(c.busy || speedCheck.running)
                 }
             }
             card {
-                Text("Сервер SSH").font(.headline)
-                valueRow("Адрес", addressSummary)
-                valueRow("Ключ", c.hasKey ? "Импортирован" : "Не импортирован")
+                Text(tr("Сервер SSH")).font(.headline)
+                valueRow(tr("Адрес"), addressSummary)
+                valueRow(tr("Ключ"), c.hasKey ? tr("Импортирован") : tr("Не импортирован"))
                 if c.hasEndpoint && hideSensitive {
-                    action(showAddress ? "Скрыть адрес" : "Показать адрес") { showAddress.toggle() }
+                    action(showAddress ? tr("Скрыть адрес") : tr("Показать адрес")) { showAddress.toggle() }
                 }
-                action("Мастер настройки", primary: !c.hasEndpoint) { setupOpen = true }
+                action(tr("Мастер настройки"), primary: !c.hasEndpoint) { setupOpen = true }
                     .disabled(!c.canEditServer || speedCheck.running)
-                action("Каталог серверов") { page = .catalog; morePage = nil }
-                action("Импортировать") { transferServerID = nil; transferPayload = ""; transferOpen = true }
+                action(tr("Каталог серверов")) { page = .catalog; morePage = nil }
+                action(tr("Импортировать")) { transferServerID = nil; transferPayload = ""; transferOpen = true }
                     .disabled(!c.canEditServer || speedCheck.running)
-                action(c.hasEndpoint ? "Изменить сервер" : "Добавить сервер") {
+                action(c.hasEndpoint ? tr("Изменить сервер") : tr("Добавить сервер")) {
                     editingServer = true
                 }
                 .disabled(!c.canEditServer || speedCheck.running)
-                action(c.hasKey ? "Заменить приватный ключ" : "Импортировать приватный ключ") {
+                action(c.hasKey ? tr("Заменить приватный ключ") : tr("Импортировать приватный ключ")) {
                     importingKey = true
                 }
                 .disabled(!c.canEditServer || speedCheck.running)
             }
             card {
-                Text("Доверие к серверу").font(.headline)
-                valueRow("Отпечаток", c.settings.hostKeySHA256.isEmpty ? "Не подтверждён" : "Подтверждён")
+                Text(tr("Доверие к серверу")).font(.headline)
+                valueRow(tr("Отпечаток"), c.settings.hostKeySHA256.isEmpty ? tr("Не подтверждён") : tr("Подтверждён"))
                 if !c.pendingFingerprint.isEmpty {
                     Text(c.pendingFingerprint).font(.footnote.monospaced()).textSelection(.enabled)
-                    action("Отпечаток совпадает — доверять", primary: true, c.trustFingerprint)
+                    action(tr("Отпечаток совпадает — доверять"), primary: true, c.trustFingerprint)
                         .disabled(!c.canEditServer || speedCheck.running)
                 }
-                action("Получить отпечаток сервера", c.probeServer)
+                action(tr("Получить отпечаток сервера"), c.probeServer)
                     .disabled(!c.canEditServer || !c.hasEndpoint || speedCheck.running)
-                action("Проверить вход и агент", primary: c.isConfigured, c.checkServer)
+                action(tr("Проверить вход и агент"), primary: c.isConfigured, c.checkServer)
                     .disabled(c.busy || !c.isConfigured || speedCheck.running)
                 if !c.message.isEmpty { detail(c.message) }
             }
@@ -392,10 +395,10 @@ struct ContentView: View {
 
     private var proxies: some View {
         card {
-            Text("Основной прокси").font(.headline)
-            valueRow("Локальный порт SOCKS5", String(c.settings.socksPort))
-            rowLink("Сервер SSH", addressSummary, icon: "server.rack") { go(.servers) }
-            action("Изменить порт") { editingPort = true }
+            Text(tr("Основной прокси")).font(.headline)
+            valueRow(tr("Локальный порт SOCKS5"), String(c.settings.socksPort))
+            rowLink(tr("Сервер SSH"), addressSummary, icon: "server.rack") { go(.servers) }
+            action(tr("Изменить порт")) { editingPort = true }
                 .disabled(!c.canEditServer || speedCheck.running)
         }
     }
@@ -403,7 +406,13 @@ struct ContentView: View {
     private var settings: some View {
         Group {
             card {
-                Text("Оформление").font(.headline)
+                Text(tr("Оформление")).font(.headline)
+                Picker(tr("Язык"), selection: $language) {
+                    ForEach(AppLanguage.allCases, id: \.self) { value in
+                        Text(value.label).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
                 Menu {
                     ForEach(Appearance.allCases, id: \.self) { theme in
                         Button {
@@ -417,7 +426,7 @@ struct ContentView: View {
                         }
                     }
                 } label: {
-                    Text("Тема · \(appearance.label)")
+                    Text(tr("Тема · {0}", appearance.label))
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity, minHeight: 48)
                         .foregroundColor(palette.accent)
@@ -425,11 +434,11 @@ struct ContentView: View {
                 }
             }
             card {
-                Text("Конфиденциальность").font(.headline)
-                Toggle("Скрывать IP-адреса", isOn: $hideSensitive)
+                Text(tr("Конфиденциальность")).font(.headline)
+                Toggle(tr("Скрывать IP-адреса"), isOn: $hideSensitive)
                     .tint(palette.accent)
                     .onChange(of: hideSensitive) { _ in showAddress = false }
-                detail("Скрывает адрес сервера на главной и на экране «Серверы».")
+                detail(tr("Скрывает адрес сервера на главной и на экране «Серверы»."))
             }
         }
     }
@@ -437,10 +446,10 @@ struct ContentView: View {
     private var logs: some View {
         card {
             if c.message.isEmpty && c.connectionError.isEmpty && c.logs.isEmpty {
-                detail("Записей пока нет. Здесь появятся результаты проверки SSH и сообщения VPN.")
+                detail(tr("Записей пока нет. Здесь появятся результаты проверки SSH и сообщения VPN."))
             }
             if !c.message.isEmpty { detail(c.message) }
-            if !c.connectionError.isEmpty { Text(c.connectionError).foregroundColor(palette.error) }
+            if !c.connectionError.isEmpty { Text(tr(c.connectionError)).foregroundColor(palette.error) }
             ForEach(Array(c.logs.suffix(30).enumerated()), id: \.offset) { _, line in
                 Text(line).font(.footnote.monospaced()).textSelection(.enabled)
             }
@@ -454,9 +463,9 @@ struct ContentView: View {
     private var about: some View {
         card {
             Text("Secret Tunnel").font(.headline)
-            detail("Версия \(version)")
+            detail(tr("Версия {0}", version))
             Link(destination: URL(string: "https://openm1ke.github.io/Secret-Tunnel/")!) {
-                Label("Сайт и справка", systemImage: "arrow.up.right")
+                Label(tr("Сайт и справка"), systemImage: "arrow.up.right")
                     .font(.subheadline.weight(.semibold))
                     .frame(minHeight: 44)
                     .foregroundColor(palette.accent)
@@ -473,27 +482,27 @@ struct ContentView: View {
     }
 
     private var download: some View {
-        metric("Загрузка", icon: "arrow.down", rate: c.currentTraffic?.down ?? 0, total: c.rx, color: palette.accent)
+        metric(tr("Загрузка"), icon: "arrow.down", rate: c.currentTraffic?.down ?? 0, total: c.rx, color: palette.accent)
     }
 
     private var upload: some View {
-        metric("Отправка", icon: "arrow.up", rate: c.currentTraffic?.up ?? 0, total: c.tx, color: palette.upload)
+        metric(tr("Отправка"), icon: "arrow.up", rate: c.currentTraffic?.up ?? 0, total: c.tx, color: palette.upload)
     }
 
     private func metric(_ title: String, icon: String, rate: Double, total: Int64, color: Color) -> some View {
         card {
             Label(title, systemImage: icon).font(.footnote.weight(.semibold)).foregroundColor(color)
-            Text("\(bytes(rate))/с").font(.title2.weight(.semibold).monospacedDigit())
-            detail("Всего: \(bytes(Double(total)))")
+            Text(tr("{0}/с", bytes(rate))).font(.title2.weight(.semibold).monospacedDigit())
+            detail(tr("Всего: {0}", bytes(Double(total))))
         }
         .accessibilityElement(children: .combine)
     }
 
     private var chart: some View {
         card {
-            Text("График скорости").font(.headline)
+            Text(tr("График скорости")).font(.headline)
             let peak = max(1024, c.traffic.map { max($0.down, $0.up) }.max() ?? 0)
-            detail("\(bytes(peak))/с")
+            detail(tr("{0}/с", bytes(peak)))
             Canvas { context, size in
                 for fraction in [0.0, 0.5, 1.0] {
                     let y = size.height * fraction
@@ -522,9 +531,9 @@ struct ContentView: View {
             .frame(height: 60)
             .accessibilityHidden(true)
             HStack {
-                detail("−60 с")
+                detail(tr("−60 с"))
                 Spacer()
-                detail("Последний замер")
+                detail(tr("Последний замер"))
             }
         }
     }
@@ -536,18 +545,18 @@ struct ContentView: View {
     }
 
     private func heading(_ title: String) -> some View {
-        Text(title)
+        Text(tr(title))
             .font(.title2.weight(.semibold))
             .accessibilityAddTraits(.isHeader)
     }
 
     private func detail(_ text: String) -> some View {
-        Text(text).font(.subheadline).foregroundColor(palette.muted)
+        Text(tr(text)).font(.subheadline).foregroundColor(palette.muted)
     }
 
     private func valueRow(_ title: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(title).font(.subheadline)
+            Text(tr(title)).font(.subheadline)
             Spacer(minLength: 0)
             detail(value).multilineTextAlignment(.trailing)
         }
@@ -562,7 +571,7 @@ struct ContentView: View {
     }
 
     private func action(_ title: String, primary: Bool = false, _ run: @escaping () -> Void) -> some View {
-        Button(title, action: run)
+        Button(tr(title), action: run)
             .buttonStyle(MobileButtonStyle(palette: palette, primary: primary))
     }
 
@@ -572,7 +581,7 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Image(systemName: icon).foregroundColor(palette.accent).accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(title).font(.headline).foregroundColor(palette.accent)
+                        Text(tr(title)).font(.headline).foregroundColor(palette.accent)
                         detail(subtitle)
                     }
                     Spacer(minLength: 0)

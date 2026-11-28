@@ -31,8 +31,8 @@ internal data class AppRelease(
 }
 
 internal fun releaseVersion(name: String): List<Long> {
-    require(versionPattern.matches(name)) { "Некорректный номер версии" }
-    return name.split('.').map { it.toLongOrNull() ?: error("Некорректный номер версии") }
+    require(versionPattern.matches(name)) { tr("Некорректный номер версии") }
+    return name.split('.').map { it.toLongOrNull() ?: error(tr("Некорректный номер версии")) }
 }
 
 internal fun compareReleaseVersions(first: String, second: String): Int {
@@ -45,7 +45,7 @@ internal fun parseAppRelease(json: JSONObject, expected: String? = null, tv: Boo
     val tag = json.optString("tag_name")
     val version = tag.removePrefix("v")
     require(tag.startsWith("v") && !json.optBoolean("draft") && !json.optBoolean("prerelease") &&
-        (expected == null || expected == version)) { "GitHub вернул неподходящий релиз" }
+        (expected == null || expected == version)) { tr("GitHub вернул неподходящий релиз") }
     releaseVersion(version)
     fun asset(name: String, limit: Long): ReleaseAsset? {
         val url = "$PROJECT_URL/releases/download/$tag/$name"
@@ -64,7 +64,7 @@ internal fun parseAppRelease(json: JSONObject, expected: String? = null, tv: Boo
 internal fun releaseChecksum(contents: String, name: String): String {
     val entries = contents.lineSequence().mapNotNull { checksumLine.matchEntire(it.trimEnd()) }
         .filter { it.groupValues[2] == name }.map { it.groupValues[1].lowercase() }.toList()
-    require(entries.size == 1) { "В релизе отсутствует однозначная контрольная сумма для $name" }
+    require(entries.size == 1) { tr("В релизе отсутствует однозначная контрольная сумма для {0}", name) }
     return entries.single()
 }
 
@@ -81,7 +81,7 @@ internal object ReleaseUpdates {
         routes(proxy) { route -> parseAppRelease(JSONObject(text("$RELEASES_API/$path", route, MAX_METADATA)), expected, tv) }
 
     fun download(release: AppRelease, asset: ReleaseAsset, file: File, proxy: Int?, progress: (Long) -> Unit = {}) {
-        val sums = release.checksums ?: error("В релизе нет файла SHA256SUMS.txt")
+        val sums = release.checksums ?: error(tr("В релизе нет файла SHA256SUMS.txt"))
         val expected = routes(proxy) { route -> releaseChecksum(text(sums.url, route, sums.size), asset.name) }
         try {
             routes(proxy) { route ->
@@ -90,9 +90,9 @@ internal object ReleaseUpdates {
                 val size = file.outputStream().buffered().use { stream ->
                     receive(asset.url, route, asset.size, DigestOutputStream(stream, hash), progress)
                 }
-                require(size == asset.size) { "Файл скачан не полностью" }
+                require(size == asset.size) { tr("Файл скачан не полностью") }
                 require(hash.digest().joinToString("") { "%02x".format(it) } == expected) {
-                    "Контрольная сумма не совпала. Скачайте обновление заново."
+                    tr("Контрольная сумма не совпала. Скачайте обновление заново.")
                 }
             }
         } catch (error: Exception) {
@@ -102,7 +102,7 @@ internal object ReleaseUpdates {
     }
 
     fun help(proxy: Int?): String = routes(proxy) { route ->
-        text("https://raw.githubusercontent.com/openm1ke/Secret-Tunnel/main/docs/help/knowledge.md", route, MAX_METADATA)
+        text("https://raw.githubusercontent.com/openm1ke/Secret-Tunnel/main/docs/help/knowledge${if (AppLocalization.language == AppLanguage.ENGLISH) ".en" else ""}.md", route, MAX_METADATA)
     }
 
     private fun <T> routes(proxy: Int?, action: (Int?) -> T): T =
@@ -121,27 +121,27 @@ internal object ReleaseUpdates {
         var uri = URI(url)
         val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120)
         repeat(5) {
-            val host = uri.host?.lowercase() ?: error("Недопустимая ссылка GitHub")
+            val host = uri.host?.lowercase() ?: error(tr("Недопустимая ссылка GitHub"))
             require(uri.scheme == "https" && uri.userInfo == null && uri.port == -1 &&
                 (host in setOf("github.com", "api.github.com", "raw.githubusercontent.com") ||
-                    host.endsWith(".githubusercontent.com"))) { "Недопустимая ссылка GitHub" }
+                    host.endsWith(".githubusercontent.com"))) { tr("Недопустимая ссылка GitHub") }
             Http.Link(route, host).use { link ->
                 val path = uri.rawPath.ifEmpty { "/" } + (uri.rawQuery?.let { "?$it" } ?: "")
                 val response = link.get(path, close = true)
                 if (response.status in listOf(301, 302, 303, 307, 308)) {
-                    uri = uri.resolve(response.header("location") ?: error("GitHub не указал адрес перенаправления"))
+                    uri = uri.resolve(response.header("location") ?: error(tr("GitHub не указал адрес перенаправления")))
                 } else {
                     require(response.status == 200) {
-                        if (response.status in listOf(403, 429)) "GitHub ограничил число запросов. Попробуйте позже."
-                        else "GitHub ответил HTTP ${response.status}"
+                        if (response.status in listOf(403, 429)) tr("GitHub ограничил число запросов. Попробуйте позже.")
+                        else tr("GitHub ответил HTTP {0}", response.status)
                     }
                     var total = 0L
                     response.body(object : OutputStream() {
                         override fun write(value: Int) = write(byteArrayOf(value.toByte()), 0, 1)
                         override fun write(bytes: ByteArray, offset: Int, length: Int) {
                             total += length
-                            require(total <= limit) { "Файл больше заявленного размера" }
-                            check(System.nanoTime() < deadline) { "Истекло время загрузки" }
+                            require(total <= limit) { tr("Файл больше заявленного размера") }
+                            check(System.nanoTime() < deadline) { tr("Истекло время загрузки") }
                             output.write(bytes, offset, length)
                         }
                     }) { progress(total); true }
@@ -149,6 +149,6 @@ internal object ReleaseUpdates {
                 }
             }
         }
-        error("Слишком много перенаправлений GitHub")
+        error(tr("Слишком много перенаправлений GitHub"))
     }
 }

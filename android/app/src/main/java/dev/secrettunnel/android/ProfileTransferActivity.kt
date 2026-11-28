@@ -54,7 +54,7 @@ internal class ProfileTransferSession(private val context: Context) {
         busy=true;error="";notice="";notifyChange()
         Thread{
             try{NativeBridge.requireAvailable();action()}
-            catch(error:Exception){this.error=error.message?:"Не удалось перенести серверы"}
+            catch(error:Exception){this.error=error.message?:tr("Не удалось перенести серверы")}
             finally{busy=false;notifyChange()}
         }.start()
     }
@@ -68,7 +68,7 @@ internal class ProfileTransferSession(private val context: Context) {
     }
     fun unlock()=work{preview=response(NativeBridge.transferUnlock(payload,code,true))}
     fun importProfiles()=work{
-        require(!TunnelVpnService.active){"Сначала остановите туннель"}
+        require(!TunnelVpnService.active){tr("Сначала остановите туннель")}
         val document=response(NativeBridge.transferUnlock(payload,code,false))
         SettingsStore(context).importTransferred(document)
         payload="";code="";preview=null;done=true
@@ -76,7 +76,7 @@ internal class ProfileTransferSession(private val context: Context) {
     fun clear(){payload="";code="";exported=null;preview=null;qr=null}
 }
 
-class ProfileTransferActivity:Activity(){
+class ProfileTransferActivity:LocalizedActivity(){
     private lateinit var session:ProfileTransferSession
     private lateinit var palette:Palette
     private lateinit var body:LinearLayout
@@ -107,22 +107,22 @@ class ProfileTransferActivity:Activity(){
         body=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL;setPadding(dp(20),dp(24),dp(20),dp(24))}
         val frame=FrameLayout(this);frame.addView(body,FrameLayout.LayoutParams(if(tv)dp(minOf(640,resources.configuration.screenWidthDp))else -1,-2,Gravity.TOP or Gravity.CENTER_HORIZONTAL));scroll.addView(frame)
         setContentView(scroll)
-        text(if(session.exportIds==null)"Импортировать серверы" else "Поделиться серверами",24,true)
+        text(if(session.exportIds==null)tr("Импортировать серверы") else tr("Поделиться серверами"),24,true)
         if(session.exportIds!=null)exportUi()else importUi()
-        if(session.busy){body.addView(ProgressBar(this));text("Обрабатываем настройки…")}
-        if(session.error.isNotEmpty())text(session.error,14,false,palette.error)
-        if(session.notice.isNotEmpty())text(session.notice,14,false,palette.muted)
-        button("Закрыть"){finish()}
+        if(session.busy){body.addView(ProgressBar(this));text(tr("Обрабатываем настройки…"))}
+        if(session.error.isNotEmpty())text(tr(session.error),14,false,palette.error)
+        if(session.notice.isNotEmpty())text(tr(session.notice),14,false,palette.muted)
+        button(tr("Закрыть")){finish()}
     }
     private fun importUi(){
         if(session.done){
             setResult(RESULT_OK)
-            text("Серверы добавлены",20,true);text("Существующие подключения сохранены. Выберите сервер и проверьте соединение.")
-            button("Готово",true){setResult(RESULT_OK);finish()};return
+            text(tr("Серверы добавлены"),20,true);text(tr("Существующие подключения сохранены. Выберите сервер и проверьте соединение."))
+            button(tr("Готово"),true){setResult(RESULT_OK);finish()};return
         }
         val preview=session.preview
         if(preview!=null){
-            text("Будут добавлены серверы",20,true)
+            text(tr("Будут добавлены серверы"),20,true)
             val servers=preview.getJSONArray("servers")
             for(index in 0 until servers.length()){
                 val server=servers.getJSONObject(index)
@@ -130,63 +130,63 @@ class ProfileTransferActivity:Activity(){
                 text("${server.getString("user")}@${server.getString("host")}:${server.getInt("port")}")
                 if(!server.isNull("jump_id")){
                     val parent=(0 until servers.length()).map{servers.getJSONObject(it)}.first{it.getString("id")==server.getString("jump_id")}
-                    text("Через ${parent.getString("name")}")
+                    text(tr("Через {0}", parent.getString("name")))
                 }
             }
-            text("Добавляйте только настройки от доверенного отправителя. Существующие серверы не будут заменены.")
-            button("Добавить серверы",true){session.importProfiles()}
-            button("Назад"){session.preview=null;render()};return
+            text(tr("Добавляйте только настройки от доверенного отправителя. Существующие серверы не будут заменены."))
+            button(tr("Добавить серверы"),true){session.importProfiles()}
+            button(tr("Назад")){session.preview=null;render()};return
         }
-        text("Вставьте ссылку или откройте файл .stprofile. Код переноса получите у отправителя отдельно.")
-        if(!tv&&packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY))button("Сканировать QR-код",true){
-            IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE).setPrompt("Наведите камеру на QR-код Secret Tunnel")
+        text(tr("Вставьте ссылку или откройте файл .stprofile. Код переноса получите у отправителя отдельно."))
+        if(!tv&&packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY))button(tr("Сканировать QR-код"),true){
+            IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE).setPrompt(tr("Наведите камеру на QR-код Secret Tunnel"))
                 .setBeepEnabled(false).setOrientationLocked(false).initiateScan()
         }
-        button("Открыть файл"){
+        button(tr("Открыть файл")){
             try{startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),201)}
             catch(_:ActivityNotFoundException){
                 try{startActivityForResult(Intent(Intent.ACTION_GET_CONTENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),201)}
-                catch(_:ActivityNotFoundException){error("На устройстве нет выбора файлов. Установите файловый менеджер или вставьте ссылку переноса.")}
+                catch(_:ActivityNotFoundException){error(tr("На устройстве нет выбора файлов. Установите файловый менеджер или вставьте ссылку переноса."))}
             }
         }
-        field("Ссылка переноса",session.payload,2101,false){session.payload=it}
-        field("Код переноса",session.code,2102,true){session.code=it}
-        button("Расшифровать и проверить",true){session.unlock()}
+        field(tr("Ссылка переноса"),session.payload,2101,false){session.payload=it}
+        field(tr("Код переноса"),session.code,2102,true){session.code=it}
+        button(tr("Расшифровать и проверить"),true){session.unlock()}
     }
     private fun exportUi(){
         val exported=session.exported
         if(exported==null){
-            text("Подключение включает ключ доступа. Получатель сможет войти на ваш сервер.")
-            text("Промежуточные серверы цепочки добавятся автоматически. Код переноса передайте отдельно.")
-            button("Подготовить перенос",true){session.prepareExport(requireNotNull(session.exportIds))};return
+            text(tr("Подключение включает ключ доступа. Получатель сможет войти на ваш сервер."))
+            text(tr("Промежуточные серверы цепочки добавятся автоматически. Код переноса передайте отдельно."))
+            button(tr("Подготовить перенос"),true){session.prepareExport(requireNotNull(session.exportIds))};return
         }
-        text("Серверов в переносе: ${exported.getInt("server_count")}")
+        text(tr("Серверов в переносе: {0}", exported.getInt("server_count")))
         session.qr?.let{bitmap->
-            body.addView(ImageView(this).apply{setImageBitmap(bitmap);contentDescription="Зашифрованные настройки серверов";setBackgroundColor(android.graphics.Color.WHITE)},LinearLayout.LayoutParams(dp(300),dp(300)).apply{gravity=Gravity.CENTER_HORIZONTAL;topMargin=dp(16)})
-        }?:text("Настройки слишком велики для QR-кода. Передайте ссылку или файл.")
-        button("Скопировать ссылку"){copy(exported.getString("link"),"Ссылка переноса")}
-        button("Поделиться ссылкой"){
-            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,exported.getString("link")),"Передать зашифрованные настройки"))
+            body.addView(ImageView(this).apply{setImageBitmap(bitmap);contentDescription=tr("Зашифрованные настройки серверов");setBackgroundColor(android.graphics.Color.WHITE)},LinearLayout.LayoutParams(dp(300),dp(300)).apply{gravity=Gravity.CENTER_HORIZONTAL;topMargin=dp(16)})
+        }?:text(tr("Настройки слишком велики для QR-кода. Передайте ссылку или файл."))
+        button(tr("Скопировать ссылку")){copy(exported.getString("link"),tr("Ссылка переноса"))}
+        button(tr("Поделиться ссылкой")){
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,exported.getString("link")),tr("Передать зашифрованные настройки")))
         }
-        button("Сохранить файл",true){startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/octet-stream").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"SecretTunnel-servers.stprofile"),202)}
-        button("Поделиться файлом"){
+        button(tr("Сохранить файл"),true){startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/octet-stream").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_TITLE,"SecretTunnel-servers.stprofile"),202)}
+        button(tr("Поделиться файлом")){
             val directory=File(cacheDir,"profile-transfers").apply{mkdirs()}
             val file=File(directory,"SecretTunnel-servers.stprofile");file.writeText(exported.getString("link"))
             val uri=FileProvider.getUriForFile(this,"${packageName}.updates",file)
             startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("application/octet-stream").putExtra(Intent.EXTRA_STREAM,uri)
-                .apply{clipData=ClipData.newUri(contentResolver,"Зашифрованные серверы",uri)}.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),"Передать зашифрованные настройки"))
+                .apply{clipData=ClipData.newUri(contentResolver,tr("Зашифрованные серверы"),uri)}.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),tr("Передать зашифрованные настройки")))
         }
-        text("Код переноса",18,true)
-        text("Сохраните его отдельно от ссылки или файла. После закрытия окна код этого переноса нельзя восстановить.")
+        text(tr("Код переноса"),18,true)
+        text(tr("Сохраните его отдельно от ссылки или файла. После закрытия окна код этого переноса нельзя восстановить."))
         if(showCode)text(exported.getString("code"),20,true).apply{typeface=Typeface.MONOSPACE;setTextIsSelectable(true);isSaveEnabled=false}
-        button(if(showCode)"Скрыть код" else "Показать код"){showCode=!showCode;render()}
-        button("Скопировать код"){copy(exported.getString("code"),"Код переноса")}
+        button(if(showCode)tr("Скрыть код") else tr("Показать код")){showCode=!showCode;render()}
+        button(tr("Скопировать код")){copy(exported.getString("code"),tr("Код переноса"))}
     }
     private fun copy(value:String,label:String){
         val clip=ClipData.newPlainText(label,value)
         if(android.os.Build.VERSION.SDK_INT>=33)clip.description.extras=android.os.PersistableBundle().apply{putBoolean(ClipDescription.EXTRA_IS_SENSITIVE,true)}
         (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(clip)
-        Toast.makeText(this,"Скопировано",Toast.LENGTH_SHORT).show()
+        Toast.makeText(this,tr("Скопировано"),Toast.LENGTH_SHORT).show()
     }
     private fun text(value:String,size:Int=14,bold:Boolean=false,color:Int=palette.text):TextView=TextView(this).apply{
         text=value;textSize=size.toFloat();setTextColor(color);if(bold)typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL)
@@ -196,7 +196,7 @@ class ProfileTransferActivity:Activity(){
         body.addView(Button(this).apply{
             text=title;isAllCaps=false;minimumHeight=dp(50);setTextColor(if(primary)palette.onAccent else palette.accent)
             background=palette.panel(if(primary)palette.accent else palette.raised,dp(14).toFloat());isEnabled=!session.busy
-            setOnClickListener{try{action()}catch(error:Exception){session.error=error.message?:"Операция недоступна";render()}}
+            setOnClickListener{try{action()}catch(error:Exception){session.error=error.message?:tr("Операция недоступна");render()}}
         },LinearLayout.LayoutParams(-1,-2).apply{topMargin=dp(12)})
     }
     private fun field(title:String,value:String,idValue:Int,code:Boolean,changed:(String)->Unit){
@@ -222,14 +222,14 @@ class ProfileTransferActivity:Activity(){
                 val output=java.io.ByteArrayOutputStream();val block=ByteArray(8192)
                 while(output.size()<=MAX_TRANSFER_BYTES){val count=stream.read(block);if(count<0)break;output.write(block,0,count)}
                 output.toByteArray()
-            }?:error("Не удалось открыть файл")
-            require(bytes.size<=MAX_TRANSFER_BYTES){"Файл больше 1 МБ"}
+            }?:error(tr("Не удалось открыть файл"))
+            require(bytes.size<=MAX_TRANSFER_BYTES){tr("Файл больше 1 МБ")}
             session.payload=bytes.toString(Charsets.UTF_8);session.preview=null
         }
         if(requestCode==202)session.work{
             val encrypted=requireNotNull(session.exported).getString("link")
-            contentResolver.openOutputStream(uri,"wt")?.use{it.write(encrypted.toByteArray(Charsets.UTF_8))}?:error("Не удалось сохранить файл")
-            session.notice="Зашифрованный файл сохранён"
+            contentResolver.openOutputStream(uri,"wt")?.use{it.write(encrypted.toByteArray(Charsets.UTF_8))}?:error(tr("Не удалось сохранить файл"))
+            session.notice=tr("Зашифрованный файл сохранён")
         }
     }
 }

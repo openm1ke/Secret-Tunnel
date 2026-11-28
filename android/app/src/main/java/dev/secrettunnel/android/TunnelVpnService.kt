@@ -2,6 +2,7 @@ package dev.secrettunnel.android
 
 import android.app.*
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
@@ -18,6 +19,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class TunnelVpnService : VpnService() {
+    private val languageChanged = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "language") main.post {
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(CHANNEL, tr("SSH-туннель"), NotificationManager.IMPORTANCE_LOW))
+            notifyState()
+        }
+    }
     companion object {
         private val packetEngineError by lazy {
             try {
@@ -267,9 +275,10 @@ class TunnelVpnService : VpnService() {
     }
     override fun onCreate() {
         super.onCreate()
+        getSharedPreferences("tunnel", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(languageChanged)
         connectivity.registerDefaultNetworkCallback(networkCallback,main)
         File(filesDir, "ssh-key.runtime").delete()
-        getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "SSH-туннель", NotificationManager.IMPORTANCE_LOW))
+        getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, tr("SSH-туннель"), NotificationManager.IMPORTANCE_LOW))
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") { stopAsync(); return START_NOT_STICKY }
@@ -455,7 +464,7 @@ class TunnelVpnService : VpnService() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 1, Intent(this, TunnelVpnService::class.java).setAction("STOP"), PendingIntent.FLAG_IMMUTABLE)
         val builder = Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("Secret Tunnel: $phase").setContentText(detail).setContentIntent(open)
+            .setContentTitle("Secret Tunnel: ${tr(phase)}").setContentText(tr(detail)).setContentIntent(open)
             .setStyle(Notification.BigTextStyle().bigText(detail)).setOngoing(true)
         if (protectedCount == 0) builder.addAction(Notification.Action.Builder(null, "Остановить", stop).build())
         return builder.build()
@@ -505,6 +514,7 @@ class TunnelVpnService : VpnService() {
     }
     override fun onRevoke() { stopAsync() }
     override fun onDestroy() {
+        getSharedPreferences("tunnel", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(languageChanged)
         runCatching{connectivity.unregisterNetworkCallback(networkCallback)}
         if (active && !stopping.get()) stopAsync()
         worker.shutdown()

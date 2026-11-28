@@ -40,7 +40,7 @@ final class SpeedCheck: ObservableObject {
                         let status = jsonObject(RustCore.status())
                         guard (status["rx"] as? NSNumber)?.intValue ?? 0 >= 2_000_000,
                               (status["tx"] as? NSNumber)?.intValue ?? 0 >= 1_000_000 else {
-                            throw CheckError(message: "Счётчики SSH не подтвердили передачу тестовых данных.")
+                            throw CheckError(message: tr("Счётчики SSH не подтвердили передачу тестовых данных."))
                         }
                     }
                     return result
@@ -54,7 +54,7 @@ final class SpeedCheck: ObservableObject {
     @available(iOS 17.0, *)
     private nonisolated static func measure(port: Int) async throws -> Result {
         guard let value = UInt16(exactly: port), let proxyPort = NWEndpoint.Port(rawValue: value) else {
-            throw CheckError(message: "Некорректный порт SOCKS5.")
+            throw CheckError(message: tr("Некорректный порт SOCKS5."))
         }
         let settings = URLSessionConfiguration.ephemeral
         var proxy = ProxyConfiguration(socksv5Proxy: .hostPort(host: "::1", port: proxyPort))
@@ -72,7 +72,7 @@ final class SpeedCheck: ObservableObject {
         )
         try validate(downloadResponse)
         guard download.count == 2_000_000 else {
-            throw CheckError(message: "Сервер вернул неполный объём данных.")
+            throw CheckError(message: tr("Сервер вернул неполный объём данных."))
         }
         let down = rate(download.count, startedDownload.duration(to: clock.now))
         var upload = URLRequest(url: URL(string: "https://speed.cloudflare.com/__up")!)
@@ -87,10 +87,10 @@ final class SpeedCheck: ObservableObject {
 
     private nonisolated static func validate(_ response: URLResponse) throws {
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
-            throw CheckError(message: "Сервер не ответил на тест скорости.")
+            throw CheckError(message: tr("Сервер не ответил на тест скорости."))
         }
         guard (200...299).contains(status) else {
-            throw CheckError(message: "Сервер теста скорости вернул HTTP \(status).")
+            throw CheckError(message: tr("Сервер теста скорости вернул HTTP {0}.", status))
         }
     }
 

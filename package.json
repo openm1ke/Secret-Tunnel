@@ -1,11 +1,12 @@
 {
   "name": "secret-tunnel",
-  "version": "0.3.37",
+  "version": "0.3.38",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:localization": "python3 scripts/check-localization.py && node scripts/test-localization.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

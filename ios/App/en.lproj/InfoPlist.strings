@@ -1,0 +1,2 @@
+"NSLocalNetworkUsageDescription" = "Connect to your SSH server on the local network.";
+"NSCameraUsageDescription" = "Scan a QR code containing your encrypted SSH server settings.";

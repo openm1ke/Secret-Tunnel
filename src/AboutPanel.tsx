@@ -1,3 +1,4 @@
+import { t, translateMessage, formatLocale, getLanguage } from "./i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { marked } from "marked";
@@ -6,6 +7,7 @@ import { Download, ExternalLink, RefreshCcw, Search, Server } from "lucide-react
 import bundledMac from "../docs/help/setup-macos.md?raw";
 import bundledWindows from "../docs/help/setup-windows.md?raw";
 import bundledKnowledge from "../docs/help/knowledge.md?raw";
+import englishHelp from "../docs/help/knowledge.en.md?raw";
 
 export type Release = {
   version: string; current: string; newer: boolean; notes: string; page: string; published_at: string;
@@ -23,7 +25,7 @@ type Doc = "setup" | "knowledge";
 export const openExternal = (url: string) => invoke("open_external", { url }).catch(() => undefined);
 
 function formatSize(bytes: number) {
-  return bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} МБ` : `${Math.max(1, Math.round(bytes / 1024))} КБ`;
+  return bytes >= 1048576 ? t("{0} МБ", (bytes / 1048576).toFixed(1)) : t("{0} КБ", Math.max(1, Math.round(bytes / 1024)));
 }
 
 /** Markdown from GitHub or the app itself, cleaned before it reaches the page. */
@@ -74,11 +76,11 @@ function MarkdownView({ source, query, onShown }: { source: string; query: strin
       const button = document.createElement("button");
       button.type = "button";
       button.className = "copyCode";
-      button.textContent = "Копировать";
+      button.textContent = t("Копировать");
       button.addEventListener("click", () => {
         navigator.clipboard?.writeText(code.textContent ?? "").then(() => {
-          button.textContent = "Скопировано";
-          window.setTimeout(() => { button.textContent = "Копировать"; }, 1500);
+          button.textContent = t("Скопировано");
+          window.setTimeout(() => { button.textContent = t("Копировать"); }, 1500);
         }).catch(() => undefined);
       });
       code.parentElement!.classList.add("hasCopy");
@@ -130,7 +132,8 @@ export default function AboutPanel({ platform, version, checkUpdates, onCheckUpd
   const [query, setQuery] = useState("");
   const [found, setFound] = useState(-1);
   const windows = platform === "windows";
-  const bundled: Record<Doc, string> = { setup: windows ? bundledWindows : bundledMac, knowledge: bundledKnowledge };
+  const english = getLanguage() === "en";
+  const bundled: Record<Doc, string> = { setup: english ? englishHelp : windows ? bundledWindows : bundledMac, knowledge: english ? englishHelp : bundledKnowledge };
   const [docs, setDocs] = useState<Record<Doc, { text: string; online: boolean }>>({
     setup: { text: bundled.setup, online: false }, knowledge: { text: bundled.knowledge, online: false },
   });
@@ -139,14 +142,17 @@ export default function AboutPanel({ platform, version, checkUpdates, onCheckUpd
 
   // The latest help from the repository; the shipped copy stays if it fails.
   useEffect(() => {
-    const files: Record<Doc, string> = { setup: windows ? "setup-windows.md" : "setup-macos.md", knowledge: "knowledge.md" };
+    setDocs({ setup: { text: bundled.setup, online: false }, knowledge: { text: bundled.knowledge, online: false } });
+    let active = true;
+    const files: Record<Doc, string> = { setup: english ? "knowledge.en.md" : windows ? "setup-windows.md" : "setup-macos.md", knowledge: english ? "knowledge.en.md" : "knowledge.md" };
     (Object.keys(files) as Doc[]).forEach((key) => {
       fetch(RAW + files[key], { cache: "no-cache" })
         .then((response) => (response.ok ? response.text() : Promise.reject()))
-        .then((text) => setDocs((current) => ({ ...current, [key]: { text, online: true } })))
+        .then((text) => { if (active) setDocs((current) => ({ ...current, [key]: { text, online: true } })); })
         .catch(() => undefined);
     });
-  }, [windows]);
+    return () => { active = false; };
+  }, [windows, english]);
 
   // Progress of a running download.
   useEffect(() => {
@@ -196,13 +202,13 @@ export default function AboutPanel({ platform, version, checkUpdates, onCheckUpd
 
   async function agentCheck(update: boolean) {
     if (!agentServer) return;
-    setAgent({ state: "busy", text: update ? "Скачиваем агент, сверяем контрольную сумму и устанавливаем на сервер…" : "Подключаемся к серверу…" });
+    setAgent({ state: "busy", text: update ? t("Скачиваем агент, сверяем контрольную сумму и устанавливаем на сервер…") : t("Подключаемся к серверу…") });
     try {
       const found = await invoke<string>(update ? "update_agent" : "agent_version", { serverId: agentServer });
       const installed = /^\d+\.\d+\.\d+$/.test(found) ? found : "";
       setAgent({ state: "ok", version: installed,
-        text: update ? `Установлен агент ${found}. Новые подключения используют его.`
-          : !installed ? "Агент на сервере не найден." : installed === version ? `Агент ${installed} — та же версия, что у приложения.` : `На сервере агент ${installed}, приложение ${version}.` });
+        text: update ? t("Установлен агент {0}. Новые подключения используют его.", found)
+          : !installed ? t("Агент на сервере не найден.") : installed === version ? t("Агент {0} — та же версия, что у приложения.", installed) : t("На сервере агент {0}, приложение {1}.", installed, version) });
     } catch (problem) {
       setAgent({ state: "error", text: String(problem) });
     }
@@ -216,84 +222,84 @@ export default function AboutPanel({ platform, version, checkUpdates, onCheckUpd
       <section className="panel aboutHead">
         <div className="aboutTitle">
           <h2>Secret Tunnel</h2>
-          <span className="chip">Версия {version}</span>
+          <span className="chip">{t("Версия ")}{version}</span>
         </div>
-        <p className="panelIntro">Туннель для выбранных программ через ваш SSH-сервер. Открытый исходный код.</p>
+        <p className="panelIntro">{t("Туннель для выбранных программ через ваш SSH-сервер. Открытый исходный код.")}</p>
         <div className="aboutLinks">
-          <button className="ghost" onClick={() => openExternal(SITE)}><ExternalLink size={14} />Сайт</button>
+          <button className="ghost" onClick={() => openExternal(SITE)}><ExternalLink size={14} />{t("Сайт")}</button>
           <button className="ghost" onClick={() => openExternal("https://github.com/openm1ke/Secret-Tunnel")}><ExternalLink size={14} />GitHub</button>
-          <button className="ghost" onClick={() => openExternal("https://github.com/openm1ke/Secret-Tunnel/releases")}><ExternalLink size={14} />Все релизы</button>
-          <button className="ghost" onClick={() => openExternal("https://github.com/openm1ke/Secret-Tunnel/issues")}><ExternalLink size={14} />Сообщить о проблеме</button>
+          <button className="ghost" onClick={() => openExternal("https://github.com/openm1ke/Secret-Tunnel/releases")}><ExternalLink size={14} />{t("Все релизы")}</button>
+          <button className="ghost" onClick={() => openExternal("https://github.com/openm1ke/Secret-Tunnel/issues")}><ExternalLink size={14} />{t("Сообщить о проблеме")}</button>
         </div>
       </section>
 
       <div className="aboutColumns">
         <section className="panel">
-          <header className="panelHead"><h2>Обновления</h2>
-            <button disabled={checking || download?.running} onClick={check}><RefreshCcw size={15} />{checking ? "Проверяем…" : "Проверить"}</button>
+          <header className="panelHead"><h2>{t("Обновления")}</h2>
+            <button disabled={checking || download?.running} onClick={check}><RefreshCcw size={15} />{checking ? t("Проверяем…") : t("Проверить")}</button>
           </header>
-          {!release && !error && <p className="fieldNote">Нажмите «Проверить», чтобы узнать, есть ли новая версия.</p>}
-          {release && !release.newer && <p className="updateLine ok">Установлена последняя версия {release.current}.</p>}
+          {!release && !error && <p className="fieldNote">{t("Нажмите «Проверить», чтобы узнать, есть ли новая версия.")}</p>}
+          {release && !release.newer && <p className="updateLine ok">{t("Установлена последняя версия ")}{release.current}.</p>}
           {release?.newer && (
             <div className="updateBox">
-              <p className="updateLine"><strong>Доступна версия {release.version}</strong>{release.published_at && ` · ${new Date(release.published_at).toLocaleDateString("ru-RU")}`}{release.app && ` · ${formatSize(release.app.size)}`}</p>
+              <p className="updateLine"><strong>{t("Доступна версия ")}{release.version}</strong>{release.published_at && ` · ${new Date(release.published_at).toLocaleDateString(formatLocale())}`}{release.app && ` · ${formatSize(release.app.size)}`}</p>
               {release.notes && (
-                <details className="advanced"><summary>Что нового</summary><MarkdownView source={release.notes} query="" /></details>
+                <details className="advanced"><summary>{t("Что нового")}</summary><MarkdownView source={release.notes} query="" /></details>
               )}
               {!release.app || !release.installable ? (
                 <>
-                  <p className="fieldNote">{!release.app ? "Для этой системы в релизе нет сборки." : windows ? "Это портативная версия: замените папку программы новым архивом." : "Обновление работает в установленном приложении."}</p>
-                  <button className="primary" onClick={() => openExternal(release.page)}><ExternalLink size={15} />Открыть страницу релиза</button>
+                  <p className="fieldNote">{!release.app ? t("Для этой системы в релизе нет сборки.") : windows ? t("Это портативная версия: замените папку программы новым архивом.") : t("Обновление работает в установленном приложении.")}</p>
+                  <button className="primary" onClick={() => openExternal(release.page)}><ExternalLink size={15} />{t("Открыть страницу релиза")}</button>
                 </>
               ) : download?.ready && download.version === release.version ? (
                 <>
-                  <p className="fieldNote">Скачано, контрольная сумма совпала. Приложение закроется, {windows ? "установщик обновит его" : "новая версия заменит текущую"} и запустится снова. Туннель переподключится, если включено «Подключаться при запуске».</p>
-                  <button className="primary" disabled={installing} onClick={install}><Download size={15} />{installing ? "Устанавливаем…" : "Установить и перезапустить"}</button>
+                  <p className="fieldNote">{t("Скачано, контрольная сумма совпала. Приложение закроется, ")}{windows ? t("установщик обновит его") : t("новая версия заменит текущую")} {t(" и запустится снова. Туннель переподключится, если включено «Подключаться при запуске».")}</p>
+                  <button className="primary" disabled={installing} onClick={install}><Download size={15} />{installing ? t("Устанавливаем…") : t("Установить и перезапустить")}</button>
                 </>
               ) : download?.running ? (
                 <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
                   <span style={{ width: `${progress * 100}%` }} />
-                  <small>Скачиваем {formatSize(download.received)} из {formatSize(download.total)}</small>
+                  <small>{t("Скачиваем ")}{formatSize(download.received)} {t(" из ")}{formatSize(download.total)}</small>
                 </div>
               ) : (
-                <button className="primary" onClick={startDownload}><Download size={15} />Скачать обновление</button>
+                <button className="primary" onClick={startDownload}><Download size={15} />{t("Скачать обновление")}</button>
               )}
             </div>
           )}
-          {(error || download?.error) && <p className="updateLine bad">{error || download?.error}</p>}
-          <label className="checkboxLine"><input type="checkbox" checked={checkUpdates} onChange={(event) => onCheckUpdates(event.target.checked)} />Проверять обновления при запуске</label>
-          <p className="fieldNote">Приложение спрашивает GitHub о последнем релизе. Файлы скачиваются только с вашего согласия и проверяются по SHA256 из релиза.</p>
+          {(error || download?.error) && <p className="updateLine bad">{translateMessage(error || download?.error || "")}</p>}
+          <label className="checkboxLine"><input type="checkbox" checked={checkUpdates} onChange={(event) => onCheckUpdates(event.target.checked)} />{t("Проверять обновления при запуске")}</label>
+          <p className="fieldNote">{t("Приложение спрашивает GitHub о последнем релизе. Файлы скачиваются только с вашего согласия и проверяются по SHA256 из релиза.")}</p>
         </section>
 
         <section className="panel">
-          <header className="panelHead"><h2>Агент на сервере</h2></header>
-          <p className="fieldNote">Агент должен быть той же версии, что приложение. Обновление скачивается здесь, проверяется по SHA256 и передаётся на сервер по SSH — серверу не нужен доступ к GitHub.</p>
-          <label><span>Сервер</span>
+          <header className="panelHead"><h2>{t("Агент на сервере")}</h2></header>
+          <p className="fieldNote">{t("Агент должен быть той же версии, что приложение. Обновление скачивается здесь, проверяется по SHA256 и передаётся на сервер по SSH — серверу не нужен доступ к GitHub.")}</p>
+          <label><span>{t("Сервер")}</span>
             <select value={agentServer} disabled={agent.state === "busy"} onChange={(event) => { setAgentServer(event.target.value); setAgent({ state: "idle", text: "" }); }}>
               {servers.map((server) => <option key={server.id} value={server.id}>{server.name}</option>)}
             </select>
           </label>
           <div className="actions">
-            <button disabled={!agentServer || agent.state === "busy"} onClick={() => agentCheck(false)}><Server size={15} />Проверить версию</button>
-            <button className={agentMatches ? undefined : "primary"} disabled={!agentServer || agent.state === "busy" || version === "—"} onClick={() => agentCheck(true)}><Download size={15} />{agentMatches ? "Переустановить агент" : `Установить агент ${version}`}</button>
+            <button disabled={!agentServer || agent.state === "busy"} onClick={() => agentCheck(false)}><Server size={15} />{t("Проверить версию")}</button>
+            <button className={agentMatches ? undefined : "primary"} disabled={!agentServer || agent.state === "busy" || version === "—"} onClick={() => agentCheck(true)}><Download size={15} />{agentMatches ? t("Переустановить агент") : t("Установить агент {0}", version)}</button>
           </div>
-          {agent.state !== "idle" && <div className={`checkResult ${agent.state === "busy" ? "running" : agent.state}`}><strong>{agent.state === "busy" ? "Работаем…" : agent.state === "ok" ? "Готово" : "Не получилось"}</strong><span>{agent.text}</span></div>}
+          {agent.state !== "idle" && <div className={`checkResult ${agent.state === "busy" ? "running" : agent.state}`}><strong>{agent.state === "busy" ? t("Работаем…") : agent.state === "ok" ? t("Готово") : t("Не получилось")}</strong><span>{translateMessage(agent.text)}</span></div>}
         </section>
       </div>
 
       <section className="panel help">
         <header className="panelHead">
-          <div className="segmented" role="group" aria-label="Справка">
-            <button className={doc === "setup" ? "on" : ""} onClick={() => { setDoc("setup"); setQuery(""); }}>Установка</button>
-            <button className={doc === "knowledge" ? "on" : ""} onClick={() => { setDoc("knowledge"); setQuery(""); }}>База знаний</button>
+          <div className="segmented" role="group" aria-label={t("Справка")}>
+            <button className={doc === "setup" ? "on" : ""} onClick={() => { setDoc("setup"); setQuery(""); }}>{t("Установка")}</button>
+            <button className={doc === "knowledge" ? "on" : ""} onClick={() => { setDoc("knowledge"); setQuery(""); }}>{t("База знаний")}</button>
           </div>
           <label className="search helpSearch"><Search size={15} />
-            <input aria-label="Поиск по справке" placeholder="Поиск: ключ, порт, Discord…" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <input aria-label={t("Поиск по справке")} placeholder={t("Поиск: ключ, порт, Discord…")} value={query} onChange={(event) => setQuery(event.target.value)} />
           </label>
-          <small className="helpSource">{docs[doc].online ? "Свежая версия с GitHub" : "Копия, встроенная в приложение"}</small>
+          <small className="helpSource">{docs[doc].online ? t("Свежая версия с GitHub") : t("Копия, встроенная в приложение")}</small>
         </header>
         <MarkdownView source={docs[doc].text} query={query} onShown={setFound} />
-        {found === 0 && <p className="emptyHint helpNothing">Ничего не нашлось. Попробуйте другое слово или откройте <button className="linkButton" onClick={() => openExternal(SITE + (doc === "setup" ? "guide.html" : "knowledge.html"))}>страницу на сайте</button>.</p>}
+        {found === 0 && <p className="emptyHint helpNothing">{t("Ничего не нашлось. Попробуйте другое слово или откройте ")}<button className="linkButton" onClick={() => openExternal(SITE + (doc === "setup" ? "guide.html" : "knowledge.html"))}>{t("страницу на сайте")}</button>.</p>}
       </section>
     </div>
   );

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.38 — 2026-11-28
+
+- Add English alongside Russian on desktop, Android and Android TV, with a shared translation catalog. Choose the language under Settings → Appearance → Language; Russian remains the default.
+- Remember the language on each device and switch the interface without restarting the tunnel. Translate the desktop tray menu and Android VPN notifications while preserving server names, application names and SSH connection settings.
+- Localize the connection wizard, hosting catalog, server transfer, connection checks, statistics, speed tests and common errors. Include an English offline help document and update the Russian setup guide and its settings screenshot.
+- Keep network state identifiers and statistics categories independent of display language. Verify interpolation, unchanged user-provided arguments, language persistence and Android's stricter ICU regular expressions with shared-catalog and device tests.
+- Update the experimental iOS interface and native permission descriptions with Russian and English resources. Validate the interface and localization in the iPad simulator; iOS is not included in public release artifacts.
+
 ## 0.3.37 — 2026-11-28
 
 - Add a dedicated hosting catalog to desktop, Android and Android TV, with country flags, monthly prices, hardware, traffic conditions and provider links. The experimental iOS client includes layouts for iPhone and iPad.

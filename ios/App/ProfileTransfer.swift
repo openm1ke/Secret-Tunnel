@@ -8,7 +8,7 @@ struct EncryptedProfileFile: FileDocument {
     let text: String
     init(text: String) { self.text = text }
     init(configuration: ReadConfiguration) throws {
-        guard let data = configuration.file.regularFileContents, data.count <= 1_048_576 else { throw ProfileTransferFailure("Файл больше 1 МБ.") }
+        guard let data = configuration.file.regularFileContents, data.count <= 1_048_576 else { throw ProfileTransferFailure(tr("Файл больше 1 МБ.")) }
         text = String(decoding: data, as: UTF8.self)
     }
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: Data(text.utf8)) }
@@ -28,7 +28,7 @@ struct EncryptedProfileFile: FileDocument {
     private func result(_ raw: String) throws -> [String: Any] {
         let value = jsonObject(raw)
         if let error = value["error"] as? String { throw ProfileTransferFailure(error) }
-        guard !value.isEmpty else { throw ProfileTransferFailure("Не удалось прочитать настройки.") }
+        guard !value.isEmpty else { throw ProfileTransferFailure(tr("Не удалось прочитать настройки.")) }
         return value
     }
     func prepare(ids: [String]) async {
@@ -66,9 +66,9 @@ struct EncryptedProfileFile: FileDocument {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size > 0, size <= 1_048_576 else { throw ProfileTransferFailure("Файл пустой или больше 1 МБ.") }
+                guard size > 0, size <= 1_048_576 else { throw ProfileTransferFailure(tr("Файл пустой или больше 1 МБ.")) }
                 let data = try Data(contentsOf: url)
-                guard data.count <= 1_048_576 else { throw ProfileTransferFailure("Файл больше 1 МБ.") }
+                guard data.count <= 1_048_576 else { throw ProfileTransferFailure(tr("Файл больше 1 МБ.")) }
                 return String(decoding: data, as: UTF8.self)
             }.value
         } catch { self.error = error.localizedDescription }
@@ -103,13 +103,13 @@ struct ProfileTransferView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text(serverID == nil ? "Импортировать серверы" : "Поделиться серверами").font(.title2.weight(.semibold))
-                    Spacer(); Button("Закрыть") { dismiss() }.disabled(model.busy)
+                    Text(serverID == nil ? tr("Импортировать серверы") : tr("Поделиться серверами")).font(.title2.weight(.semibold))
+                    Spacer(); Button(tr("Закрыть")) { dismiss() }.disabled(model.busy)
                 }
                 if let id = serverID { exportUI(id: id) } else { importUI }
-                if model.busy { ProgressView("Обрабатываем настройки…").tint(palette.accent) }
-                if !model.error.isEmpty { Text(model.error).foregroundColor(palette.error).accessibilityIdentifier("transfer.error") }
-                if !model.notice.isEmpty { Text(model.notice).foregroundColor(palette.muted) }
+                if model.busy { ProgressView(tr("Обрабатываем настройки…")).tint(palette.accent) }
+                if !model.error.isEmpty { Text(tr(model.error)).foregroundColor(palette.error).accessibilityIdentifier("transfer.error") }
+                if !model.notice.isEmpty { Text(tr(model.notice)).foregroundColor(palette.muted) }
             }
             .padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
         }
@@ -124,61 +124,61 @@ struct ProfileTransferView: View {
             if case let .success(url) = result { Task { await model.readFile(url) } }
         }
         .fileExporter(isPresented: $exporting, document: EncryptedProfileFile(text: model.link), contentType: .secretTunnelProfile, defaultFilename: "SecretTunnel-servers") { result in
-            switch result { case .success: model.notice = "Зашифрованный файл сохранён"; case let .failure(error): model.error = error.localizedDescription }
+            switch result { case .success: model.notice = tr("Зашифрованный файл сохранён"); case let .failure(error): model.error = error.localizedDescription }
         }
     }
     @ViewBuilder private var importUI: some View {
         if model.done {
-            Label("Серверы добавлены", systemImage: "checkmark.shield.fill").font(.title3.weight(.semibold))
-            Text("Существующие подключения сохранены. Выберите нужный сервер и проверьте соединение.")
-            button("Готово", primary: true) { dismiss() }
+            Label(tr("Серверы добавлены"), systemImage: "checkmark.shield.fill").font(.title3.weight(.semibold))
+            Text(tr("Существующие подключения сохранены. Выберите нужный сервер и проверьте соединение."))
+            button(tr("Готово"), primary: true) { dismiss() }
         } else if !canChange {
-            Text("Сначала остановите туннель, чтобы добавить серверы.")
+            Text(tr("Сначала остановите туннель, чтобы добавить серверы."))
         } else if let servers = model.preview {
-            Text("Будут добавлены серверы").font(.title3.weight(.semibold))
+            Text(tr("Будут добавлены серверы")).font(.title3.weight(.semibold))
             ForEach(Array(servers.enumerated()), id: \.offset) { _, server in
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(server["name"] as? String ?? "Сервер").font(.headline)
+                    Text(server["name"] as? String ?? tr("Сервер")).font(.headline)
                     Text("\(server["user"] as? String ?? "")@\(server["host"] as? String ?? ""):\(server["port"] as? Int ?? 22)").font(.footnote)
                     if let jump = server["jump_id"] as? String, let parent = servers.first(where: { $0["id"] as? String == jump }) {
-                        Text("Через \(parent["name"] as? String ?? "сервер")").font(.footnote)
+                        Text(tr("Через {0}", parent["name"] as? String ?? tr("сервер"))).font(.footnote)
                     }
                 }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(RoundedRectangle(cornerRadius: 14).fill(palette.surface))
             }
-            Text("Добавляйте только настройки от доверенного отправителя. Существующие серверы не будут заменены.").font(.footnote).foregroundColor(palette.muted)
-            button("Добавить серверы", primary: true) { Task { await model.importProfiles() } }
-            button("Назад") { model.back() }
+            Text(tr("Добавляйте только настройки от доверенного отправителя. Существующие серверы не будут заменены.")).font(.footnote).foregroundColor(palette.muted)
+            button(tr("Добавить серверы"), primary: true) { Task { await model.importProfiles() } }
+            button(tr("Назад")) { model.back() }
         } else {
-            Text("Вставьте ссылку или откройте файл .stprofile. Код переноса получите у отправителя отдельно.")
-            if !controller.simulator { button("Сканировать QR-код", primary: true) { scanning = true } }
-            button("Открыть файл") { importing = true }
-            Text("Ссылка переноса").font(.subheadline.weight(.semibold))
+            Text(tr("Вставьте ссылку или откройте файл .stprofile. Код переноса получите у отправителя отдельно."))
+            if !controller.simulator { button(tr("Сканировать QR-код"), primary: true) { scanning = true } }
+            button(tr("Открыть файл")) { importing = true }
+            Text(tr("Ссылка переноса")).font(.subheadline.weight(.semibold))
             TextEditor(text: $model.payload).frame(minHeight: 96, maxHeight: 160).disableAutocorrection(true)
-                .textInputAutocapitalization(.never).accessibilityLabel("Ссылка переноса").disabled(model.busy)
-                .onChange(of: model.payload) { if $0.utf8.count > 1_048_576 { model.payload = ""; model.error = "Ссылка больше 1 МБ." } }
-            Text("Код переноса").font(.subheadline.weight(.semibold))
+                .textInputAutocapitalization(.never).accessibilityLabel(tr("Ссылка переноса")).disabled(model.busy)
+                .onChange(of: model.payload) { if $0.utf8.count > 1_048_576 { model.payload = ""; model.error = tr("Ссылка больше 1 МБ.") } }
+            Text(tr("Код переноса")).font(.subheadline.weight(.semibold))
             TextField("ABCD-EFGH-JKLM-NPQR-STUV", text: $model.code).textInputAutocapitalization(.characters)
                 .disableAutocorrection(true).font(.system(.body, design: .monospaced)).padding(12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(palette.surface)).disabled(model.busy)
-            button("Расшифровать и проверить", primary: true) { Task { await model.unlock() } }.disabled(model.payload.isEmpty || model.code.isEmpty)
+            button(tr("Расшифровать и проверить"), primary: true) { Task { await model.unlock() } }.disabled(model.payload.isEmpty || model.code.isEmpty)
         }
     }
     @ViewBuilder private func exportUI(id: String) -> some View {
         if model.exported == nil {
-            Text("Подключение включает ключ доступа. Получатель сможет войти на ваш сервер.")
-            Toggle("Все настроенные серверы", isOn: $all).disabled(model.busy)
-            Text("Промежуточные серверы цепочки добавятся автоматически. Код переноса передайте отдельно.").font(.footnote).foregroundColor(palette.muted)
-            button("Подготовить перенос", primary: true) { Task { await model.prepare(ids: all ? configuredIDs : [id]) } }
+            Text(tr("Подключение включает ключ доступа. Получатель сможет войти на ваш сервер."))
+            Toggle(tr("Все настроенные серверы"), isOn: $all).disabled(model.busy)
+            Text(tr("Промежуточные серверы цепочки добавятся автоматически. Код переноса передайте отдельно.")).font(.footnote).foregroundColor(palette.muted)
+            button(tr("Подготовить перенос"), primary: true) { Task { await model.prepare(ids: all ? configuredIDs : [id]) } }
         } else {
             if let qr { Image(uiImage: qr).interpolation(.none).resizable().scaledToFit().frame(maxWidth: 320).padding(16).background(Color.white).frame(maxWidth: .infinity) }
-            else { Text("Настройки слишком велики для QR-кода. Передайте ссылку или файл.") }
-            button("Скопировать ссылку") { UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: model.link]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]); model.notice = "Ссылка скопирована" }
-            button("Сохранить файл", primary: true) { exporting = true }
-            Text("Код переноса").font(.headline)
-            Text("Сохраните его отдельно от ссылки или файла. После закрытия окна код этого переноса нельзя восстановить.").font(.footnote).foregroundColor(palette.muted)
+            else { Text(tr("Настройки слишком велики для QR-кода. Передайте ссылку или файл.")) }
+            button(tr("Скопировать ссылку")) { UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: model.link]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]); model.notice = tr("Ссылка скопирована") }
+            button(tr("Сохранить файл"), primary: true) { exporting = true }
+            Text(tr("Код переноса")).font(.headline)
+            Text(tr("Сохраните его отдельно от ссылки или файла. После закрытия окна код этого переноса нельзя восстановить.")).font(.footnote).foregroundColor(palette.muted)
             if showCode { Text(model.transferCode).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
-            button(showCode ? "Скрыть код" : "Показать код") { showCode.toggle() }
-            button("Скопировать код") { UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: model.transferCode]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]); model.notice = "Код переноса скопирован" }
+            button(showCode ? tr("Скрыть код") : tr("Показать код")) { showCode.toggle() }
+            button(tr("Скопировать код")) { UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: model.transferCode]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]); model.notice = tr("Код переноса скопирован") }
         }
     }
     private func button(_ title: String, primary: Bool = false, action: @escaping () -> Void) -> some View {

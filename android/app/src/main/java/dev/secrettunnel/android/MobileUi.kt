@@ -8,10 +8,12 @@ import android.view.View
 import kotlin.math.max
 import java.util.Locale
 
-internal enum class Appearance(val label: String) {
+internal enum class Appearance(private val labelKey: String) {
     SYSTEM("Системная"),
     LIGHT("Светлая"),
     DARK("Тёмная");
+
+    val label: String get() = tr(labelKey)
 
     fun isDark(configuration: Configuration): Boolean = when (this) {
         SYSTEM -> configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
@@ -105,7 +107,7 @@ internal class NetworkChart(context: Context, private val palette: Palette) : Vi
         val left=4*density;val right=width-4*density;val top=24*density;val bottom=height-22*density
         val peak=points.maxOfOrNull{max(it.rate.down,it.rate.up)}?.coerceAtLeast(1024.0)?:1024.0
         paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=palette.muted
-        canvas.drawText(TrafficMeter.bytes(peak)+"/с",left,13*density,paint)
+        canvas.drawText(TrafficMeter.bytes(peak)+tr("/с"),left,13*density,paint)
         paint.color=palette.border;paint.strokeWidth=density
         for(i in 0..2){val y=top+(bottom-top)*i/2;canvas.drawLine(left,y,right,y,paint)}
         fun line(down:Boolean,color:Int) {
@@ -124,9 +126,9 @@ internal class NetworkChart(context: Context, private val palette: Palette) : Vi
         paint.style=Paint.Style.FILL;paint.textSize=10*density;paint.color=palette.muted
         if(points.isNotEmpty()) {
             val elapsed=(window.end-window.start)/1000
-            val label=if(elapsed>=60) "−${elapsed/60} мин ${elapsed%60} с" else "−$elapsed с"
+            val label=if(elapsed>=60) tr("−{0} мин {1} с", elapsed/60, elapsed%60) else tr("−{0} с", elapsed)
             canvas.drawText(label,left,height-3*density,paint)
-            canvas.drawText("Последний замер",right-paint.measureText("Последний замер"),height-3*density,paint)
+            canvas.drawText(tr("Последний замер"),right-paint.measureText(tr("Последний замер")),height-3*density,paint)
         }
     }
 }

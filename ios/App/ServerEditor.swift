@@ -26,25 +26,25 @@ struct ServerEditor: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Сервер SSH").font(.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
-                field("Адрес", text: $host, keyboard: .URL)
-                field("Порт", text: $port, keyboard: .numberPad)
-                field("Пользователь", text: $user)
-                Picker("Подключаться через", selection: $jumpID) {
-                    Text("Напрямую").tag("")
+                Text(tr("Сервер SSH")).font(.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                field(tr("Адрес"), text: $host, keyboard: .URL)
+                field(tr("Порт"), text: $port, keyboard: .numberPad)
+                field(tr("Пользователь"), text: $user)
+                Picker(tr("Подключаться через"), selection: $jumpID) {
+                    Text(tr("Напрямую")).tag("")
                     ForEach(Shared.profiles.filter { $0.id != Shared.selectedProfile?.id }) { profile in Text(profile.name).tag(profile.id) }
                 }
                 if !controller.message.isEmpty {
                     Text(controller.message).font(.footnote).foregroundColor(palette.muted)
                 }
-                Button("Сохранить") {
+                Button(tr("Сохранить")) {
                     if let port = Int(port), controller.editServer(host: host, port: port, user: user, jumpID: jumpID.isEmpty ? nil : jumpID) {
                         dismiss()
                     }
                 }
                 .buttonStyle(MobileButtonStyle(palette: palette, primary: true))
                 .disabled(!isValid)
-                Button("Отмена") { dismiss() }
+                Button(tr("Отмена")) { dismiss() }
                     .buttonStyle(MobileButtonStyle(palette: palette))
             }
             .padding(20)
@@ -84,20 +84,20 @@ struct ProxyEditor: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Локальный порт SOCKS5").font(.title2.weight(.semibold))
-                TextField("Порт", text: $port)
+                Text(tr("Локальный порт SOCKS5")).font(.title2.weight(.semibold))
+                TextField(tr("Порт"), text: $port)
                     .keyboardType(.numberPad)
                     .textFieldStyle(.roundedBorder)
-                Text("От 1024 до 65535").font(.footnote).foregroundColor(palette.muted)
+                Text(tr("От 1024 до 65535")).font(.footnote).foregroundColor(palette.muted)
                 if !controller.message.isEmpty {
                     Text(controller.message).font(.footnote).foregroundColor(palette.muted)
                 }
-                Button("Сохранить") {
+                Button(tr("Сохранить")) {
                     if let port = Int(port), controller.setSocksPort(port) { dismiss() }
                 }
                 .buttonStyle(MobileButtonStyle(palette: palette, primary: true))
                 .disabled(!(1024...65535).contains(Int(port) ?? 0))
-                Button("Отмена") { dismiss() }
+                Button(tr("Отмена")) { dismiss() }
                     .buttonStyle(MobileButtonStyle(palette: palette))
             }
             .padding(20)

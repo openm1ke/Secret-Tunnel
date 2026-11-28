@@ -78,7 +78,7 @@ final class TunnelController: ObservableObject {
         let host = host.trimmingCharacters(in: .whitespaces)
         let user = user.trimmingCharacters(in: .whitespaces)
         guard !host.isEmpty, !user.isEmpty, (1...65535).contains(port) else {
-            message = "Укажите адрес, пользователя и порт от 1 до 65535."
+            message = tr("Укажите адрес, пользователя и порт от 1 до 65535.")
             return false
         }
         var updated = settings
@@ -125,7 +125,7 @@ final class TunnelController: ObservableObject {
         do {
             try Shared.storeKey(from: url)
             hasKey = true
-            message = "Ключ импортирован"
+            message = tr("Ключ импортирован")
         } catch {
             message = error.localizedDescription
         }
@@ -137,16 +137,16 @@ final class TunnelController: ObservableObject {
         pendingFingerprint = ""
         guard let config = checkedRuntimeConfig() else { return }
         busy = true
-        message = "Получаем ключ сервера…"
+        message = tr("Получаем ключ сервера…")
         Task.detached {
             let result = jsonObject(RustCore.probe(config))
             await MainActor.run {
                 self.busy = false
                 if let pin = result["fingerprint"] as? String {
                     self.pendingFingerprint = pin
-                    self.message = "Сверьте отпечаток с сервером и подтвердите"
+                    self.message = tr("Сверьте отпечаток с сервером и подтвердите")
                 } else {
-                    self.message = result["error"] as? String ?? "Не удалось получить ключ"
+                    self.message = result["error"] as? String ?? tr("Не удалось получить ключ")
                 }
             }
         }
@@ -159,7 +159,7 @@ final class TunnelController: ObservableObject {
         guard saveSettings(confirmed) else { return }
         settings = confirmed
         pendingFingerprint = ""
-        message = "Отпечаток сохранён"
+        message = tr("Отпечаток сохранён")
     }
 
     /// Logs in from the app (not through the VPN) and checks the server agent.
@@ -167,15 +167,15 @@ final class TunnelController: ObservableObject {
         guard isConfigured, !busy else { return }
         guard let config = checkedRuntimeConfig() else { return }
         busy = true
-        message = "Проверяем вход по ключу и агент…"
+        message = tr("Проверяем вход по ключу и агент…")
         Task.detached {
             let result = jsonObject(RustCore.check(config))
             await MainActor.run {
                 self.busy = false
                 if result["ok"] as? Bool == true {
-                    self.message = result["summary"] as? String ?? "Сервер готов"
+                    self.message = result["summary"] as? String ?? tr("Сервер готов")
                 } else {
-                    self.message = result["error"] as? String ?? "Проверка не прошла"
+                    self.message = result["error"] as? String ?? tr("Проверка не прошла")
                 }
             }
         }
@@ -193,14 +193,14 @@ final class TunnelController: ObservableObject {
     private func connect() async {
         guard !startingVPN, !busy, vpnStatus != .disconnecting else { return }
         guard isConfigured else {
-            message = "Импортируйте ключ и подтвердите отпечаток сервера"
+            message = tr("Импортируйте ключ и подтвердите отпечаток сервера")
             return
         }
         #if targetEnvironment(simulator)
-        vpnError = "VPN доступен на iPhone и iPad. В симуляторе можно проверить SSH и агент."
+        vpnError = tr("VPN доступен на iPhone и iPad. В симуляторе можно проверить SSH и агент.")
         #else
         guard Shared.groupContainer != nil else {
-            vpnError = "Недоступна общая папка VPN. Проверьте App Group и подпись сборки."
+            vpnError = tr("Недоступна общая папка VPN. Проверьте App Group и подпись сборки.")
             return
         }
         vpnError = ""
@@ -324,7 +324,7 @@ final class TunnelController: ObservableObject {
 private struct VPNProfileError: LocalizedError {
     let underlying: Error
     var errorDescription: String? {
-        "Не удалось настроить профиль VPN. \(underlying.localizedDescription)"
+        tr("Не удалось настроить профиль VPN. {0}", underlying.localizedDescription)
     }
 }
 

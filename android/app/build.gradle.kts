@@ -9,8 +9,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         minSdk = 26
         targetSdk = 34
-        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 33700
-        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.37"
+        versionCode = System.getenv("ST_VERSION_CODE")?.toIntOrNull() ?: 33800
+        versionName = System.getenv("ST_VERSION_NAME") ?: "0.3.38"
         manifestPlaceholders["appLabel"] = "Secret Tunnel"
         ndk { abiFilters += supportedAbis }
     }
@@ -53,8 +53,9 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }
 android.sourceSets.getByName("main").assets.srcDir(rootProject.file("third-party-notices"))
+android.sourceSets.getByName("main").assets.srcDir(rootProject.file("../locales"))
 val copyHelpAssets by tasks.registering(Copy::class) {
-    from(rootProject.file("../docs/help/knowledge.md"))
+    from(rootProject.file("../docs/help/knowledge.md"), rootProject.file("../docs/help/knowledge.en.md"))
     into(layout.buildDirectory.dir("generated/help-assets"))
 }
 tasks.named("preBuild").configure { dependsOn(copyHelpAssets) }

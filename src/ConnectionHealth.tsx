@@ -1,3 +1,4 @@
+import { t, translateMessage, formatLocale, getLanguage } from "./i18n";
 import { RefreshCcw } from "lucide-react";
 
 type Outcome =
@@ -32,37 +33,35 @@ export default function ConnectionHealth({
   ] as const;
 
   return (
-    <section className="connectionHealth" aria-label="Состояние соединения">
+    <section className="connectionHealth" aria-label={t("Состояние соединения")}>
       <div className="connectionLayers" role="status">
         <span>SSH <strong>{ssh}</strong></span>
-        <span>Перехват <strong>{interception}</strong></span>
-        {priorityUdp && <span>UDP отмеченных приложений <strong>{!interceptionRunning ? "Включите перехват"
-          : priorityUdp.separate ? "Отдельный SSH" : "Основной SSH"}</strong></span>}
+        <span>{t("Перехват ")}<strong>{interception}</strong></span>
+        {priorityUdp && <span>{t("UDP отмеченных приложений ")}<strong>{!interceptionRunning ? t("Включите перехват")
+          : priorityUdp.separate ? t("Отдельный SSH") : t("Основной SSH")}</strong></span>}
       </div>
-      {priorityUdp?.error && <p className="fieldNote" title={priorityUdp.error}>Второй SSH недоступен. При включённом перехвате новые UDP-соединения отмеченных приложений используют основной туннель.</p>}
-      {interceptionError && <p className="connectionError">{interceptionError}</p>}
-      {directWarning && <p className="fieldNote">{directWarning}</p>}
+      {priorityUdp?.error && <p className="fieldNote" title={priorityUdp.error}>{t("Второй SSH недоступен. При включённом перехвате новые UDP-соединения отмеченных приложений используют основной туннель.")}</p>}
+      {interceptionError && <p className="connectionError">{translateMessage(interceptionError)}</p>}
+      {directWarning && <p className="fieldNote">{translateMessage(directWarning)}</p>}
       <div className="connectionProbes">
-        <dl aria-label="Проверки через SOCKS">
+        <dl aria-label={t("Проверки через SOCKS")}>
           {results.map(([label, outcome]) => (
             <div key={label}>
               <dt>{label}</dt>
               <dd className={outcome?.status}>
-                {running ? "Проверяем…" : outcome?.status === "passed" ? `${outcome.ms} мс`
-                  : outcome?.status === "failed" ? outcome.detail
-                  : outcome?.status === "unsupported" ? "Недоступно в OpenSSH" : "Нет проверки"}
+                {running ? t("Проверяем…") : outcome?.status === "passed" ? t("{0} мс", outcome.ms)
+                  : outcome?.status === "failed" ? translateMessage(outcome.detail)
+                  : outcome?.status === "unsupported" ? t("Недоступно в OpenSSH") : t("Нет проверки")}
               </dd>
             </div>
           ))}
         </dl>
         <button className="ghost" disabled={!connected || running} onClick={onCheck}>
-          <RefreshCcw size={15} />{running ? "Проверяем…" : "Проверить соединение"}
+          <RefreshCcw size={15} />{running ? t("Проверяем…") : t("Проверить соединение")}
         </button>
       </div>
       <p className="fieldNote">
-        TCP и IPv6 проверяют открытие соединения, UDP и DNS используют запрос к 1.1.1.1.
-        Проверки идут через локальный SOCKS и не проверяют захват приложений или системный DNS.
-        {report && ` Проверено в ${new Date(report.checked_at * 1000).toLocaleTimeString("ru-RU")}.`}
+        {t("TCP и IPv6 проверяют открытие соединения, UDP и DNS используют запрос к 1.1.1.1. Проверки идут через локальный SOCKS и не проверяют захват приложений или системный DNS.")}{report && t(" Проверено в {0}.", new Date(report.checked_at * 1000).toLocaleTimeString(formatLocale()))}
       </p>
     </section>
   );

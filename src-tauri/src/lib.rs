@@ -2597,6 +2597,7 @@ pub fn run() {
             delete_proxy,
             select_proxy,
             save_settings,
+            tray::set_ui_language,
             default_settings,
             reset_config,
             test_server,

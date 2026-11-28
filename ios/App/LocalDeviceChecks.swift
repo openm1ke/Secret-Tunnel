@@ -15,14 +15,14 @@ extension TunnelController {
         let source = documents.appendingPathComponent("local-test-profiles.json")
         do {
             let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size > 0, size <= 4 * 1024 * 1024 else { throw SetupFailure("Некорректный размер файла профилей.") }
+            guard size > 0, size <= 4 * 1024 * 1024 else { throw SetupFailure(tr("Некорректный размер файла профилей.")) }
             let imported = try JSONDecoder().decode(Import.self, from: Data(contentsOf: source))
-            guard !imported.profiles.isEmpty, imported.profiles.count <= 8 else { throw SetupFailure("Некорректное число профилей.") }
+            guard !imported.profiles.isEmpty, imported.profiles.count <= 8 else { throw SetupFailure(tr("Некорректное число профилей.")) }
             for entry in imported.profiles {
                 guard !entry.settings.host.isEmpty, !entry.settings.user.isEmpty, (1...65535).contains(entry.settings.port),
                       entry.settings.hostKeySHA256.hasPrefix("SHA256:"), entry.settings.hostKeySHA256.count == 50,
                       entry.privateKey.count <= 1_048_576, String(decoding: entry.privateKey, as: UTF8.self).contains("PRIVATE KEY") else {
-                    throw SetupFailure("Проверьте данные импортируемого сервера.")
+                    throw SetupFailure(tr("Проверьте данные импортируемого сервера."))
                 }
             }
             for entry in imported.profiles {
@@ -30,7 +30,7 @@ extension TunnelController {
             }
             try FileManager.default.removeItem(at: source)
             settings = Shared.loadSettings(); hasKey = Shared.hasKey
-            message = "Серверы добавлены"
+            message = tr("Серверы добавлены")
             NSLog("ST_DEVICE_QA imported %d profiles", imported.profiles.count)
         } catch {
             message = error.localizedDescription

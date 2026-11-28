@@ -1,0 +1,2 @@
+"NSLocalNetworkUsageDescription" = "Подключение к вашему SSH-серверу в локальной сети.";
+"NSCameraUsageDescription" = "Сканирование QR-кода с зашифрованными настройками вашего SSH-сервера.";

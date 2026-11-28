@@ -9,18 +9,18 @@ struct HostingOffer: Decodable, Identifiable {
     let conditions, verified_at, source_url, order_url, test_source_url, test_note: String
     let update_error, price_note: String?
     let test_host: String?
-    var location: String { "\(country == "RU" ? "Россия" : country == "FR" ? "Франция" : country == "NL" ? "Нидерланды" : country) · \(city)" }
+    var location: String { "\(country == "RU" ? tr("Россия") : country == "FR" ? tr("Франция") : country == "NL" ? tr("Нидерланды") : country) · \(city)" }
     var price: String {
-        let format = NumberFormatter(); format.locale = Locale(identifier: "ru_RU")
+        let format = NumberFormatter(); format.locale = AppLanguage.current.locale
         format.numberStyle = .decimal; format.maximumFractionDigits = 2
         let value = format.string(from: NSNumber(value: Double(price_minor)/100)) ?? "—"
-        return "\(value) \(currency == "RUB" ? "₽" : currency == "EUR" ? "€" : "$") / мес."
+        return tr("{0} {1} / мес.", value, currency == "RUB" ? "₽" : currency == "EUR" ? "€" : "$")
     }
     var hardware: String {
-        let ram = ram_mb % 1024 == 0 ? "\(ram_mb / 1024) ГБ" : "\(ram_mb) МБ"
-        return "\(cpu) vCPU · \(ram) RAM · \(disk_gb) ГБ"
+        let ram = ram_mb % 1024 == 0 ? tr("{0} ГБ", ram_mb / 1024) : tr("{0} МБ", ram_mb)
+        return tr("{0} vCPU · {1} RAM · {2} ГБ", cpu, ram, disk_gb)
     }
-    var bandwidth: String { port_mbps.map { "Порт до \($0) Мбит/с" } ?? "Скорость порта не указана" }
+    var bandwidth: String { port_mbps.map { tr("Порт до {0} Мбит/с", $0) } ?? tr("Скорость порта не указана") }
 }
 struct HostingMeasurement: Decodable {
     let id, method, family: String
@@ -28,8 +28,8 @@ struct HostingMeasurement: Decodable {
     let successes, attempts: Int
     let error: String?
     var label: String {
-        guard let median = median_ms, let min = min_ms, let max = max_ms else { return error ?? "Нет ответа TCP" }
-        return String(format: "TCP %.0f мс · %.0f–%.0f мс · %d/%d ответов · %@", median, min, max, successes, attempts, family)
+        guard let median = median_ms, let min = min_ms, let max = max_ms else { return error ?? tr("Нет ответа TCP") }
+        return String(format: tr("TCP %.0f мс · %.0f–%.0f мс · %d/%d ответов · %@"), median, min, max, successes, attempts, family)
     }
 }
 struct HostingDocument: Decodable { let offers: [HostingOffer] }
@@ -61,7 +61,7 @@ struct HostingResponse: Decodable {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let old = self.pathSignature, old != signature {
-                    self.cancel("Сеть изменилась. Повторите замер."); self.results = [:]; self.measuredAt = ""
+                    self.cancel(tr("Сеть изменилась. Повторите замер.")); self.results = [:]; self.measuredAt = ""
                 }
                 self.pathSignature = signature
             }
@@ -69,7 +69,7 @@ struct HostingResponse: Decodable {
         monitor.start(queue: DispatchQueue(label: "hosting.path"))
     }
     deinit { monitor.cancel() }
-    func cancel(_ reason: String = "Замер отменён.") {
+    func cancel(_ reason: String = tr("Замер отменён.")) {
         generation += 1
         _ = RustCore.hosting("{\"action\":\"cancel\",\"job\":\"\(job)\"}", cacheDir: Self.cacheDir, vpnActive: false)
         if probing { message = reason }
@@ -92,7 +92,7 @@ struct HostingResponse: Decodable {
                 results = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
                 measuredAt = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short)
             }
-            message = response.error ?? response.warning ?? (response.source == "bundled" ? "Встроенная копия. Дата проверки указана у каждого тарифа." : response.source == "cache" ? "Сохранённая копия каталога." : response.source == "network" ? "Каталог обновлён из сети." : "")
-        } catch { message = "Не удалось прочитать каталог. Повторите загрузку." }
+            message = response.error ?? response.warning ?? (response.source == "bundled" ? tr("Встроенная копия. Дата проверки указана у каждого тарифа.") : response.source == "cache" ? tr("Сохранённая копия каталога.") : response.source == "network" ? tr("Каталог обновлён из сети.") : "")
+        } catch { message = tr("Не удалось прочитать каталог. Повторите загрузку.") }
     }
 }

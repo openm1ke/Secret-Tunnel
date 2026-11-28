@@ -57,25 +57,25 @@ internal class SshSetupSession(private val context: Context) {
         notifyChange()
         Thread {
             try { NativeBridge.requireAvailable(); action() }
-            catch (e: Exception) { error = ConnectionMessages.describe(e.message ?: "Не удалось завершить настройку"); progress("Настройка остановлена. Исправьте данные и повторите попытку.") }
+            catch (e: Exception) { error = ConnectionMessages.describe(e.message ?: tr("Не удалось завершить настройку")); progress(tr("Настройка остановлена. Исправьте данные и повторите попытку.")) }
             finally { busy = false; notifyChange() }
         }.start()
     }
 
     fun probe() = worker {
-        require(host.isNotBlank() && user.isNotBlank() && (1..65535).contains(port.toIntOrNull() ?: 0)) { "Укажите адрес, SSH-порт и пользователя." }
-        require(if (hasKey) keyBytes != null else password.isNotEmpty()) { if (hasKey) "Выберите приватный SSH-ключ." else "Введите пароль сервера." }
-        progress("Подключаемся к SSH-серверу…")
+        require(host.isNotBlank() && user.isNotBlank() && (1..65535).contains(port.toIntOrNull() ?: 0)) { tr("Укажите адрес, SSH-порт и пользователя.") }
+        require(if (hasKey) keyBytes != null else password.isNotEmpty()) { if (hasKey) tr("Выберите приватный SSH-ключ.") else tr("Введите пароль сервера.") }
+        progress(tr("Подключаемся к SSH-серверу…"))
         val response = JSONObject(NativeBridge.probe(JSONObject().put("host",host.trim()).put("port",port.toInt()).toString()))
         require(!response.has("error")) { response.optString("error") }
         fingerprint = response.getString("fingerprint")
-        require(isTrustedSshPin(fingerprint)) { "Сервер вернул некорректный отпечаток." }
-        progress("Сервер ответил. Получен отпечаток ключа.")
+        require(isTrustedSshPin(fingerprint)) { tr("Сервер вернул некорректный отпечаток.") }
+        progress(tr("Сервер ответил. Получен отпечаток ключа."))
         step = SetupStep.TRUST
     }
 
     fun importKey(bytes: ByteArray, label: String) {
-        require(bytes.size in 1..1_048_576 && bytes.toString(Charsets.UTF_8).contains("PRIVATE KEY")) { "Выберите приватный SSH-ключ, файл без .pub." }
+        require(bytes.size in 1..1_048_576 && bytes.toString(Charsets.UTF_8).contains("PRIVATE KEY")) { tr("Выберите приватный SSH-ключ, файл без .pub.") }
         keyBytes?.fill(0)
         keyBytes = bytes.copyOf()
         keyLabel = label
@@ -86,34 +86,34 @@ internal class SshSetupSession(private val context: Context) {
         step = SetupStep.FINISH
         if (!saved) {
             if (!hasKey && keyBytes == null) {
-                progress("Создаём отдельный ключ приложения…")
+                progress(tr("Создаём отдельный ключ приложения…"))
                 val pair = JSONObject(NativeBridge.generateKey())
                 require(!pair.has("error")) { pair.optString("error") }
                 keyBytes = pair.getString("private").toByteArray(Charsets.UTF_8)
             }
-            require(isTrustedSshPin(fingerprint)) { "Подтвердите отпечаток сервера." }
+            require(isTrustedSshPin(fingerprint)) { tr("Подтвердите отпечаток сервера.") }
             val temporary = File.createTempFile("ssh-setup-", ".runtime", context.cacheDir)
             try {
                 temporary.writeBytes(requireNotNull(keyBytes))
                 val config = JSONObject().put("host",host.trim()).put("port",port.toInt())
-                    .put("name",name.ifBlank { "Мой сервер" }).put("user",user.trim())
+                    .put("name",name.ifBlank { tr("Мой сервер") }).put("user",user.trim())
                     .put("host_key_sha256",fingerprint).put("key_path",temporary.path)
                 if (!hasKey) {
-                    progress("Входим по паролю и добавляем публичный ключ…")
+                    progress(tr("Входим по паролю и добавляем публичный ключ…"))
                     val error = NativeBridge.enrollPassword(config.toString(),password)
                     require(error.isEmpty()) { error }
-                    progress("Повторный вход по новому ключу прошёл.")
+                    progress(tr("Повторный вход по новому ключу прошёл."))
                 } else {
-                    progress("Проверяем вход по выбранному ключу…")
+                    progress(tr("Проверяем вход по выбранному ключу…"))
                     val result = JSONObject(NativeBridge.checkServer(config.put("check_agent",false).toString()))
                     require(result.optBoolean("ok")) { result.optString("error") }
                 }
-                progress("Сохраняем подключение…")
+                progress(tr("Сохраняем подключение…"))
                 val scoped = SettingsStore(context,id)
                 scoped.importKey(requireNotNull(keyBytes))
-                store.saveServer(ServerProfile(id,name.trim().ifBlank { "Мой сервер" },host.trim(),port.toInt(),user.trim()))
+                store.saveServer(ServerProfile(id,name.trim().ifBlank { tr("Мой сервер") },host.trim(),port.toInt(),user.trim()))
                 scoped.fingerprint = fingerprint
-                store.saveProxy(ProxyProfile(id,"Мой прокси",id,1080))
+                store.saveProxy(ProxyProfile(id,tr("Мой прокси"),id,1080))
                 if (!TunnelVpnService.active) store.activeProxyId = id
                 saved = true
                 password = ""
@@ -123,26 +123,26 @@ internal class SshSetupSession(private val context: Context) {
         }
         val route = store.route(id)
         if (install) {
-            progress("Скачиваем агент и сверяем SHA-256…")
+            progress(tr("Скачиваем агент и сверяем SHA-256…"))
             val proxy = MobileUpdates.proxy()
             val release = ReleaseUpdates.exact(version,proxy)
-            val asset = release.agent ?: error("В релизе нет агента для Linux x86_64.")
+            val asset = release.agent ?: error(tr("В релизе нет агента для Linux x86_64."))
             val archive = File.createTempFile("ssh-setup-agent-", ".tar.gz",context.cacheDir)
             try {
                 ReleaseUpdates.download(release,asset,archive,proxy)
-                progress("Устанавливаем агент в домашнюю папку пользователя…")
+                progress(tr("Устанавливаем агент в домашнюю папку пользователя…"))
                 store.withSshConfig(route) { config ->
                     val result = JSONObject(NativeBridge.manageAgent(config.toString(),version,archive.path))
                     require(!result.has("error")) { result.optString("error") }
                 }
             } finally { archive.delete() }
         }
-        progress("Проверяем серверный агент…")
+        progress(tr("Проверяем серверный агент…"))
         store.withSshConfig(route) { config ->
             val result = JSONObject(NativeBridge.checkServer(config.put("check_agent",true).toString()))
             require(result.optBoolean("ok")) { result.optString("error") }
         }
-        progress("Подключение проверено и сохранено.")
+        progress(tr("Подключение проверено и сохранено."))
         done = true
     }
 
@@ -161,7 +161,7 @@ internal class SshSetupSession(private val context: Context) {
     fun clear() { password = ""; keyBytes?.fill(0); keyBytes = null }
 }
 
-class SetupActivity : Activity() {
+class SetupActivity : LocalizedActivity() {
     private lateinit var session: SshSetupSession
     private lateinit var palette: Palette
     private lateinit var body: LinearLayout
@@ -199,66 +199,66 @@ class SetupActivity : Activity() {
         val scroll = ScrollView(this).apply { isFillViewport = true; setBackgroundColor(palette.background) }
         body = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(20),dp(24),dp(20),dp(24)) }
         scroll.addView(body)
-        text("Настройка подключения",24,true)
+        text(tr("Настройка подключения"),24,true)
         when(session.step) {
             SetupStep.SERVER -> {
-                text("У вас уже есть сервер?",20,true)
-                text("Для подключения нужен ваш VPS с доступом по SSH.")
-                button("Да, сервер уже куплен",true) { session.step=SetupStep.ACCESS; render() }
-                button("Пока нет сервера") { startActivityForResult(Intent(this, HostingCatalogActivity::class.java).putExtra("from_wizard", true), 209) }
-                if (!session.hasServer) text("Выберите VPS с Linux x86_64 у своего хостера. После покупки понадобятся адрес, порт SSH, логин и пароль или готовый ключ.")
+                text(tr("У вас уже есть сервер?"),20,true)
+                text(tr("Для подключения нужен ваш VPS с доступом по SSH."))
+                button(tr("Да, сервер уже куплен"),true) { session.step=SetupStep.ACCESS; render() }
+                button(tr("Пока нет сервера")) { startActivityForResult(Intent(this, HostingCatalogActivity::class.java).putExtra("from_wizard", true), 209) }
+                if (!session.hasServer) text(tr("Выберите VPS с Linux x86_64 у своего хостера. После покупки понадобятся адрес, порт SSH, логин и пароль или готовый ключ."))
             }
             SetupStep.ACCESS -> {
-                text("Как вы входите на сервер?",20,true)
-                button("Логин и пароль от хостера",true) { session.clear(); session.hasKey=false; session.step=SetupStep.DETAILS; render() }
-                button("У меня есть SSH-ключ") { session.clear(); session.keyLabel=""; session.hasKey=true; session.step=SetupStep.DETAILS; render() }
+                text(tr("Как вы входите на сервер?"),20,true)
+                button(tr("Логин и пароль от хостера"),true) { session.clear(); session.hasKey=false; session.step=SetupStep.DETAILS; render() }
+                button(tr("У меня есть SSH-ключ")) { session.clear(); session.keyLabel=""; session.hasKey=true; session.step=SetupStep.DETAILS; render() }
             }
             SetupStep.DETAILS -> {
-                text("Данные из письма хостера",20,true)
-                field("Адрес сервера",session.host,2001) { session.host=it; session.fingerprint="" }
-                field("Порт SSH",session.port,2002,InputType.TYPE_CLASS_NUMBER) { session.port=it; session.fingerprint="" }
-                field("Пользователь",session.user,2003) { session.user=it }
+                text(tr("Данные из письма хостера"),20,true)
+                field(tr("Адрес сервера"),session.host,2001) { session.host=it; session.fingerprint="" }
+                field(tr("Порт SSH"),session.port,2002,InputType.TYPE_CLASS_NUMBER) { session.port=it; session.fingerprint="" }
+                field(tr("Пользователь"),session.user,2003) { session.user=it }
                 if (session.hasKey) {
-                    text(if(session.keyLabel.isBlank())"Выберите приватный SSH-ключ, файл без .pub." else session.keyLabel)
-                    button("Выбрать файл") {
+                    text(if(session.keyLabel.isBlank())tr("Выберите приватный SSH-ключ, файл без .pub.") else session.keyLabel)
+                    button(tr("Выбрать файл")) {
                         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),106)
                     }
                 } else {
-                    field("Пароль сервера",session.password,2004,InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD) { session.password=it }
-                    text("Приложение создаст отдельный ключ и проверит вход по нему.")
+                    field(tr("Пароль сервера"),session.password,2004,InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD) { session.password=it }
+                    text(tr("Приложение создаст отдельный ключ и проверит вход по нему."))
                 }
-                field("Название сервера · необязательно",session.name,2005) { session.name=it }
-                button("Проверить адрес",true) { session.probe() }
+                field(tr("Название сервера · необязательно"),session.name,2005) { session.name=it }
+                button(tr("Проверить адрес"),true) { session.probe() }
             }
             SetupStep.TRUST -> {
-                text("Подтвердите сервер",20,true)
-                text("Сверьте отпечаток ключа SSH в панели хостера. Он помогает убедиться, что вы подключаетесь к своему серверу.")
+                text(tr("Подтвердите сервер"),20,true)
+                text(tr("Сверьте отпечаток ключа SSH в панели хостера. Он помогает убедиться, что вы подключаетесь к своему серверу."))
                 text(session.fingerprint).apply { setTextIsSelectable(true); typeface=Typeface.MONOSPACE }
-                text(if(session.hasKey)"Проверим вход по ключу и серверный агент." else "После подтверждения добавим публичный ключ приложения и проверим вход по нему.")
-                button("Доверять и настроить",true) { session.configure() }
+                text(if(session.hasKey)tr("Проверим вход по ключу и серверный агент.") else tr("После подтверждения добавим публичный ключ приложения и проверим вход по нему."))
+                button(tr("Доверять и настроить"),true) { session.configure() }
             }
             SetupStep.FINISH -> {
-                text(if(session.done)"Подключение готово" else if(session.busy)"Настраиваем подключение" else "Настройка не завершена",20,true)
+                text(if(session.done)tr("Подключение готово") else if(session.busy)tr("Настраиваем подключение") else tr("Настройка не завершена"),20,true)
                 if(session.done) {
-                    text("Ключ и сервер проверены. Выберите приложения для туннеля на главной.")
-                    button("Готово",true) { setResult(RESULT_OK); finish() }
+                    text(tr("Ключ и сервер проверены. Выберите приложения для туннеля на главной."))
+                    button(tr("Готово"),true) { setResult(RESULT_OK); finish() }
                 } else if(session.saved && !session.busy) {
-                    text("Доступ по SSH сохранён. Агент передаёт TCP и UDP через туннель. Установка добавит его в домашнюю папку пользователя.")
-                    button("Установить агент и проверить",true) { session.configure(true) }
-                    button("Повторить проверку") { session.configure() }
+                    text(tr("Доступ по SSH сохранён. Агент передаёт TCP и UDP через туннель. Установка добавит его в домашнюю папку пользователя."))
+                    button(tr("Установить агент и проверить"),true) { session.configure(true) }
+                    button(tr("Повторить проверку")) { session.configure() }
                 }
             }
         }
-        if(session.error.isNotEmpty()) text(session.error).apply { setTextColor(palette.error); accessibilityLiveRegion=View.ACCESSIBILITY_LIVE_REGION_POLITE }
+        if(session.error.isNotEmpty()) text(tr(session.error)).apply { setTextColor(palette.error); accessibilityLiveRegion=View.ACCESSIBILITY_LIVE_REGION_POLITE }
         if(session.log.isNotEmpty()) {
-            text("Ход настройки",14,true)
+            text(tr("Ход настройки"),14,true)
             val lines=synchronized(session.log){session.log.joinToString("\n")}
             val log=ScrollView(this).apply { setBackgroundColor(palette.surface); setPadding(dp(12),dp(12),dp(12),dp(12)) }
             log.addView(TextView(this).apply { text=lines; textSize=12f; setTextColor(palette.muted); accessibilityLiveRegion=View.ACCESSIBILITY_LIVE_REGION_POLITE })
             body.addView(log,LinearLayout.LayoutParams(-1,dp(136)).apply { topMargin=dp(12) })
         }
-        if(session.step!=SetupStep.SERVER && !session.done && !session.saved) button("Назад") { session.back() }
-        if(!session.done) button("Закрыть мастер") { finish() }
+        if(session.step!=SetupStep.SERVER && !session.done && !session.saved) button(tr("Назад")) { session.back() }
+        if(!session.done) button(tr("Закрыть мастер")) { finish() }
         setContentView(scroll)
     }
     private fun text(value:String,size:Int=14,bold:Boolean=false): TextView = TextView(this).apply {
@@ -297,8 +297,8 @@ class SetupActivity : Activity() {
         if(request!=106 || result!=RESULT_OK)return
         val uri=data?.data ?: return
         try {
-            val bytes=contentResolver.openInputStream(uri)?.use { it.readBytesLimited() } ?: error("Не удалось открыть ключ.")
-            try { session.importKey(bytes,"Ключ выбран") } finally { bytes.fill(0) }
+            val bytes=contentResolver.openInputStream(uri)?.use { it.readBytesLimited() } ?: error(tr("Не удалось открыть ключ."))
+            try { session.importKey(bytes,tr("Ключ выбран")) } finally { bytes.fill(0) }
         } catch(e:Exception) { Toast.makeText(this,e.message,Toast.LENGTH_LONG).show() }
     }
     private fun java.io.InputStream.readBytesLimited():ByteArray {

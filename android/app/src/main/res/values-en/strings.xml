@@ -1,0 +1,4 @@
+<resources>
+    <string name="selected_count">Selected: %1$d</string>
+    <string name="key_imported">SSH key imported · replace</string>
+</resources>

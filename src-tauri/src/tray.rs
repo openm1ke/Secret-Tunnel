@@ -2,6 +2,8 @@
 //! running there, and the tunnel can be started, stopped or opened from its
 //! menu without the window.
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -12,10 +14,34 @@ struct TrayItems {
     status: MenuItem<Wry>,
     connect: MenuItem<Wry>,
     disconnect: MenuItem<Wry>,
+    labels: Vec<(MenuItem<Wry>, &'static str)>,
+    language: Mutex<Option<bool>>,
     /// What the menu shows now, so it is only touched when that changes.
     shown: Mutex<String>,
     /// The icon on screen and the step of the connecting animation.
     icon: Mutex<(Look, usize)>,
+}
+
+static ENGLISH: AtomicBool = AtomicBool::new(false);
+
+fn text(source: &str) -> String {
+    static MESSAGES: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+    if ENGLISH.load(Ordering::Relaxed) {
+        let messages = MESSAGES.get_or_init(|| serde_json::from_str(include_str!("../../locales/en.json")).expect("validated UI translations"));
+        if let Some(value) = messages.get(source) { return value.clone(); }
+    }
+    source.to_owned()
+}
+
+#[tauri::command]
+pub fn set_ui_language(app: AppHandle, language: String) -> Result<(), String> {
+    match language.as_str() {
+        "ru" => ENGLISH.store(false, Ordering::Relaxed),
+        "en" => ENGLISH.store(true, Ordering::Relaxed),
+        _ => return Err("Unsupported UI language".into()),
+    }
+    refresh(&app);
+    Ok(())
 }
 
 /// The icon follows the tunnel: dark light when off, a yellow light when
@@ -95,7 +121,12 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
-    app.manage(TrayItems { status, connect, disconnect, shown: Mutex::default(), icon: Mutex::new((Look::Off, 0)) });
+    let labels = vec![
+        (open, "Открыть Secret Tunnel"), (connect.clone(), "Подключить"),
+        (disconnect.clone(), "Отключить"), (speed, "Проверить скорость"),
+        (settings, "Настройки…"), (quit, "Выйти из Secret Tunnel"),
+    ];
+    app.manage(TrayItems { status, connect, disconnect, labels, language: Mutex::new(None), shown: Mutex::default(), icon: Mutex::new((Look::Off, 0)) });
     let handle = app.clone();
     std::thread::spawn(move || loop {
         refresh(&handle);
@@ -133,16 +164,23 @@ fn handle(app: &AppHandle, id: &str) {
 /// The menu and tooltip follow the tunnel's state.
 fn refresh(app: &AppHandle) {
     let Some(items) = app.try_state::<TrayItems>() else { return };
+    if let Ok(mut language) = items.language.lock() {
+        let english = ENGLISH.load(Ordering::Relaxed);
+        if *language != Some(english) {
+            for (item, source) in &items.labels { let _ = item.set_text(text(source)); }
+            *language = Some(english);
+        }
+    }
     let Ok(status) = crate::tunnel_status(app.state::<crate::AppState>()) else { return };
     let place = if status.ssh_route.len() > 1 { status.ssh_route.join(" → ") } else { status.server_name.clone() };
     let text = match status.state.as_str() {
-        "running" if place.is_empty() => "Подключено".to_owned(),
-        "running" => format!("Подключено · {place}"),
-        "starting" => "Подключаемся…".to_owned(),
-        "reconnecting" => "Переподключаемся…".to_owned(),
-        "stopping" => "Отключаемся…".to_owned(),
-        "failed" => "Не удалось подключиться".to_owned(),
-        _ => "Отключено".to_owned(),
+        "running" if place.is_empty() => text("Подключено"),
+        "running" => format!("{} · {place}", text("Подключено")),
+        "starting" => text("Подключаемся…"),
+        "reconnecting" => text("Переподключаемся…"),
+        "stopping" => text("Отключаемся…"),
+        "failed" => text("Не удалось подключиться"),
+        _ => text("Отключено"),
     };
     let look = match status.state.as_str() {
         "running" => Look::On,

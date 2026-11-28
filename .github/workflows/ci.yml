@@ -16,6 +16,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run build
+      - run: npm run test:localization
       - run: python3 -m unittest discover -s scripts/tests -p 'test_hosting_catalog.py' -v
       - run: cargo test --manifest-path hosting-catalog/Cargo.toml --locked
       - run: cargo test --manifest-path profile-transfer/Cargo.toml --locked

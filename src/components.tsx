@@ -1,3 +1,4 @@
+import { t, translateMessage, formatLocale, getLanguage } from "./i18n";
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Braces, ChevronDown, ChevronUp, ClipboardCopy, Eye, EyeOff, Search, Trash2 } from "lucide-react";
 import flagFontUrl from "./assets/fonts/TwemojiCountryFlags.woff2?url";
@@ -14,19 +15,21 @@ export function flagEmoji(code: string) {
   return String.fromCodePoint(...[...upper].map((letter) => 0x1f1e6 + letter.charCodeAt(0) - 65));
 }
 
-const regionNames = (() => {
-  try {
-    return new Intl.DisplayNames(["ru"], { type: "region" });
-  } catch {
-    return null;
+const regionNameCache = new Map<string, Intl.DisplayNames | null>();
+const regionNames = () => {
+  const language = getLanguage();
+  if (!regionNameCache.has(language)) {
+    try { regionNameCache.set(language, new Intl.DisplayNames([language], { type: "region" })); }
+    catch { regionNameCache.set(language, null); }
   }
-})();
+  return regionNameCache.get(language);
+};
 
 export function countryName(code: string, fallback: string) {
   const upper = code.trim().toUpperCase();
   if (/^[A-Z]{2}$/.test(upper)) {
     try {
-      return regionNames?.of(upper) || fallback || upper;
+      return regionNames()?.of(upper) || fallback || upper;
     } catch {
       return fallback || upper;
     }
@@ -45,7 +48,7 @@ export type RouteNode = { label: string; kind: "device" | "hop" | "exit" | "inte
 /** The path traffic takes: this computer, SSH hops, the exit server, the internet. */
 export function RouteRibbon({ nodes, state }: { nodes: RouteNode[]; state: "up" | "busy" | "down" | "error" }) {
   return (
-    <ol className={`route route-${state}`} aria-label={`Маршрут: ${nodes.map((node) => node.label).join(", ")}`}>
+    <ol className={`route route-${state}`} aria-label={t("Маршрут: {0}", nodes.map((node) => node.label).join(", "))}>
       {nodes.map((node, index) => (
         <li key={`${node.label}-${index}`} className={`routeNode routeNode-${node.kind}`}>
           {index > 0 && <span className="routeLink" aria-hidden="true"><i /></span>}
@@ -71,17 +74,17 @@ export type TrafficPoint = {
 
 export function formatBitRate(bytesPerSecond: number) {
   const bits = bytesPerSecond * 8;
-  if (bits >= 1e9) return `${(bits / 1e9).toFixed(2)} Гбит/с`;
-  if (bits >= 1e6) return `${(bits / 1e6).toFixed(bits >= 1e7 ? 0 : 1)} Мбит/с`;
-  if (bits >= 1e3) return `${(bits / 1e3).toFixed(0)} Кбит/с`;
-  return `${Math.round(bits)} бит/с`;
+  if (bits >= 1e9) return t("{0} Гбит/с", (bits / 1e9).toFixed(2));
+  if (bits >= 1e6) return t("{0} Мбит/с", (bits / 1e6).toFixed(bits >= 1e7 ? 0 : 1));
+  if (bits >= 1e3) return t("{0} Кбит/с", (bits / 1e3).toFixed(0));
+  return t("{0} бит/с", Math.round(bits));
 }
 
 export function formatBytes(value: number) {
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} ГБ`;
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} МБ`;
-  if (value >= 1024) return `${(value / 1024).toFixed(0)} КБ`;
-  return `${value} Б`;
+  if (value >= 1024 ** 3) return t("{0} ГБ", (value / 1024 ** 3).toFixed(2));
+  if (value >= 1024 ** 2) return t("{0} МБ", (value / 1024 ** 2).toFixed(1));
+  if (value >= 1024) return t("{0} КБ", (value / 1024).toFixed(0));
+  return t("{0} Б", value);
 }
 
 function niceCeiling(value: number) {
@@ -92,7 +95,7 @@ function niceCeiling(value: number) {
 }
 
 function clock(ts: number) {
-  return new Date(ts * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return new Date(ts * 1000).toLocaleTimeString(formatLocale(), { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 /** Download, upload and ping over the last minutes; fills its container. */
@@ -144,21 +147,21 @@ export function TrafficChart({ points }: { points: TrafficPoint[] }) {
   return (
     <div className="chart">
       <div className="chartHead">
-        <span className="chartTitle">Скорость за последние минуты</span>
+        <span className="chartTitle">{t("Скорость за последние минуты")}</span>
         <span className="chartLegend">
-          <span><i className="swatch rx" />Скачивание</span>
-          <span><i className="swatch tx" />Отдача</span>
-          <span><i className="swatch ping" />Пинг</span>
+          <span><i className="swatch rx" />{t("Скачивание")}</span>
+          <span><i className="swatch tx" />{t("Отдача")}</span>
+          <span><i className="swatch ping" />{t("Пинг")}</span>
         </span>
       </div>
       <div className="chartBox" ref={boxRef}>
         <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} onMouseMove={onMove} onMouseLeave={() => setHover(null)} role="img"
-          aria-label="График скорости скачивания, отдачи и пинга">
+          aria-label={t("График скорости скачивания, отдачи и пинга")}>
           {ticks.map((fraction) => (
             <g key={fraction} className="grid">
               <line x1={pad.left} x2={width - pad.right} y1={yRate(rateMax * fraction)} y2={yRate(rateMax * fraction)} />
               <text x={pad.left - 8} y={yRate(rateMax * fraction) + 4} textAnchor="end">{formatBitRate(rateMax * fraction)}</text>
-              <text className="pingAxis" x={width - pad.right + 8} y={yRate(rateMax * fraction) + 4}>{Math.round(latencyMax * fraction)} мс</text>
+              <text className="pingAxis" x={width - pad.right + 8} y={yRate(rateMax * fraction) + 4}>{Math.round(latencyMax * fraction)} {t(" мс")}</text>
             </g>
           ))}
           {timeTicks.map((index, order) => (
@@ -175,7 +178,7 @@ export function TrafficChart({ points }: { points: TrafficPoint[] }) {
               <path className="series ping" d={line(latencies, yPing)} />
             </>
           ) : (
-            <text className="empty" x={width / 2} y={height / 2} textAnchor="middle">График появится после запуска туннеля</text>
+            <text className="empty" x={width / 2} y={height / 2} textAnchor="middle">{t("График появится после запуска туннеля")}</text>
           )}
           {hovered && hover !== null && (
             <g className="cursor">
@@ -190,7 +193,7 @@ export function TrafficChart({ points }: { points: TrafficPoint[] }) {
             <strong>{clock(hovered.ts)}</strong>
             <span><i className="swatch rx" />{formatBitRate(hovered.rx_bps)}</span>
             <span><i className="swatch tx" />{formatBitRate(hovered.tx_bps)}</span>
-            <span><i className="swatch ping" />{hovered.latency_ms ?? "—"} мс</span>
+            <span><i className="swatch ping" />{hovered.latency_ms ?? "—"} {t(" мс")}</span>
           </div>
         )}
       </div>
@@ -213,7 +216,7 @@ const connectionPattern = /^Соединение (через туннель|на
 const plainWords: [RegExp, string | ((m: RegExpExecArray) => string)][] = [
   [/^Redirect macOS: Redirecting traffic\..*$/, "Перехват включён: правила применены"],
   [/^Redirect macOS: Rules cleared, tunnel stopped\.$/, "Перехват выключен: правила сняты"],
-  [/^Redirect macOS: Profile ".*": \d+ proxies, (\d+) rules applied$/, (m) => `Перехват: применено правил — ${m[1]}`],
+  [/^Redirect macOS: Profile ".*": \d+ proxies, (\d+) rules applied$/, (m) => t("Перехват: применено правил — {0}", m[1])],
   [/^Tunnel is running, ssh pid=.*$/, "Туннель запущен"],
   [/^Tunnel stopped$/, "Туннель остановлен"],
   [/^Proxy verification OK, public IP hidden$/, "Прокси проверен: выход работает"],
@@ -278,7 +281,7 @@ const kindLabels: [LogKind, string, string][] = [
   ["error", "Ошибки", "Сбои и отказы"],
   ["service", "Служебные", "Проверки связи, статистика TCP и другие внутренние записи"],
 ];
-const routeLabels = { tunnel: "туннель", direct: "напрямую", block: "блок" } as const;
+const routeLabels = { get tunnel() { return t("туннель"); }, get direct() { return t("напрямую"); }, get block() { return t("блок"); } } as const;
 
 function readKinds(): Set<LogKind> {
   try {
@@ -298,7 +301,7 @@ function ConnectionText({ connection, hide }: { connection: Connection; hide: bo
       <em className={`via ${connection.route}`}>{routeLabels[connection.route]}</em>
       <strong>{connection.who}</strong>
       <span className="arrow">→</span>
-      {dns ? <span>DNS-запрос{connection.host ? ` ${connection.host}` : ""}</span>
+      {dns ? <span>{t("DNS-запрос")}{connection.host ? ` ${connection.host}` : ""}</span>
         : connection.host ? <span>{connection.host}{!hide && <small> {address}</small>}</span>
         : <span>{address}</span>}
       {!dns && connection.port && <small>:{connection.port}</small>}
@@ -311,7 +314,7 @@ function ConnectionText({ connection, hide }: { connection: Connection; hide: bo
 function lineText(line: LogLine, hide: boolean) {
   if (line.connection) {
     const c = line.connection;
-    const target = c.port === "53" ? "DNS-запрос" : c.host || (hide ? maskAddresses(c.address) : c.address);
+    const target = c.port === "53" ? t("DNS-запрос") : c.host || (hide ? maskAddresses(c.address) : c.address);
     return `${routeLabels[c.route]}: ${c.who} → ${target}${c.port && c.port !== "53" ? `:${c.port}` : ""} ${c.protocol}`;
   }
   return hide ? maskAddresses(line.text) : line.text;
@@ -412,48 +415,47 @@ export function LogDock({ logs, busy, hideAddresses, onClear, onCopied }: { logs
   return (
     <section className={collapsed ? "logDock collapsed" : "logDock"} style={collapsed ? undefined : { height }}>
       <div className="logResize" onPointerDown={startResize} role="separator" aria-orientation="horizontal"
-        aria-label="Изменить высоту журнала" title="Потяните, чтобы изменить высоту" />
+        aria-label={t("Изменить высоту журнала")} title={t("Потяните, чтобы изменить высоту")} />
       <div className="logBar">
         <button className="logTitle" onClick={() => setCollapsed((value) => !value)} aria-expanded={!collapsed}>
           {collapsed ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-          Журнал
-          {counts.error > 0 && <span className="count bad">{counts.error} ошиб.</span>}
+          {t("Журнал")}{counts.error > 0 && <span className="count bad">{counts.error} {t(" ошиб.")}</span>}
         </button>
         {!collapsed && (
           <>
-            <div className="logKinds" role="group" aria-label="Что показывать">
+            <div className="logKinds" role="group" aria-label={t("Что показывать")}>
               {kindLabels.map(([kind, label, hint]) => (
-                <button key={kind} className={kinds.has(kind) ? `kind ${kind} on` : `kind ${kind}`} aria-pressed={kinds.has(kind)} title={hint} onClick={() => toggleKind(kind)}>
-                  {label}<span>{counts[kind]}</span>
+                <button key={kind} className={kinds.has(kind) ? `kind ${kind} on` : `kind ${kind}`} aria-pressed={kinds.has(kind)} title={t(hint)} onClick={() => toggleKind(kind)}>
+                  {t(label)}<span>{counts[kind]}</span>
                 </button>
               ))}
             </div>
             <label className="logSearch">
               <Search size={14} />
-              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Поиск: программа, сайт, текст" aria-label="Поиск в журнале" />
+              <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder={t("Поиск: программа, сайт, текст")} aria-label={t("Поиск в журнале")} />
             </label>
-            <button className={hide ? "ghost icon on" : "ghost icon"} aria-pressed={hide} title={hide ? "Показать IP-адреса" : "Скрыть IP-адреса"} aria-label={hide ? "Показать IP-адреса" : "Скрыть IP-адреса"} onClick={() => setHide((value) => !value)}>
+            <button className={hide ? "ghost icon on" : "ghost icon"} aria-pressed={hide} title={hide ? t("Показать IP-адреса") : t("Скрыть IP-адреса")} aria-label={hide ? t("Показать IP-адреса") : t("Скрыть IP-адреса")} onClick={() => setHide((value) => !value)}>
               {hide ? <EyeOff size={15} /> : <Eye size={15} />}
             </button>
-            <button className={showDetails ? "ghost icon on" : "ghost icon"} aria-pressed={showDetails} title={showDetails ? "Скрыть подробности" : "Показать подробности (JSON диагностики)"} aria-label="Подробности" onClick={() => setShowDetails((value) => !value)}>
+            <button className={showDetails ? "ghost icon on" : "ghost icon"} aria-pressed={showDetails} title={showDetails ? t("Скрыть подробности") : t("Показать подробности (JSON диагностики)")} aria-label={t("Подробности")} onClick={() => setShowDetails((value) => !value)}>
               <Braces size={15} />
             </button>
-            <button className="ghost icon" title="Скопировать показанные записи" aria-label="Скопировать журнал" onClick={() => onCopied(shown.map(({ line, text, repeat }) => `${line.time} ${text}${repeat > 1 ? ` ×${repeat}` : ""}${showDetails && line.details ? `\n${hide ? maskAddresses(line.details) : line.details}` : ""}`).join("\n"))}>
+            <button className="ghost icon" title={t("Скопировать показанные записи")} aria-label={t("Скопировать журнал")} onClick={() => onCopied(shown.map(({ line, text, repeat }) => `${line.time} ${text}${repeat > 1 ? ` ×${repeat}` : ""}${showDetails && line.details ? `\n${hide ? maskAddresses(line.details) : line.details}` : ""}`).join("\n"))}>
               <ClipboardCopy size={15} />
             </button>
-            <button className="ghost icon" title="Очистить журнал" aria-label="Очистить журнал" disabled={busy} onClick={onClear}><Trash2 size={15} /></button>
+            <button className="ghost icon" title={t("Очистить журнал")} aria-label={t("Очистить журнал")} disabled={busy} onClick={onClear}><Trash2 size={15} /></button>
           </>
         )}
       </div>
       {!collapsed && (
         <div className="logList" ref={listRef} onScroll={onScroll} role="log" aria-live="off">
-          {shown.length === 0 && <p className="logEmpty">{lines.length ? "Нет записей с такими фильтрами" : "Журнал пуст. Записи появятся после запуска туннеля."}</p>}
+          {shown.length === 0 && <p className="logEmpty">{lines.length ? t("Нет записей с такими фильтрами") : t("Журнал пуст. Записи появятся после запуска туннеля.")}</p>}
           {shown.map(({ line, text, repeat }, index) => (
             <div key={index} className={`logLine ${line.level} ${line.kind}`}>
               <time>{line.time}</time>
               <div className="logText">
                 {line.connection ? <ConnectionText connection={line.connection} hide={hide} /> : <span>{text}</span>}
-                {repeat > 1 && <b className="repeat" title="Повторилось подряд">×{repeat}</b>}
+                {repeat > 1 && <b className="repeat" title={t("Повторилось подряд")}>×{repeat}</b>}
                 {showDetails && line.details && <code>{hide ? maskAddresses(line.details) : line.details}</code>}
               </div>
             </div>
@@ -462,8 +464,7 @@ export function LogDock({ logs, busy, hideAddresses, onClear, onCopied }: { logs
       )}
       {!collapsed && !follow && (
         <button className="logFollow" onClick={() => { setFollow(true); const list = listRef.current; if (list) list.scrollTop = list.scrollHeight; }}>
-          К последним записям
-        </button>
+          {t("К последним записям")}</button>
       )}
     </section>
   );

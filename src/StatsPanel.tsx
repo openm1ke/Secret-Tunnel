@@ -1,3 +1,4 @@
+import { t, translateMessage, formatLocale, getLanguage } from "./i18n";
 import React, { useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
 import { Flag, countryName, formatBytes } from "./components";
@@ -20,10 +21,10 @@ export type KnownApp = { name: string; executable: string; icon?: string; patter
 const UNATTRIBUTED = "Без перехвата (SOCKS)";
 type Period = "today" | "week" | "month" | "all";
 const periods: { id: Period; label: string }[] = [
-  { id: "today", label: "Сегодня" },
-  { id: "week", label: "7 дней" },
-  { id: "month", label: "30 дней" },
-  { id: "all", label: "Всё время" },
+  { id: "today", get label() { return t("Сегодня"); } },
+  { id: "week", get label() { return t("7 дней"); } },
+  { id: "month", get label() { return t("30 дней"); } },
+  { id: "all", get label() { return t("Всё время"); } },
 ];
 
 function periodStart(period: Period) {
@@ -39,18 +40,18 @@ export function formatDuration(seconds: number) {
   const days = Math.floor(s / 86400);
   const hours = Math.floor((s % 86400) / 3600);
   const minutes = Math.floor((s % 3600) / 60);
-  if (days) return `${days} д ${hours} ч`;
-  if (hours) return `${hours} ч ${minutes} мин`;
-  if (minutes) return `${minutes} мин`;
-  return `${s} с`;
+  if (days) return t("{0} д {1} ч", days, hours);
+  if (hours) return t("{0} ч {1} мин", hours, minutes);
+  if (minutes) return t("{0} мин", minutes);
+  return t("{0} с", s);
 }
 
 function sessionWhen(session: SessionRecord) {
   const start = new Date(session.started_at * 1000);
   const end = new Date(session.ended_at * 1000);
-  const day = start.toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
-  const time = (date: Date) => date.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-  return `${day}, ${time(start)}–${session.active ? "сейчас" : time(end)}`;
+  const day = start.toLocaleDateString(formatLocale(), { day: "numeric", month: "short" });
+  const time = (date: Date) => date.toLocaleTimeString(formatLocale(), { hour: "2-digit", minute: "2-digit" });
+  return `${day}, ${time(start)}–${session.active ? t("сейчас") : time(end)}`;
 }
 
 /** Engine process names ("Discord Helper (Renderer)", "firefox") matched to
@@ -77,7 +78,7 @@ function useAppResolver(known: KnownApp[]) {
   return useMemo(() => {
     const match = knownAppMatcher(known);
     return (name: string): { label: string; icon?: string } => {
-      if (name === UNATTRIBUTED) return { label: "Без перехвата" };
+      if (name === UNATTRIBUTED) return { label: t("Без перехвата") };
       const app = match(name);
       return app ? { label: app.name, icon: app.icon } : { label: parentName(name) };
     };
@@ -117,17 +118,17 @@ export default function StatsPanel({ sessions, known, onClear }: { sessions: Ses
     }
     return [...byApp.values()].sort((a, b) => b.rx + b.tx - (a.rx + a.tx));
   }, [shown.map((s) => `${s.id}:${s.rx}:${s.tx}`).join("|"), resolve]);
-  const topApp = apps.find((app) => app.label !== "Без перехвата");
+  const topApp = apps.find((app) => app.label !== t("Без перехвата"));
   const maxApp = Math.max(1, ...apps.map((app) => app.rx + app.tx));
 
   return (
     <section className="statsPage">
       <header className="panelHead">
         <div>
-          <h2>Статистика</h2>
-          <p className="panelIntro">Сеансы туннеля и трафик, который через них прошёл. Хранится только на этом компьютере: время, серверы, объёмы и названия программ.</p>
+          <h2>{t("Статистика")}</h2>
+          <p className="panelIntro">{t("Сеансы туннеля и трафик, который через них прошёл. Хранится только на этом компьютере: время, серверы, объёмы и названия программ.")}</p>
         </div>
-        <div className="segmented" role="group" aria-label="Период">
+        <div className="segmented" role="group" aria-label={t("Период")}>
           {periods.map((item) => (
             <button key={item.id} className={period === item.id ? "on" : ""} onClick={() => setPeriod(item.id)}>{item.label}</button>
           ))}
@@ -135,23 +136,23 @@ export default function StatsPanel({ sessions, known, onClear }: { sessions: Ses
       </header>
 
       <div className="metrics statsTotals">
-        <div className="metric"><span>Скачано</span><strong className="rx">{formatBytes(totals.rx)}</strong></div>
-        <div className="metric"><span>Отправлено</span><strong className="tx">{formatBytes(totals.tx)}</strong></div>
-        <div className="metric"><span>Сеансов</span><strong>{shown.length}</strong></div>
-        <div className="metric"><span>Время в туннеле</span><strong>{formatDuration(totals.time)}</strong></div>
+        <div className="metric"><span>{t("Скачано")}</span><strong className="rx">{formatBytes(totals.rx)}</strong></div>
+        <div className="metric"><span>{t("Отправлено")}</span><strong className="tx">{formatBytes(totals.tx)}</strong></div>
+        <div className="metric"><span>{t("Сеансов")}</span><strong>{shown.length}</strong></div>
+        <div className="metric"><span>{t("Время в туннеле")}</span><strong>{formatDuration(totals.time)}</strong></div>
       </div>
 
       <div className="statsColumns">
         <section className="panel">
           <header className="panelHead">
-            <h3>Приложения</h3>
-            {topApp && <span className="chip">Больше всего: {topApp.label}</span>}
+            <h3>{t("Приложения")}</h3>
+            {topApp && <span className="chip">{t("Больше всего: ")}{topApp.label}</span>}
           </header>
           {apps.length === 0 ? (
-            <p className="emptyHint">За этот период трафика по приложениям нет. Он появится, когда программы пойдут через туннель: с перехватом приложений или через прокси в их настройках.</p>
+            <p className="emptyHint">{t("За этот период трафика по приложениям нет. Он появится, когда программы пойдут через туннель: с перехватом приложений или через прокси в их настройках.")}</p>
           ) : (
             <table className="statsTable">
-              <thead><tr><th>Программа</th><th className="num">Скачано</th><th className="num">Отправлено</th><th className="num">Соединений</th></tr></thead>
+              <thead><tr><th>{t("Программа")}</th><th className="num">{t("Скачано")}</th><th className="num">{t("Отправлено")}</th><th className="num">{t("Соединений")}</th></tr></thead>
               <tbody>
                 {apps.map((app) => (
                   <tr key={app.label} title={[...app.raw].join(", ")}>
@@ -161,7 +162,7 @@ export default function StatsPanel({ sessions, known, onClear }: { sessions: Ses
                         <span className="statsAppText">
                           <strong>{app.label}</strong>
                           <i className="share" style={{ width: `${Math.max(2, ((app.rx + app.tx) / maxApp) * 100)}%` }} aria-hidden="true" />
-                          {app.label === "Без перехвата" && <small>программы с прокси в своих настройках: браузер, curl</small>}
+                          {app.label === t("Без перехвата") && <small>{t("программы с прокси в своих настройках: браузер, curl")}</small>}
                         </span>
                       </span>
                     </td>
@@ -177,21 +178,21 @@ export default function StatsPanel({ sessions, known, onClear }: { sessions: Ses
 
         <section className="panel">
           <header className="panelHead">
-            <h3>Сеансы</h3>
+            <h3>{t("Сеансы")}</h3>
             {sessions.some((session) => !session.active) && (
               confirming ? (
                 <span className="confirmRow">
-                  <span>Удалить историю?</span>
-                  <button className="danger" onClick={() => { setConfirming(false); onClear(); }}><Trash2 size={14} />Удалить</button>
-                  <button className="ghost" onClick={() => setConfirming(false)}>Отмена</button>
+                  <span>{t("Удалить историю?")}</span>
+                  <button className="danger" onClick={() => { setConfirming(false); onClear(); }}><Trash2 size={14} />{t("Удалить")}</button>
+                  <button className="ghost" onClick={() => setConfirming(false)}>{t("Отмена")}</button>
                 </span>
               ) : (
-                <button className="ghost" onClick={() => setConfirming(true)}><Trash2 size={14} />Очистить историю</button>
+                <button className="ghost" onClick={() => setConfirming(true)}><Trash2 size={14} />{t("Очистить историю")}</button>
               )
             )}
           </header>
           {shown.length === 0 ? (
-            <p className="emptyHint">За этот период сеансов не было.</p>
+            <p className="emptyHint">{t("За этот период сеансов не было.")}</p>
           ) : (
             <ol className="sessionList">
               {shown.map((session) => {
@@ -211,7 +212,7 @@ export default function StatsPanel({ sessions, known, onClear }: { sessions: Ses
                   <li key={session.id} className={session.active ? "session live" : "session"}>
                     <div className="sessionTop">
                       <span className="sessionWhen">{sessionWhen(session)}</span>
-                      {session.active && <span className="chip good">идёт сейчас</span>}
+                      {session.active && <span className="chip good">{t("идёт сейчас")}</span>}
                       <span className="sessionDuration">{formatDuration(session.ended_at - session.started_at)}</span>
                     </div>
                     <div className="sessionRoute">

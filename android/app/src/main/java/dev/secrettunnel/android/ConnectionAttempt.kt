@@ -66,7 +66,7 @@ internal object ConnectionAttempt {
             systemExit(context, oldest, marker)?.let { return it }
         }
         return marker?.let {
-            report(it.time, it.stage, "Android не подтвердил причину завершения.", interruptedStart = false)
+            report(it.time, it.stage, tr("Android не подтвердил причину завершения."), interruptedStart = false)
         }
     }
 
@@ -82,7 +82,7 @@ internal object ConnectionAttempt {
         val abi = if (Process.is64Bit()) Build.SUPPORTED_64_BIT_ABIS else Build.SUPPORTED_32_BIT_ABIS
         val message = listOfNotNull(
             date,
-            stage?.let { "Последний этап · $it" },
+            stage?.let { tr("Последний этап · {0}", it) },
             reason,
             "Android ${Build.VERSION.RELEASE} · ${abi.joinToString()}",
         ).joinToString("\n")
@@ -104,18 +104,18 @@ internal object ConnectionAttempt {
         exit?.let {
             val stage = marker?.stageForExit(it.pid, it.timestamp)
             val reason = when (it.reason) {
-                ApplicationExitInfo.REASON_CRASH_NATIVE -> "Сбой в нативной библиотеке"
-                ApplicationExitInfo.REASON_CRASH -> "Ошибка в коде Android"
-                ApplicationExitInfo.REASON_ANR -> "Приложение не ответило Android"
-                ApplicationExitInfo.REASON_LOW_MEMORY -> "Android завершил процесс из-за нехватки памяти"
-                else -> "Причина завершения Android · ${it.reason}"
+                ApplicationExitInfo.REASON_CRASH_NATIVE -> tr("Сбой в нативной библиотеке")
+                ApplicationExitInfo.REASON_CRASH -> tr("Ошибка в коде Android")
+                ApplicationExitInfo.REASON_ANR -> tr("Приложение не ответило Android")
+                ApplicationExitInfo.REASON_LOW_MEMORY -> tr("Android завершил процесс из-за нехватки памяти")
+                else -> tr("Причина завершения Android · {0}", it.reason)
             }
             val detail = it.description?.trim()?.takeIf { text -> text.isNotEmpty() && !text.equals("crash", ignoreCase = true) }
             val summary = listOfNotNull(reason, detail?.take(400)).joinToString("\n")
             report(it.timestamp, stage, summary, interruptedStart = stage != null)
         }
     } catch (error: Exception) {
-        Log.w("SecretTunnelConnection", "История завершений Android недоступна", error)
+        Log.w("SecretTunnelConnection", tr("История завершений Android недоступна"), error)
         null
     }
 }

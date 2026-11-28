@@ -20,20 +20,20 @@ final class ProfileQRController: UIViewController, AVCaptureMetadataOutputObject
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func viewDidLoad() {
         super.viewDidLoad(); view.backgroundColor = .black
-        status.text = "Наведите камеру на QR-код Secret Tunnel"; status.textColor = .white; status.numberOfLines = 0
+        status.text = tr("Наведите камеру на QR-код Secret Tunnel"); status.textColor = .white; status.numberOfLines = 0
         status.textAlignment = .center; status.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(status)
         NSLayoutConstraint.activate([status.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20), status.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20), status.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24)])
         AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
             guard let self else { return }
             if allowed { self.queue.async { self.configure() } }
-            else { DispatchQueue.main.async { self.status.text = "Разрешите доступ к камере в настройках iOS. Также можно вставить ссылку или открыть файл." } }
+            else { DispatchQueue.main.async { self.status.text = tr("Разрешите доступ к камере в настройках iOS. Также можно вставить ссылку или открыть файл.") } }
         }
     }
     private func configure() {
         lifecycleLock.lock(); let allowed = active; lifecycleLock.unlock()
         guard allowed else { return }
         guard let device = AVCaptureDevice.default(for: .video), let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else {
-            DispatchQueue.main.async { self.status.text = "Камера недоступна. Вставьте ссылку или откройте файл." }; return
+            DispatchQueue.main.async { self.status.text = tr("Камера недоступна. Вставьте ссылку или откройте файл.") }; return
         }
         session.beginConfiguration(); session.addInput(input)
         let output = AVCaptureMetadataOutput()
@@ -54,7 +54,7 @@ final class ProfileQRController: UIViewController, AVCaptureMetadataOutputObject
     }
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard !accepted, let value = metadataObjects.compactMap({ ($0 as? AVMetadataMachineReadableCodeObject)?.stringValue }).first else { return }
-        guard value.hasPrefix("secrettunnel://import#stp1."), value.utf8.count <= 1_048_576 else { status.text = "Это не QR-код переноса Secret Tunnel"; return }
+        guard value.hasPrefix("secrettunnel://import#stp1."), value.utf8.count <= 1_048_576 else { status.text = tr("Это не QR-код переноса Secret Tunnel"); return }
         accepted = true; queue.async { self.session.stopRunning() }; scanned(value)
     }
 }

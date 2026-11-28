@@ -42,7 +42,7 @@ internal object MobileUpdates {
                 if (previous.release == release) previous.copy(error = "")
                 else Status(release = release)
             } catch (error: Exception) {
-                previous.copy(error = error.message ?: "Не удалось проверить обновления")
+                previous.copy(error = error.message ?: tr("Не удалось проверить обновления"))
             }
         }
     }
@@ -58,9 +58,9 @@ internal object MobileUpdates {
             val apk = apkFile(app)
             val temporary = File(apk.parentFile, "download.part.apk")
             status = try {
-                require(compareReleaseVersions(release.version, installedVersion(app)) > 0) { "Новая версия не найдена" }
+                require(compareReleaseVersions(release.version, installedVersion(app)) > 0) { tr("Новая версия не найдена") }
                 check(apk.parentFile?.let { it.isDirectory || it.mkdirs() } == true) {
-                    "Не удалось создать каталог для обновления"
+                    tr("Не удалось создать каталог для обновления")
                 }
                 apk.delete()
                 ReleaseUpdates.download(release, asset, temporary, port) { received ->
@@ -69,7 +69,7 @@ internal object MobileUpdates {
                 stageVerifiedApk(app, temporary, release.version)
                 Status(release, ready = true)
             } catch (error: Exception) {
-                Status(release, error = error.message ?: "Не удалось скачать обновление")
+                Status(release, error = error.message ?: tr("Не удалось скачать обновление"))
             } finally {
                 temporary.delete()
             }
@@ -78,10 +78,10 @@ internal object MobileUpdates {
 
     fun install(activity: Activity, requestCode: Int) {
         val release = status.release ?: return
-        check(status.ready) { "Сначала скачайте обновление" }
+        check(status.ready) { tr("Сначала скачайте обновление") }
         val apk = apkFile(activity)
         if (!apk.isFile) {
-            status = Status(release, error = "Файл обновления удалён. Скачайте его заново.")
+            status = Status(release, error = tr("Файл обновления удалён. Скачайте его заново."))
             return
         }
         if (!activity.packageManager.canRequestPackageInstalls()) {
@@ -96,7 +96,7 @@ internal object MobileUpdates {
         verifyApk(context, source, version)
         val destination = apkFile(context)
         check(destination.parentFile?.let { it.isDirectory || it.mkdirs() } == true &&
-            source.renameTo(destination)) { "Не удалось сохранить обновление" }
+            source.renameTo(destination)) { tr("Не удалось сохранить обновление") }
     }
 
     fun openInstaller(activity: Activity, requestCode: Int) {
@@ -121,13 +121,13 @@ internal object MobileUpdates {
         val flag = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
         val current = manager.getPackageInfo(context.packageName, flag)
         val candidate = manager.getPackageArchiveInfo(apk.absolutePath, flag)
-            ?: error("Android не распознал скачанный APK")
+            ?: error(tr("Android не распознал скачанный APK"))
         require(candidate.packageName == context.packageName && candidate.versionName == version) {
-            "Скачанный APK предназначен для другой сборки или версии Secret Tunnel"
+            tr("Скачанный APK предназначен для другой сборки или версии Secret Tunnel")
         }
         fun versionCode(info: PackageInfo) =
             if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
-        require(versionCode(candidate) > versionCode(current)) { "Код скачанной версии не новее установленного" }
+        require(versionCode(candidate) > versionCode(current)) { tr("Код скачанной версии не новее установленного") }
         fun signers(info: PackageInfo) = if (Build.VERSION.SDK_INT >= 28)
             info.signingInfo?.apkContentsSigners.orEmpty().toSet() else info.signatures.orEmpty().toSet()
         val currentSigners = signers(current)
@@ -135,7 +135,7 @@ internal object MobileUpdates {
         require(currentSigners.isNotEmpty() && (currentSigners == candidateSigners ||
             (Build.VERSION.SDK_INT >= 28 && currentSigners.size == 1 && candidateSigners.size == 1 &&
                 candidate.signingInfo?.signingCertificateHistory?.contains(currentSigners.single()) == true))) {
-            "Подпись APK отличается от подписи установленного приложения"
+            tr("Подпись APK отличается от подписи установленного приложения")
         }
     }
 }

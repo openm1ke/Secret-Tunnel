@@ -1,11 +1,13 @@
 package dev.secrettunnel.android
 
-enum class ChartRange(val label: String, val milliseconds: Long?) {
+enum class ChartRange(private val labelKey: String, val milliseconds: Long?) {
     SECOND("1 с", 1000),
     FIVE_SECONDS("5 с", 5000),
     THIRTY_SECONDS("30 с", 30000),
     MINUTE("1 мин", 60000),
-    SESSION("Весь сеанс", null),
+    SESSION("Весь сеанс", null);
+
+    val label: String get() = tr(labelKey)
 }
 
 data class TrafficPoint(val timeMillis: Long, val rate: TrafficMeter.Rate)

@@ -26,68 +26,68 @@ internal object TransportDiagnostics {
         val down = client.optLong("udp_window_bytes") / 1024
         val up = agent.optLong("bytes") / 1024
         if (down <= 0 || up <= 0) return null
-        return "UDP · ↓ $down КиБ / ${client.optInt("udp_window_slots")} сл. · ↑ $up КиБ / ${agent.optInt("slots")} сл."
+        return tr("UDP · ↓ {0} КиБ / {1} сл. · ↑ {2} КиБ / {3} сл.", down, client.optInt("udp_window_slots"), up, agent.optInt("slots"))
     }
 
     fun describe(metrics: JSONObject): String = buildString {
-        append("Снимок ${timestamp(metrics.optLong("at_ms"))} · ↓ ${metrics.optLong("bytes_rx")} Б · ↑ ${metrics.optLong("bytes_tx")} Б\n")
-        if(metrics.optLong("process_id")>0)append("Процесс #${metrics.optLong("process_id")}\n")
+        append(tr("Снимок {0} · ↓ {1} Б · ↑ {2} Б\n", timestamp(metrics.optLong("at_ms")), metrics.optLong("bytes_rx"), metrics.optLong("bytes_tx")))
+        if(metrics.optLong("process_id")>0)append(tr("Процесс #{0}\n", metrics.optLong("process_id")))
         metrics.optJSONObject("heartbeat")?.let { h ->
-            fun value(key:String)=if(h.has(key)&&!h.isNull(key))"${h.optLong(key)} мс" else "н/д"
-            append("Весь туннель: RTT ${value("last_rtt_ms")} · сглаженный ${value("smoothed_rtt_ms")} · джиттер ${value("jitter_ms")}\n")
-            append("Heartbeat: ${h.optLong("acknowledged")} / ${h.optLong("probes")} · p95 ${value("p95_rtt_ms")} (${h.optInt("recent_samples")} замеров) · тайм-аутов ${h.optLong("timeouts")}\n")
-            if(!h.isNull("pending_ms"))append("Ожидаем подтверждение ${h.optLong("pending_ms")} мс / ${h.optLong("timeout_ms")} мс\n")
+            fun value(key:String)=if(h.has(key)&&!h.isNull(key))tr("{0} мс", h.optLong(key)) else tr("н/д")
+            append(tr("Весь туннель: RTT {0} · сглаженный {1} · джиттер {2}\n", value("last_rtt_ms"), value("smoothed_rtt_ms"), value("jitter_ms")))
+            append(tr("Heartbeat: {0} / {1} · p95 {2} ({3} замеров) · тайм-аутов {4}\n", h.optLong("acknowledged"), h.optLong("probes"), value("p95_rtt_ms"), h.optInt("recent_samples"), h.optLong("timeouts")))
+            if(!h.isNull("pending_ms"))append(tr("Ожидаем подтверждение {0} мс / {1} мс\n", h.optLong("pending_ms"), h.optLong("timeout_ms")))
         }
-        append("UDP: окно потока ${metrics.optLong("udp_flow_credit")} · бюджет байтов ${metrics.optLong("udp_byte_budget")} · слоты ${metrics.optLong("udp_slots")}\n")
+        append(tr("UDP: окно потока {0} · бюджет байтов {1} · слоты {2}\n", metrics.optLong("udp_flow_credit"), metrics.optLong("udp_byte_budget"), metrics.optLong("udp_slots")))
         val attempts = metrics.optLong("udp_tx_attempts")
         val window = metrics.optLong("udp_window_bytes")
         if (window > 0) {
-            append("Размер окна UDP: ${window / 1024} КиБ · ${metrics.optLong("udp_window_slots")} слотов\n")
+            append(tr("Размер окна UDP: {0} КиБ · {1} слотов\n", window / 1024, metrics.optLong("udp_window_slots")))
         }
         if (attempts > 0 || metrics.optLong("udp_flow_credit") == 0L) {
-            append("UDP: попыток отправки $attempts · принято ${metrics.optLong("udp_received")}\n")
-            append("В окне UDP не хватило: байтов ${metrics.optLong("udp_credit_bytes")} · слотов ${metrics.optLong("udp_credit_slots")} · обоих ${metrics.optLong("udp_credit_both")}\n")
+            append(tr("UDP: попыток отправки {0} · принято {1}\n", attempts, metrics.optLong("udp_received")))
+            append(tr("В окне UDP не хватило: байтов {0} · слотов {1} · обоих {2}\n", metrics.optLong("udp_credit_bytes"), metrics.optLong("udp_credit_slots"), metrics.optLong("udp_credit_both")))
         }
-        append("UDP: ошибки DNS ${metrics.optLong("udp_dns")} · отправка ${metrics.optLong("udp_send")} · приём ${metrics.optLong("udp_receive")}\n")
+        append(tr("UDP: ошибки DNS {0} · отправка {1} · приём {2}\n", metrics.optLong("udp_dns"), metrics.optLong("udp_send"), metrics.optLong("udp_receive")))
         for ((key, label) in listOf(
-            "tx_queue" to "Ожидание отправки",
-            "rx_hold" to "Приём до освобождения буфера",
-            "write_batch" to "Запись в транспорт",
-            "udp_credit_return" to "До следующего кредита UDP",
-            "udp_credit_stall" to "От нехватки окна до следующего кредита UDP",
+            "tx_queue" to tr("Ожидание отправки"),
+            "rx_hold" to tr("Приём до освобождения буфера"),
+            "write_batch" to tr("Запись в транспорт"),
+            "udp_credit_return" to tr("До следующего кредита UDP"),
+            "udp_credit_stall" to tr("От нехватки окна до следующего кредита UDP"),
         )) {
             val delay = metrics.optJSONObject(key) ?: continue
-            append("$label: макс. ${delay.optLong("max_ms")} мс · ≥100 мс: ${delay.optLong("over_100_ms")}\n")
+            append(tr("{0}: макс. {1} мс · ≥100 мс: {2}\n", label, delay.optLong("max_ms"), delay.optLong("over_100_ms")))
         }
-        append("UDP: эпизодов нехватки окна ${metrics.optLong("udp_credit_stall_events")}\n")
+        append(tr("UDP: эпизодов нехватки окна {0}\n", metrics.optLong("udp_credit_stall_events")))
         if(metrics.has("short_udp_queue")){
-            append("Планировщик: коротких UDP ${metrics.optLong("short_udp_packets_written")} · остальных DATA ${metrics.optLong("bulk_data_packets_written")}\n")
-            append("Очередь до SSH: короткий UDP макс. ${metrics.optJSONObject("short_udp_queue")?.optLong("max_ms")} мс · остальные DATA ${metrics.optJSONObject("bulk_data_queue")?.optLong("max_ms")} мс\n")
-            append("Пик пакета записи: ${metrics.optLong("write_batch_peak_bytes")} Б\n")
+            append(tr("Планировщик: коротких UDP {0} · остальных DATA {1}\n", metrics.optLong("short_udp_packets_written"), metrics.optLong("bulk_data_packets_written")))
+            append(tr("Очередь до SSH: короткий UDP макс. {0} мс · остальные DATA {1} мс\n", metrics.optJSONObject("short_udp_queue")?.optLong("max_ms"), metrics.optJSONObject("bulk_data_queue")?.optLong("max_ms")))
+            append(tr("Пик пакета записи: {0} Б\n", metrics.optLong("write_batch_peak_bytes")))
         }
         metrics.optJSONObject("tcp_flight")?.let { flight ->
             if(!flight.isNull("configured_bytes")){
-                append("Приоритет UDP: ${if(flight.optBoolean("interactive"))"активен" else "ожидание"}\n")
-                append("TCP: учтено ${flight.optLong("held_bytes")} Б · бюджет ${flight.optLong("effective_bytes")} Б · при UDP ${flight.optLong("configured_bytes")} Б")
-                if (flight.has("path_delay_ms") && !flight.isNull("path_delay_ms")) append(" · путь ${flight.optLong("path_delay_ms")} мс")
+                append(tr("Приоритет UDP: {0}\n", if(flight.optBoolean("interactive"))tr("активен") else tr("ожидание")))
+                append(tr("TCP: учтено {0} Б · бюджет {1} Б · при UDP {2} Б", flight.optLong("held_bytes"), flight.optLong("effective_bytes"), flight.optLong("configured_bytes")))
+                if (flight.has("path_delay_ms") && !flight.isNull("path_delay_ms")) append(tr(" · путь {0} мс", flight.optLong("path_delay_ms")))
                 append("\n")
-            }else append("Приоритет UDP: без дополнительного бюджета TCP\n")
+            }else append(tr("Приоритет UDP: без дополнительного бюджета TCP\n"))
         }
         metrics.optJSONObject("last_udp_credit_stall")?.let {
-            append("${timestamp(it.optLong("at_ms"))} · поток #${it.optLong("flow")} · следующий кредит через ${it.optLong("elapsed_ms")} мс · ${it.optLong("credit_bytes")} Б / ${it.optLong("credit_slots")} сл.\n")
+            append(tr("{0} · поток #{1} · следующий кредит через {2} мс · {3} Б / {4} сл.\n", timestamp(it.optLong("at_ms")), it.optLong("flow"), it.optLong("elapsed_ms"), it.optLong("credit_bytes"), it.optLong("credit_slots")))
         }
-        append("TCP: ошибок ${metrics.optLong("tcp_errors")} · медленных открытий / этапов ${metrics.optLong("tcp_slow")}\n")
-        append("TCP: отмен ${metrics.optLong("tcp_cancelled")} · проверок IPv6 ${metrics.optLong("tcp_probes")} · недоступно ${metrics.optLong("tcp_probe_errors")}\n")
+        append(tr("TCP: ошибок {0} · медленных открытий / этапов {1}\n", metrics.optLong("tcp_errors"), metrics.optLong("tcp_slow")))
+        append(tr("TCP: отмен {0} · проверок IPv6 {1} · недоступно {2}\n", metrics.optLong("tcp_cancelled"), metrics.optLong("tcp_probes"), metrics.optLong("tcp_probe_errors")))
         metrics.optJSONObject("last_tcp")?.let { event ->
             val stage = when (event.optString("stage")) {
-                "open" -> "открытие потока"
+                "open" -> tr("открытие потока")
                 "dns" -> "DNS"
-                "connect" -> "подключение к цели"
-                "relay" -> "передача"
+                "connect" -> tr("подключение к цели")
+                "relay" -> tr("передача")
                 else -> event.optString("stage")
             }
-            val outcome = event.optString("outcome").let { if (it == "slow") "медленно" else it }
-            append("${timestamp(event.optLong("at_ms"))} · поток #${event.optLong("flow")} · $stage · ${event.optLong("elapsed_ms")} мс · $outcome\n")
+            val outcome = event.optString("outcome").let { if (it == "slow") tr("медленно") else it }
+            append(tr("{0} · поток #{1} · {2} · {3} мс · {4}\n", timestamp(event.optLong("at_ms")), event.optLong("flow"), stage, event.optLong("elapsed_ms"), outcome))
         }
     }
 
@@ -96,18 +96,18 @@ internal object TransportDiagnostics {
         val cipher = when(tuning?.optString("cipher")) {
             "aes128_gcm" -> "AES-128-GCM"
             "chacha20_poly1305" -> "ChaCha20-Poly1305"
-            else -> "Авто"
+            else -> tr("Авто")
         }
-        append("SSH: выбор шифра $cipher · очередь ${tuning?.optInt("channel_buffer_messages")} сообщений · окно ${(tuning?.optLong("channel_receive_window_bytes")?:0)/1024} КиБ\n")
+        append(tr("SSH: выбор шифра {0} · очередь {1} сообщений · окно {2} КиБ\n", cipher, tuning?.optInt("channel_buffer_messages"), (tuning?.optLong("channel_receive_window_bytes")?:0)/1024))
         val tcp = ssh.optJSONObject("outer_tcp") ?: return@buildString
-        append("TCP до первого сервера · ${timestamp(tcp.optLong("at_ms"))}\n")
-        if(!tcp.optBoolean("connected")) { append("Соединение закрыто\n"); return@buildString }
+        append(tr("TCP до первого сервера · {0}\n", timestamp(tcp.optLong("at_ms"))))
+        if(!tcp.optBoolean("connected")) { append(tr("Соединение закрыто\n")); return@buildString }
         fun metric(key:String, scale:Double=1.0):String = if(tcp.has(key)&&!tcp.isNull(key))
-            String.format(Locale.ROOT,"%.1f",tcp.optDouble(key)/scale) else "н/д"
-        append("RTT ${metric("rtt_us",1000.0)} мс · RTO ${metric("rto_us",1000.0)} мс\n")
-        append("Не отправлено ${metric("not_sent_bytes")} Б · очередь сокета ${metric("send_queue_bytes")} Б\n")
-        append("Повторно отправлено ${metric("bytes_retransmitted")} Б · сегментов ${metric("total_retransmits")}\n")
-        append("Без подтверждения: ${metric("unacked_packets")} сегм. / ${metric("bytes_in_flight")} Б · источник ${tcp.optString("source")}\n")
+            String.format(Locale.ROOT,"%.1f",tcp.optDouble(key)/scale) else tr("н/д")
+        append(tr("RTT {0} мс · RTO {1} мс\n", metric("rtt_us",1000.0), metric("rto_us",1000.0)))
+        append(tr("Не отправлено {0} Б · очередь сокета {1} Б\n", metric("not_sent_bytes"), metric("send_queue_bytes")))
+        append(tr("Повторно отправлено {0} Б · сегментов {1}\n", metric("bytes_retransmitted"), metric("total_retransmits")))
+        append(tr("Без подтверждения: {0} сегм. / {1} Б · источник {2}\n", metric("unacked_packets"), metric("bytes_in_flight"), tcp.optString("source")))
     }
 
     class Sampler {
